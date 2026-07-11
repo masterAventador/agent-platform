@@ -89,6 +89,28 @@ Deep Agents 用于需要自主规划、Todo、Skill、文件工作区、沙箱�
 
 Temporal 负责宏观业务流程的可靠执行；复杂 AI 子流程继续由 LangGraph/Deep Agents 执行。简单的单次大模型调用可以直接作为 Temporal Activity。
 
+### 2.6 分阶段认证体系
+
+平台认证不能只支持 OIDC。第一阶段同时建设本地账号体系，提供：
+
+- 邮箱注册；
+- 邮箱密码登录；
+- 登录会话、退出登录和当前用户查询；
+- 后续接入 OIDC / 企业 SSO 的扩展边界。
+
+内测早期注册只校验邮箱格式和唯一性，不发送验证码或验证链接，用户提交后即可注册成功。该行为必须由明确配置项控制，例如 `REQUIRE_EMAIL_VERIFICATION=false`，不能作为无法关闭的永久逻辑。
+
+即使暂不验证邮箱归属，也必须满足：
+
+- 邮箱去除首尾空格并进行大小写规范化，数据库使用大小写不敏感唯一约束；
+- 密码只保存经过 Argon2id 等现代密码哈希算法处理的结果，不保存明文或可逆密文；
+- 注册和登录接口具备输入校验、限流和防账户枚举策略；
+- 登录成功后使用可撤销、可过期的服务端 Session；
+- 未验证邮箱不能作为企业归属或可信身份依据，不能仅凭邮箱域名自动加入企业；
+- 将来启用邮箱验证、找回密码或绑定 OIDC 身份时，必须验证邮箱控制权，防止账号被冒领或错误合并。
+
+公网正式开放前必须重新评估免验证策略，并具备启用邮箱验证、反滥用和账号恢复的能力。
+
 ## 3. 总体架构
 
 ```text
@@ -367,7 +389,9 @@ OpenTelemetry 不能替代审计日志。审计必须记录：
 ## 11. 安全基线
 
 - 所有数据按 `tenant_id` 隔离；
-- 认证优先接入成熟的 OIDC/企业 SSO，不自行实现密码体系；
+- 第一阶段支持本地邮箱注册和邮箱密码登录，后续并行支持 OIDC / 企业 SSO；
+- 本地密码必须使用现代密码哈希，Session 必须可撤销、可过期并通过安全 Cookie 传输；
+- 免邮箱验证仅是可配置的早期策略，未验证邮箱不得用于证明企业归属或自动合并身份；
 - RBAC 控制员工、Session、知识库和工具访问；
 - 高风险工具必须人工审批；
 - Deep Agents 的 Shell、文件和代码执行必须位于沙箱；
@@ -405,157 +429,11 @@ ai-agent-platform/
 
 具体创建项目时再根据 Python 工程规则和测试策略细化包结构，不在当前架构阶段锁定所有实现细节。
 
-## 13. Web 客户端架构
+## 13. 前端协议边界
 
-### 13.1 技术栈
+Web、Tauri 和未来 App 共同依赖本文第 5 节定义的平台 API 与统一事件，不直接访问 LangGraph、Deep Agents、RAGFlow 或 Temporal。
 
-Web 客户端采用 React 技术体系：
-
-- React + TypeScript：核心开发语言和 UI 框架；
-- Vite：开发和构建工具；
-- Ant Design：企业后台、表格、表单、弹窗、树和上传等通用组件；
-- Ant Design X：对话、输入、附件、任务步骤、引用和文件产物等 AI 组件；
-- React Router：客户端路由；
-- TanStack Query：服务端数据、缓存和请求状态；
-- Zustand：少量跨页面客户端状态；
-- Zod：前端运行时数据校验；
-- ECharts：统计与观测图表；
-- Vitest + Testing Library：单元和组件测试；
-- Playwright：项目 E2E 自动化测试。
-
-平台是登录后的企业应用，第一阶段不需要服务端渲染和 SEO，因此使用 Vite，不引入 Next.js。若未来建设公开官网，可独立使用适合 SEO 的技术栈。
-
-### 13.2 组件边界
-
-组件体系统一使用 Ant Design + Ant Design X，不同时引入 shadcn/ui、MUI 等第二套基础设计系统。
-
-Ant Design X 必须封装在平台自己的业务组件之后，例如：
-
-```text
-EmployeeConversation
-RunProgress
-ApprovalCard
-ArtifactCard
-KnowledgeSources
-SkillExecution
-```
-
-业务页面只依赖平台事件和业务组件，不直接绑定 Ant Design X 的请求协议或底层事件格式，确保以后可以替换 UI 组件库而不影响后端协议。
-
-`ThoughtChain` 等组件只展示任务计划、节点状态、工具调用和进度，不展示模型隐藏推理过程。
-
-### 13.3 页面结构
-
-```text
-平台
-├── 工作台
-├── 数字员工
-│   ├── 员工广场
-│   ├── 我的员工
-│   └── 员工详情
-├── 任务中心
-│   ├── 执行中
-│   ├── 等待审批
-│   └── 历史任务
-├── 知识库
-├── Skill 中心
-├── 工具与 MCP
-├── 审批中心
-├── 文件与产物
-├── 运行观测
-├── 审计日志
-└── 企业管理
-    ├── 成员
-    ├── 角色权限
-    ├── 模型配置
-    └── 配额
-```
-
-不同类型的数字员工对用户保持一致的产品体验。页面根据员工的输入 Schema 和能力声明动态显示聊天输入、业务表单、文件上传、审批卡片、任务进度和结果产物，不展示 `runtime_type` 等内部实现信息。
-
-### 13.4 实时通信
-
-前端通过统一平台 API 使用 SSE 接收任务事件，必要时再使用 WebSocket 支持高频双向交互。前端只消费本文第 5.2 节定义的平台事件，不直接消费 LangGraph 或 Deep Agents 原始事件。
-
-### 13.5 测试策略
-
-- 业务函数、状态和数据转换使用 Vitest；
-- React 组件交互使用 Testing Library；
-- 核心用户流程使用 Playwright E2E，并将测试代码纳入仓库和 CI；
-- `agent-browser` 仅作为 AI 操作浏览器的“手脚”，用于开发过程中的探索、临时交互和辅助排查，不作为项目 E2E 测试框架，也不计入自动化测试覆盖。
-
-### 13.6 前端工程结构
-
-Web 和 Tauri 桌面端共用一个前端工程，按业务功能组织代码，并通过 `PlatformAdapter` 隔离平台差异：
-
-```text
-frontend/
-├── src/
-│   ├── app/
-│   │   ├── providers/             # Router、Query、主题、权限等全局 Provider
-│   │   ├── router/                # 路由定义和路由守卫
-│   │   ├── layouts/               # 平台、认证和全屏任务布局
-│   │   └── App.tsx
-│   ├── features/
-│   │   ├── auth/                  # 登录、OIDC 回调和当前用户
-│   │   ├── dashboard/             # 工作台
-│   │   ├── employees/             # 数字员工广场、详情和配置
-│   │   ├── runs/                  # 任务创建、执行、历史和实时事件
-│   │   ├── approvals/             # 审批中心
-│   │   ├── knowledge/             # 知识库
-│   │   ├── skills/                # Skill 中心
-│   │   ├── tools/                 # 工具与 MCP
-│   │   ├── artifacts/             # 文件与任务产物
-│   │   ├── observability/         # 运行观测
-│   │   ├── audit/                 # 审计日志
-│   │   └── organization/          # 成员、角色、模型和配额
-│   ├── components/
-│   │   ├── ui/                    # 对 Ant Design 的通用薄封装
-│   │   └── ai/                    # 对 Ant Design X 的平台业务封装
-│   ├── api/
-│   │   ├── client.ts              # Axios 实例、认证和统一错误转换
-│   │   ├── streaming.ts           # SSE / Fetch Stream 客户端
-│   │   └── query-client.ts        # TanStack Query 全局配置
-│   ├── platform/
-│   │   ├── types.ts               # PlatformAdapter 接口和公共类型
-│   │   ├── index.ts               # 唯一的运行环境选择入口
-│   │   ├── web.ts                 # 浏览器实现
-│   │   └── tauri.ts               # Tauri 实现
-│   ├── stores/                    # 仅存放跨功能的纯客户端状态
-│   ├── schemas/                   # 真正跨功能复用的 Zod Schema
-│   ├── hooks/                     # 真正跨功能复用的 Hook
-│   ├── styles/                    # 主题 Token、全局样式和CSS变量
-│   ├── assets/                    # 静态资源
-│   ├── test/                      # 测试环境和公共测试工具
-│   └── main.tsx
-├── e2e/                           # Playwright E2E 测试
-├── public/                        # 原样复制的公共静态资源
-├── src-tauri/
-│   ├── capabilities/              # Tauri 最小权限配置
-│   ├── src/
-│   │   ├── commands/              # 文件、凭据、更新等原生命令
-│   │   ├── lib.rs
-│   │   └── main.rs
-│   ├── icons/
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── index.html
-├── package.json
-├── playwright.config.ts
-├── tsconfig.json
-└── vite.config.ts
-```
-
-目录约束：
-
-- `features/` 内部就近维护页面、组件、Query、Mutation、Schema 和测试，禁止把所有业务代码堆进全局目录；
-- 只有被多个功能真实复用的内容才能进入顶层 `components/`、`hooks/`、`schemas/` 和 `stores/`；
-- `components/ai/` 负责把统一平台事件转换为 Ant Design X 展示，不允许业务页面直接消费 Deep Agents 或 LangGraph 原始事件；
-- `api/client.ts` 负责普通 REST 请求，`api/streaming.ts` 负责 SSE/流式数据，两者职责不得混用；
-- TanStack Query 管理服务端数据，Zustand 只管理纯客户端状态，禁止复制同一份服务端数据；
-- `platform/index.ts` 是运行环境判断的唯一入口，业务代码不得直接导入 `@tauri-apps/*` 或访问 `window.__TAURI__`；
-- `src-tauri/` 只承载桌面原生能力、权限和打包配置，不放置平台业务逻辑；
-- 单元和组件测试优先与被测文件就近放置，`e2e/` 只存放跨页面的 Playwright 用户流程。
+前端的技术栈、分层、工程结构、状态边界、实时事件、`PlatformAdapter`、安全、测试和发布策略，以 [`docs/frontend-architecture.md`](frontend-architecture.md) 为唯一权威说明。
 
 ## 14. 分阶段实施
 
@@ -604,7 +482,8 @@ frontend/
 
 以下内容在进入详细设计和 PoC 后决定：
 
-- OIDC/SSO 产品；
+- 本地账号的邮件服务、邮箱验证和密码找回方案；
+- OIDC / SSO 产品及与本地账号的绑定策略；
 - Redis 任务队列实现；
 - 沙箱后端；
 - OpenTelemetry 的具体存储与展示组件；
