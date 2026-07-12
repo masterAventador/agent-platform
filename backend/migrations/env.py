@@ -6,6 +6,10 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.auth import (
+    AuthSessionRecord,
+    UserRecord,
+)
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
 
 config = context.config
@@ -15,6 +19,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 _tenant_record = TenantRecord
+_auth_records = (UserRecord, AuthSessionRecord)
 
 
 def run_migrations_offline() -> None:

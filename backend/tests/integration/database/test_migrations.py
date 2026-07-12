@@ -19,12 +19,36 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(tenants)").fetchall()
         }
+        user_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        session_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
+        }
     assert columns == {"id", "name", "slug", "created_at"}
+    assert user_columns == {
+        "id",
+        "email",
+        "password_hash",
+        "email_verified",
+        "created_at",
+    }
+    assert session_columns == {
+        "id",
+        "user_id",
+        "token_digest",
+        "created_at",
+        "expires_at",
+        "revoked_at",
+    }
 
     command.downgrade(config, "base")
 
     with sqlite3.connect(database_path) as connection:
-        tenant_table = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tenants'"
-        ).fetchone()
-    assert tenant_table is None
+        platform_tables = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name IN ('tenants', 'users', 'auth_sessions')"
+        ).fetchall()
+    assert platform_tables == []

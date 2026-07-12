@@ -1,0 +1,39 @@
+from typing import Protocol
+from uuid import UUID
+
+from agent_platform.platform.auth.entities import AuthSession
+from agent_platform.platform.users.entities import User
+
+
+class PasswordHasher(Protocol):
+    def hash(self, password: str) -> str: ...
+
+    def verify(self, password: str, password_hash: str) -> bool: ...
+
+    def verify_unknown(self, password: str) -> None: ...
+
+
+class UserRepository(Protocol):
+    async def add(self, user: User) -> None: ...
+
+    async def get_by_email(self, email: str) -> User | None: ...
+
+    async def get_by_id(self, user_id: UUID) -> User | None: ...
+
+
+class AuthSessionRepository(Protocol):
+    async def add(self, session: AuthSession) -> None: ...
+
+    async def get_by_token_digest(self, token_digest: str) -> AuthSession | None: ...
+
+    async def revoke(self, session: AuthSession) -> None: ...
+
+
+class AuthRateLimiter(Protocol):
+    async def ensure_allowed(self, *, scope: str, key: str) -> None: ...
+
+
+class SessionTokenManager(Protocol):
+    def issue(self) -> tuple[str, str]: ...
+
+    def digest(self, raw_token: str) -> str: ...
