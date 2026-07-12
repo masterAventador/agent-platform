@@ -33,3 +33,12 @@
   padding: 32px;
   background: #f5f7fa;
 }
+
+.app-topbar {
+  margin-bottom: 24px;
+}
+
+.app-route-loading {
+  min-height: 100vh;
+  background: #f5f7fa;
+}

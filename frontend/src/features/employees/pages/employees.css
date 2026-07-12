@@ -1,0 +1,45 @@
+.employee-list,
+.employee-empty,
+.employee-form-card,
+.employee-detail-card {
+  margin-top: 24px;
+}
+
+.employee-empty {
+  padding: 48px 0;
+}
+
+.employee-loading {
+  padding: 80px 0;
+}
+
+.employee-editor {
+  max-width: 880px;
+}
+
+.employee-form-card {
+  max-width: 760px;
+}
+
+.employee-form-error {
+  margin-bottom: 20px;
+}
+
+.employee-model-row {
+  display: flex;
+}
+
+.employee-model-row > .ant-form-item {
+  flex: 1;
+}
+
+.employee-detail-card {
+  max-width: 960px;
+}
+
+.employee-prompt {
+  padding: 16px;
+  white-space: pre-wrap;
+  background: #f5f7fa;
+  border-radius: 8px;
+}

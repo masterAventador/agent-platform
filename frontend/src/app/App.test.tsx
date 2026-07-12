@@ -14,6 +14,14 @@ vi.mock('../features/auth/api/auth', () => ({
     id: '00000000-0000-0000-0000-000000000001',
     email: 'owner@example.com',
     email_verified: false,
+    workspaces: [
+      {
+        id: '00000000-0000-0000-0000-000000000010',
+        name: 'owner 的工作区',
+        slug: 'workspace-owner',
+        role: 'owner',
+      },
+    ],
   }),
   logout: vi.fn().mockResolvedValue(undefined),
 }))

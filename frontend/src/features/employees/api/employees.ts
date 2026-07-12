@@ -1,0 +1,89 @@
+import { apiClient } from '../../../api/client'
+
+
+export type WorkMode = 'autonomous' | 'workflow' | 'hybrid'
+export type EmployeeStatus = 'draft' | 'published'
+
+export interface EmployeeCapabilities {
+  conversation: boolean
+  scheduled_tasks: boolean
+  file_upload: boolean
+}
+
+export interface EmployeeDefinition {
+  name: string
+  avatar_url?: string | null
+  role_description: string
+  visibility: 'private' | 'tenant'
+  work_mode: WorkMode
+  system_prompt: string
+  model: { provider: string; name: string }
+  input_schema: Record<string, unknown>
+  output_schema: Record<string, unknown>
+  capabilities: EmployeeCapabilities
+  skill_ids: string[]
+  tool_ids: string[]
+  knowledge_base_ids: string[]
+  approval_policy: Record<string, unknown>
+  release_strategy: Record<string, unknown>
+}
+
+export interface Employee {
+  id: string
+  tenant_id: string
+  name: string
+  status: EmployeeStatus
+  published_version: number | null
+  definition: EmployeeDefinition
+}
+
+function tenantHeaders(tenantId: string) {
+  return { 'X-Tenant-ID': tenantId }
+}
+
+export async function listEmployees(tenantId: string): Promise<Employee[]> {
+  const response = await apiClient.get<Employee[]>('/employees', {
+    headers: tenantHeaders(tenantId),
+  })
+  return response.data
+}
+
+export async function getEmployee(tenantId: string, employeeId: string): Promise<Employee> {
+  const response = await apiClient.get<Employee>(`/employees/${employeeId}`, {
+    headers: tenantHeaders(tenantId),
+  })
+  return response.data
+}
+
+export async function createEmployee(
+  tenantId: string,
+  definition: EmployeeDefinition,
+): Promise<Employee> {
+  const response = await apiClient.post<Employee>('/employees', definition, {
+    headers: tenantHeaders(tenantId),
+  })
+  return response.data
+}
+
+export async function updateEmployee(
+  tenantId: string,
+  employeeId: string,
+  definition: EmployeeDefinition,
+): Promise<Employee> {
+  const response = await apiClient.put<Employee>(`/employees/${employeeId}`, definition, {
+    headers: tenantHeaders(tenantId),
+  })
+  return response.data
+}
+
+export async function publishEmployee(
+  tenantId: string,
+  employeeId: string,
+): Promise<Employee> {
+  const response = await apiClient.post<Employee>(
+    `/employees/${employeeId}/publish`,
+    undefined,
+    { headers: tenantHeaders(tenantId) },
+  )
+  return response.data
+}

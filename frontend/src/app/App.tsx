@@ -1,29 +1,53 @@
 import { Button, Flex, Layout, Space, Typography } from 'antd'
+import { lazy, Suspense } from 'react'
 import { Link, Route, Routes, useNavigate } from 'react-router-dom'
 
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
-import { LoginPage } from '../features/auth/pages/LoginPage'
-import { RegisterPage } from '../features/auth/pages/RegisterPage'
 import { BackendStatus } from '../features/system/components/BackendStatus'
 import './app.css'
 
 const { Content, Sider } = Layout
+const LoginPage = lazy(() =>
+  import('../features/auth/pages/LoginPage').then((module) => ({ default: module.LoginPage })),
+)
+const RegisterPage = lazy(() =>
+  import('../features/auth/pages/RegisterPage').then((module) => ({
+    default: module.RegisterPage,
+  })),
+)
+const EmployeesPage = lazy(() =>
+  import('../features/employees/pages/EmployeesPage').then((module) => ({
+    default: module.EmployeesPage,
+  })),
+)
+const EmployeeEditorPage = lazy(() =>
+  import('../features/employees/pages/EmployeeEditorPage').then((module) => ({
+    default: module.EmployeeEditorPage,
+  })),
+)
+const EmployeeDetailPage = lazy(() =>
+  import('../features/employees/pages/EmployeeDetailPage').then((module) => ({
+    default: module.EmployeeDetailPage,
+  })),
+)
 
 export function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/register" element={<RegisterPage />} />
-      <Route
-        path="*"
-        element={
-          <ProtectedRoute>
-            <PlatformShell />
-          </ProtectedRoute>
-        }
-      />
-    </Routes>
+    <Suspense fallback={<RouteLoading />}>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route
+          path="*"
+          element={
+            <ProtectedRoute>
+              <PlatformShell />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </Suspense>
   )
 }
 
@@ -52,18 +76,41 @@ function PlatformShell() {
         </nav>
       </Sider>
       <Content className="app-content">
-        <Flex align="center" justify="space-between">
-          <div>
-            <Typography.Title level={2}>工作台</Typography.Title>
-            <Typography.Text type="secondary">{currentUser.data?.email}</Typography.Text>
-          </div>
-          <Button loading={logout.isPending} onClick={signOut}>退出登录</Button>
+        <Flex className="app-topbar" align="center" justify="flex-end" gap={16}>
+          <Typography.Text type="secondary">{currentUser.data?.email}</Typography.Text>
+          <Button loading={logout.isPending} onClick={signOut}>
+            退出登录
+          </Button>
         </Flex>
-        <Typography.Paragraph type="secondary">
-          平台基础工程已就绪，后续功能将按前后端纵向切片逐步接入。
-        </Typography.Paragraph>
-        <BackendStatus />
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/employees" element={<EmployeesPage />} />
+          <Route path="/employees/new" element={<EmployeeEditorPage />} />
+          <Route path="/employees/:employeeId" element={<EmployeeDetailPage />} />
+          <Route path="/employees/:employeeId/edit" element={<EmployeeEditorPage />} />
+          <Route path="/runs" element={<PlaceholderPage title="任务中心" />} />
+        </Routes>
       </Content>
     </Layout>
   )
+}
+
+function Dashboard() {
+  return (
+    <section>
+      <Typography.Title level={2}>工作台</Typography.Title>
+      <Typography.Paragraph type="secondary">
+        平台基础工程已就绪，后续功能将按前后端纵向切片逐步接入。
+      </Typography.Paragraph>
+      <BackendStatus />
+    </section>
+  )
+}
+
+function PlaceholderPage({ title }: { title: string }) {
+  return <Typography.Title level={2}>{title}</Typography.Title>
+}
+
+function RouteLoading() {
+  return <div className="app-route-loading" aria-label="正在加载页面" />
 }
