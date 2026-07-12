@@ -72,3 +72,35 @@ async def test_langgraph_runtime_executes_checkpointed_fixed_workflow() -> None:
     config = {"configurable": {"thread_id": request.thread_id}}
     checkpoints = [snapshot async for snapshot in graph.aget_state_history(config)]
     assert len(checkpoints) >= 3
+
+
+@pytest.mark.asyncio
+async def test_langgraph_factory_failure_returns_sanitized_failed_state_and_event() -> None:
+    secret = "checkpoint-password-must-not-leak"
+
+    def failing_factory(request: RuntimeStartRequest) -> LangGraphAgentGraph:
+        del request
+        raise RuntimeError(secret)
+
+    runtime = LangGraphRuntime(graph_factory=failing_factory)
+    request = RuntimeStartRequest(
+        run_id=uuid4(),
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        employee_id=uuid4(),
+        thread_id="langgraph-factory-failure",
+        employee_definition={},
+        input_data={},
+    )
+
+    state = await runtime.start(request)
+    history = await runtime.get_history(request.run_id)
+
+    assert state.status.value == "failed"
+    assert state.data == {"error_code": "langgraph_execution_failed"}
+    assert [event.type for event in history] == [
+        EventType.RUN_STARTED,
+        EventType.RUN_FAILED,
+    ]
+    assert secret not in repr(state)
+    assert secret not in repr(history)

@@ -42,15 +42,34 @@ class PlatformContainerContractTest(unittest.TestCase):
 
     def test_compose_has_migration_gate_profiles_health_and_loopback_ports(self) -> None:
         compose = self.read("infra/compose/platform.yml")
-        for service in ("migrate", "api", "worker", "frontend"):
+        for service in (
+            "migrate",
+            "api",
+            "dispatcher",
+            "worker",
+            "sandbox-controller",
+            "sandbox-janitor",
+            "frontend",
+        ):
             self.assertRegex(compose, rf"(?m)^  {service}:$")
         self.assertRegex(compose, r'command:\s*\["alembic",\s*"upgrade",\s*"head"\]')
         self.assertRegex(compose, r"condition:\s*service_completed_successfully")
         self.assertRegex(compose, r"profiles:\s*\[\"worker\"\]")
         self.assertIn("python", compose)
         self.assertIn("agent_platform.workers.main", compose)
-        self.assertIn("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", compose)
+        self.assertIn("agent_platform.workers.dispatcher_main", compose)
+        self.assertIn('AGENT_PLATFORM_DISPATCHER_REPLICAS: "1"', compose)
+        self.assertRegex(
+            compose,
+            r"test:\s*\[\"CMD\",\s*\"test\",\s*\"-f\",\s*"
+            r"\"/tmp/agent-platform-dispatcher-ready\"\]",
+        )
+        self.assertNotIn("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", compose)
         self.assertIn('AGENT_PLATFORM_WORKER_REPLICAS: "1"', compose)
+        self.assertIn('AGENT_PLATFORM_SANDBOX_JANITOR_REPLICAS: "1"', compose)
+        self.assertIn("/tmp/agent-platform-worker-ready", compose)
+        self.assertIn("/tmp/agent-platform-sandbox-janitor-ready", compose)
+        self.assertEqual(compose.count(":/var/run/docker.sock"), 1)
         self.assertRegex(compose, r'127\.0\.0\.1:\$\{PLATFORM_API_PORT:-8000\}:8000')
         self.assertRegex(compose, r'127\.0\.0\.1:\$\{PLATFORM_WEB_PORT:-8080\}:8080')
         self.assertGreaterEqual(compose.count("healthcheck:"), 2)
@@ -77,7 +96,7 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("CHANGE_ME", env_example)
         self.assertNotRegex(env_example, r"(?m)^ANTHROPIC_API_KEY=\S+")
         self.assertNotRegex(env_example, r"(?m)^OPENAI_API_KEY=\S+")
-        self.assertRegex(env_example, r"(?m)^AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY=$")
+        self.assertNotIn("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", env_example)
 
 
 if __name__ == "__main__":

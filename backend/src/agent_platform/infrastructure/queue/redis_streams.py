@@ -31,10 +31,13 @@ class RedisRunQueue:
         *,
         stream_name: str = "agent-platform:runs",
         group_name: str = "agent-platform-workers",
+        pending_min_idle_ms: int = 1_000,
     ) -> None:
         self._redis = redis
         self._stream_name = stream_name
         self._group_name = group_name
+        self._pending_min_idle_ms = pending_min_idle_ms
+        self._claim_cursor = "0-0"
 
     async def setup(self) -> None:
         try:
@@ -67,6 +70,25 @@ class RedisRunQueue:
         consumer_name: str,
         block_ms: int = 5_000,
     ) -> RunQueueDelivery | None:
+        while True:
+            claimed = await self._redis.xautoclaim(
+                self._stream_name,
+                self._group_name,
+                consumer_name,
+                self._pending_min_idle_ms,
+                self._claim_cursor,
+                count=1,
+            )
+            self._claim_cursor = str(claimed[0])
+            claimed_entries = cast(
+                list[tuple[str, dict[str, str]]],
+                claimed[1],
+            )
+            if claimed_entries:
+                return self._delivery(claimed_entries[0])
+            if self._claim_cursor == "0-0":
+                break
+
         raw_streams = await self._redis.xreadgroup(
             self._group_name,
             consumer_name,
@@ -81,7 +103,11 @@ class RedisRunQueue:
         if not streams:
             return None
         _, entries = streams[0]
-        delivery_id, fields = entries[0]
+        return self._delivery(entries[0])
+
+    @staticmethod
+    def _delivery(entry: tuple[str, dict[str, str]]) -> RunQueueDelivery:
+        delivery_id, fields = entry
         return RunQueueDelivery(
             delivery_id=str(delivery_id),
             message=RunQueueMessage.model_validate(

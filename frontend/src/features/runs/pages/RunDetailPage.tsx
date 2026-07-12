@@ -5,7 +5,7 @@ import { useParams } from 'react-router-dom'
 
 import { useActiveWorkspaceId } from '../../employees/api/queries'
 import { runKeys, useControlRun, useRun, useRunEvents } from '../api/queries'
-import { formatRunInput, runStatusLabels } from './status'
+import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
 import './runs.css'
 
 
@@ -102,14 +102,20 @@ export function RunDetailPage() {
       <Card className="run-events" title="执行动态">
         {events.data?.length ? (
           <div className="run-event-list">
-            {events.data.map((event) => (
-              <div className="run-event-item" key={event.event_id}>
-              <Space orientation="vertical" size={2}>
-                <Typography.Text strong>{eventLabel(event.type, event.payload)}</Typography.Text>
-                <Typography.Text type="secondary">序号 {event.sequence}</Typography.Text>
-              </Space>
-              </div>
-            ))}
+            {events.data.map((event) => {
+              const presentation = formatRunEvent(event.type, event.payload)
+              return (
+                <div className="run-event-item" key={event.event_id}>
+                  <Space orientation="vertical" size={2}>
+                    <Typography.Text strong>{presentation.label}</Typography.Text>
+                    {presentation.content && (
+                      <Typography.Text>{presentation.content}</Typography.Text>
+                    )}
+                    <Typography.Text type="secondary">序号 {event.sequence}</Typography.Text>
+                  </Space>
+                </div>
+              )
+            })}
           </div>
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待任务开始执行" />
@@ -117,17 +123,4 @@ export function RunDetailPage() {
       </Card>
     </section>
   )
-}
-
-function eventLabel(type: string, payload: Record<string, unknown>) {
-  if (payload.action === 'cancel') return '请求取消任务'
-  const labels: Record<string, string> = {
-    'run.started': '任务开始执行',
-    'run.progress': '任务取得新进展',
-    'run.completed': '任务执行完成',
-    'run.failed': '任务执行失败',
-    'run.cancelled': '任务已取消',
-    'approval.required': '任务等待审批',
-  }
-  return labels[type] ?? type
 }

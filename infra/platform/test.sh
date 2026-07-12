@@ -37,11 +37,14 @@ start() {
     return 2
   fi
   config
-  compose up --detach migrate api frontend
+  compose up --detach migrate api dispatcher frontend
 }
 
 health() {
   bash "${ROOT_DIR}/infra/platform/health.sh"
+  compose ps --status running --services dispatcher | rg --quiet '^dispatcher$'
+  compose exec --no-TTY dispatcher test -f /tmp/agent-platform-dispatcher-ready
+  printf 'dispatcher healthy: ready file present\n'
 }
 
 case "${MODE}" in

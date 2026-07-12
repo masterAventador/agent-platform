@@ -3,6 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
@@ -74,7 +75,13 @@ def test_official_deep_agent_factory_passes_skill_paths_to_public_parameter() ->
 @pytest.mark.asyncio
 async def test_official_deep_agent_factory_runs_with_injected_model() -> None:
     model = ToolBindingFakeChatModel(messages=iter(["官方 Deep Agents 调用成功"]))
-    runtime = DeepAgentRuntime(agent_factory=DeepAgentFactory(model=model, tools=[]))
+    runtime = DeepAgentRuntime(
+        agent_factory=DeepAgentFactory(
+            model=model,
+            tools=[],
+            backend=SandboxBackendProtocol(),
+        )
+    )
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),

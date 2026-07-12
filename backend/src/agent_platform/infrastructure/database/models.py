@@ -1,4 +1,5 @@
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.audit import ToolAuditRecord
 from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
@@ -13,6 +14,7 @@ from agent_platform.infrastructure.database.repositories.runs import (
     RunEventRecord,
     RunRecord,
 )
+from agent_platform.infrastructure.database.repositories.sandbox import SandboxLeaseRecord
 from agent_platform.infrastructure.database.repositories.skills import (
     SkillRecord,
     SkillVersionRecord,
@@ -38,6 +40,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     SkillVersionRecord,
     McpServerRecord,
     ToolRecord,
+    SandboxLeaseRecord,
+    ToolAuditRecord,
 )
 
 

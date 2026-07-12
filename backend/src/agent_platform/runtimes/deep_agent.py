@@ -5,6 +5,7 @@ from uuid import UUID
 
 from deepagents import create_deep_agent
 from deepagents.backends import BackendProtocol
+from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
@@ -25,6 +26,24 @@ class RuntimeRunNotFound(Exception):
 
 class RuntimeOperationNotSupported(Exception):
     """当前自主员工没有可处理的对应操作。"""
+
+
+class InvalidDeepAgentBackend(TypeError):
+    """供应商对象不符合 Deep Agents 公开 Sandbox Backend 契约。"""
+
+
+class DeepAgentSandboxBackendValidator:
+    """供 SandboxManager 在环境进入运行时前执行的官方协议校验器。"""
+
+    @staticmethod
+    def validate(backend: object) -> None:
+        if not isinstance(backend, SandboxBackendProtocol):
+            raise InvalidDeepAgentBackend(type(backend).__name__)
+
+
+def require_sandbox_backend(backend: object) -> SandboxBackendProtocol:
+    DeepAgentSandboxBackendValidator.validate(backend)
+    return cast(SandboxBackendProtocol, backend)
 
 
 class AgentGraph(Protocol):
@@ -82,8 +101,6 @@ class DeepAgentRuntime:
         self._history: dict[UUID, list[PlatformEvent]] = {}
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
-        graph = self._agent_factory(request)
-        self._graphs[request.run_id] = graph
         self._requests[request.run_id] = request
         self._history[request.run_id] = []
         self._append_event(
@@ -93,6 +110,8 @@ class DeepAgentRuntime:
         )
 
         try:
+            graph = self._agent_factory(request)
+            self._graphs[request.run_id] = graph
             output = await self._invoke(graph, request, request.input_data)
         except Exception as error:
             self._append_event(

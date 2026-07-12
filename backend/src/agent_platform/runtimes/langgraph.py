@@ -44,8 +44,6 @@ class LangGraphRuntime:
         self._history: dict[UUID, list[PlatformEvent]] = {}
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
-        graph = self._graph_factory(request)
-        self._graphs[request.run_id] = graph
         self._requests[request.run_id] = request
         self._history[request.run_id] = []
         self._append_event(
@@ -56,6 +54,8 @@ class LangGraphRuntime:
         output: JsonValue = None
 
         try:
+            graph = self._graph_factory(request)
+            self._graphs[request.run_id] = graph
             async for update in graph.astream(
                 {"input": request.input_data},
                 {"configurable": {"thread_id": request.thread_id}},

@@ -15,6 +15,7 @@ from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import mcp_router, tool_router
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -38,6 +39,7 @@ def create_app(
     skill_storage: SkillStorage | None = None,
     telemetry: Telemetry | None = None,
 ) -> FastAPI:
+    initialize_database_metadata()
     app_settings = settings or AppSettings()
     app_telemetry = telemetry or configure_telemetry(app_settings)
     app_telemetry.instrument_libraries()

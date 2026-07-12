@@ -56,6 +56,29 @@ services:
       start_period: 10s
     restart: "no"
 
+  dispatcher:
+    build: *backend-build
+    image: agent-platform-backend:local
+    command: ["python", "-m", "agent_platform.workers.dispatcher_main"]
+    environment:
+      <<: *backend-environment
+      AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-dispatcher
+      AGENT_PLATFORM_DISPATCHER_REPLICAS: "1"
+      AGENT_PLATFORM_DISPATCHER_BATCH_SIZE: ${DISPATCHER_BATCH_SIZE:-100}
+      AGENT_PLATFORM_DISPATCHER_IDLE_BACKOFF_SECONDS: ${DISPATCHER_IDLE_BACKOFF_SECONDS:-0.5}
+    extra_hosts: *host-gateway
+    networks: [core]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/agent-platform-dispatcher-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
   worker:
     profiles: ["worker"]
     build: *backend-build
@@ -64,15 +87,89 @@ services:
     environment:
       <<: *backend-environment
       AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-worker
-      AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY: ${AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY:-}
       AGENT_PLATFORM_WORKER_REPLICAS: "1"
+      AGENT_PLATFORM_QUEUE_PENDING_MIN_IDLE_MS: ${AGENT_PLATFORM_QUEUE_PENDING_MIN_IDLE_MS:-1000}
+      AGENT_PLATFORM_WORKER_RETRY_BACKOFF_SECONDS: ${AGENT_PLATFORM_WORKER_RETRY_BACKOFF_SECONDS:-1.0}
+      AGENT_PLATFORM_SANDBOX_PROVIDER: local-controller
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_URL: http://sandbox-controller:8090
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_SECRET: ${SANDBOX_CONTROLLER_BEARER_SECRET:?set SANDBOX_CONTROLLER_BEARER_SECRET}
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS: ${SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS:-130}
+      AGENT_PLATFORM_SANDBOX_TTL_SECONDS: ${SANDBOX_TTL_SECONDS:-3600}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     extra_hosts: *host-gateway
-    networks: [core]
+    networks: [core, sandbox-control]
     depends_on:
       migrate:
         condition: service_completed_successfully
+      sandbox-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/agent-platform-worker-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  sandbox-janitor:
+    profiles: ["worker"]
+    build: *backend-build
+    image: agent-platform-backend:local
+    command: ["python", "-m", "agent_platform.workers.sandbox_janitor"]
+    environment:
+      <<: *backend-environment
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_URL: http://sandbox-controller:8090
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_SECRET: ${SANDBOX_CONTROLLER_BEARER_SECRET:?set SANDBOX_CONTROLLER_BEARER_SECRET}
+      AGENT_PLATFORM_SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS: ${SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS:-130}
+      AGENT_PLATFORM_SANDBOX_JANITOR_REPLICAS: "1"
+      AGENT_PLATFORM_SANDBOX_JANITOR_INTERVAL_SECONDS: ${SANDBOX_JANITOR_INTERVAL_SECONDS:-30}
+      AGENT_PLATFORM_SANDBOX_JANITOR_BATCH_SIZE: ${SANDBOX_JANITOR_BATCH_SIZE:-100}
+    networks: [core, sandbox-control]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sandbox-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/agent-platform-sandbox-janitor-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  sandbox-controller:
+    profiles: ["worker"]
+    build: *backend-build
+    image: agent-platform-backend:local
+    command:
+      - uvicorn
+      - agent_platform.sandbox.controller.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8090"
+    environment:
+      SANDBOX_CONTROLLER_BEARER_SECRET: ${SANDBOX_CONTROLLER_BEARER_SECRET:?set SANDBOX_CONTROLLER_BEARER_SECRET}
+      SANDBOX_CONTROLLER_IMAGE: ${SANDBOX_CONTROLLER_IMAGE:-python:3.12.13-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b}
+    volumes:
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+    # Controller 是唯一 Docker 特权边界；仅它以 root 访问 socket，Worker 保持非 root。
+    user: "0:0"
+    networks: [sandbox-control]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8090/health/ready', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     restart: "no"
 
   frontend:
@@ -97,3 +194,5 @@ networks:
   core:
     external: true
     name: agent-platform_default
+  sandbox-control:
+    internal: true

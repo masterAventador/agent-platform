@@ -79,7 +79,7 @@ export PLATFORM_ENV_FILE="$PWD/infra/compose/.env.platform"
 docker compose --env-file infra/compose/.env -f infra/compose/core.yml up -d
 ```
 
-平台使用同一个后端镜像运行一次性 Alembic migration、API 和 Worker。API 只会在 migration 成功后启动，避免多个 API 实例同时执行迁移；Web 使用非 root NGINX 在 `8080` 提供静态资源，并将 `/api/` 反代到 API 服务。基础镜像固定 tag 与多架构 manifest digest：Python `3.12.13-slim-bookworm`、uv `0.11.28`、Node `24.13.0-alpine3.23` 与 NGINX unprivileged `1.28.0-alpine3.21`，均已在本机验证为 Linux arm64。版本与平台依据来自 [Python 官方镜像](https://hub.docker.com/_/python)、[Node 官方镜像](https://hub.docker.com/_/node)、[uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/) 和 [NGINX 官方 unprivileged 镜像](https://hub.docker.com/r/nginxinc/nginx-unprivileged)。
+平台使用同一个后端镜像运行一次性 Alembic migration、API、outbox Dispatcher 和 Worker。API 与 Dispatcher 只会在 migration 成功后启动；API 创建任务时把 Run 与命令原子写入 PostgreSQL，独立 Dispatcher 随后自动把待投递命令送入 Redis Stream。Dispatcher 当前强制单副本，并用 ready 文件提供容器健康语义；PostgreSQL 查询同时使用 `FOR UPDATE SKIP LOCKED`，但在引入带租约的 durable claim 前不得扩为多副本。Web 使用非 root NGINX 在 `8080` 提供静态资源，并将 `/api/` 反代到 API 服务。基础镜像固定 tag 与多架构 manifest digest：Python `3.12.13-slim-bookworm`、uv `0.11.28`、Node `24.13.0-alpine3.23` 与 NGINX unprivileged `1.28.0-alpine3.21`，均已在本机验证为 Linux arm64。版本与平台依据来自 [Python 官方镜像](https://hub.docker.com/_/python)、[Node 官方镜像](https://hub.docker.com/_/node)、[uv 官方 Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/) 和 [NGINX 官方 unprivileged 镜像](https://hub.docker.com/r/nginxinc/nginx-unprivileged)。
 
 按阶段验收：
 
@@ -91,14 +91,43 @@ bash infra/platform/test.sh start
 bash infra/platform/test.sh health
 ```
 
-Worker 默认不启动。当前入口要求 `AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY=module:attribute` 指向真实 adapter factory，并会在 concrete runtime resolver、模型、workspace/sandbox、Skill 或 Tool Gateway 装配缺失时 fail-fast；仓库尚无可填写的 concrete adapter，Compose 不伪造路径或 Worker 健康状态。只有这些装配已就绪，并且真实模型提供商密钥已从宿主机环境导出后，才显式启用 profile；示例文件不会伪造模型密钥：
+Worker 默认不启动。仓库内置正式 runtime adapter bundle，直接组合 SQLAlchemy 沙盒租约、Local Controller、Deep Agents 公共 Sandbox 校验、Tool 审计和本机凭据解析，不再要求用户提供 `module:attribute` 外部工厂。workflow/hybrid 只有命中平台已注册的 workflow ID+version 才能运行，空注册表明确失败关闭，不会伪造固定流程。启动 Worker 前必须配置 controller bearer secret；真实模型提供商密钥只注入 Worker，示例文件不会伪造模型密钥：
 
 ```bash
 export ANTHROPIC_API_KEY='replace-with-local-secret'
-export AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY='your_package.bootstrap:create_runtime_adapters'
 docker compose --env-file "$PLATFORM_ENV_FILE" \
-  -f infra/compose/platform.yml --profile worker up -d worker
+  -f infra/compose/platform.yml --profile worker up -d sandbox-controller sandbox-janitor worker
 ```
+
+本机凭据文件默认关闭。只有显式配置 `AGENT_PLATFORM_LOCAL_CREDENTIALS_FILE` 时，才允许同时显式配置 `AGENT_PLATFORM_LOCAL_CREDENTIALS_REPOSITORY_ROOT`；宿主机直接运行不能假设仓库位于 `/app`。未来在 Compose 中启用凭据文件时，必须将 repository root 明确设为容器内代码根 `/app`，并把凭据文件只读挂载到 `/app` 之外；不得依赖应用默认值。
+
+`sandbox-controller` 与 Worker 使用同一个 opt-in profile，但它是独立进程，也是唯一允许挂载 Docker socket 的本机特权边界。Worker 保持非 root、没有 socket、不能调用 Docker CLI，只能通过不发布宿主端口的内部网络和共享 bearer secret 调用 controller。controller 强制固定 digest 的 Linux arm64 镜像、非 root sandbox、只读根文件系统、独立 `/workspace`/`/skills` tmpfs、断网、移除全部 capability、`no-new-privileges` 和 CPU/内存/PID 限制。该实现仅用于受控的本机开发与 CI，不是公网多租户生产隔离基线；生产环境后续使用 E2B 等独立供应商。
+
+Worker 以小于租约 TTL 的间隔为所有活跃 run 续租；续租失败会把 run 稳定标记为失败并停止安全执行。单副本 `sandbox-janitor` 原子 claim 所有到期的非终态租约（`PROVISIONING`、`ACTIVE`、`DELETING`、`ERROR`）：有 `sandbox_id` 时执行幂等 provider delete，无 ID 时直接稳定标记为 `EXPIRED`。PostgreSQL 行锁和 `SKIP LOCKED` 防止续租、正常关闭与清理发生 lost update。Worker 收到 SIGTERM 后会 best-effort 释放全部运行环境并关闭 controller HTTP client，某个清理失败不会阻断其余环境释放。
+
+当前仍有一项明确留给 T22 的本机 Controller 恢复限制：如果 Controller 已按 lease label 成功创建容器，但 Worker 在把 `sandbox_id` 和 `ACTIVE` 状态写回 PostgreSQL 前崩溃，数据库只剩无 ID 的 `PROVISIONING` 租约。当前 Janitor 会让该租约到期并标记 `EXPIRED`，但不会扫描 Docker label 发现并删除数据库未知的容器；因此不能声称这一崩溃窗口已完全回收。T22 必须增加按受信 lease label 的发现、身份核对和幂等回收。
+
+需要区分宿主机直接运行测试和 Compose 容器两层路径。宿主机 Python Docker SDK 不会自动读取 CLI 的当前 context，因此 opt-in 测试脚本会按下面方式设置 `DOCKER_HOST`：
+
+```bash
+export DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+```
+
+Compose bind mount 的 source 由 Docker daemon 解析。Colima daemon 位于 Linux VM 内，因此 `DOCKER_SOCKET_PATH` 应保持 `/var/run/docker.sock`，不能填宿主机 `~/.colima/.../docker.sock`；只有 daemon 侧 socket 确实位于其他路径时才覆盖该值。
+
+真实安全回归会创建并最终删除一个临时 sandbox，覆盖 8 MiB/空文件/二进制上传下载、Skill 路径、命令超时、断网、资源硬化与无残留；默认 pytest 不执行该破坏性用例：
+
+```bash
+bash infra/platform/test-local-sandbox.sh
+```
+
+真实运行时浏览器回归使用隔离数据库、Redis DB 和专用进程 ready 标记，完整经过注册登录、员工发布、Dispatcher、Redis、Worker、Deep Agents 公共 API、本机 arm64 Docker sandbox、事件持久化和 UI 输出，并在退出时只清理本轮资源：
+
+```bash
+bash infra/platform/test-runtime-e2e.sh
+```
+
+该回归中的 `GenericFakeChatModel` 只存在于 `backend/tests/fixtures/runtime_worker.py`，通过公开模型注入 seam 避免调用付费模型；生产代码没有 Fake 开关。它验证的是真实平台运行链路与沙盒集成，不是 OpenAI、Anthropic 等外部模型 provider 的凭据、网络或 API 兼容性验收。
 
 容器部署的正式 Playwright smoke 不会自行启动 dev server，目标地址通过环境变量传入；它以真实浏览器完成注册登录、同源 `/api` 调用和 SPA 深链接刷新：
 

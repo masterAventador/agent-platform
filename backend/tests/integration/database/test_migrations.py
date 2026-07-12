@@ -54,6 +54,15 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         tool_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(tools)").fetchall()
         }
+        sandbox_lease_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(sandbox_leases)").fetchall()
+        }
+        tool_audit_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(tool_audit_events)").fetchall()
+        }
+        tool_audit_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(tool_audit_events)"
+        ).fetchall()
     assert columns == {"id", "name", "slug", "created_at"}
     assert user_columns == {
         "id",
@@ -81,6 +90,36 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert {"id", "skill_id", "version", "digest", "storage_key"} <= skill_version_columns
     assert {"id", "tenant_id", "name", "transport", "secret_reference"} <= mcp_server_columns
     assert {"id", "tenant_id", "server_id", "name", "input_schema", "risk_level"} <= tool_columns
+    assert {
+        "id",
+        "tenant_id",
+        "user_id",
+        "run_id",
+        "thread_id",
+        "provider",
+        "sandbox_id",
+        "status",
+        "expires_at",
+        "last_error",
+    } <= sandbox_lease_columns
+    assert {
+        "id",
+        "event_type",
+        "occurred_at",
+        "tenant_id",
+        "run_id",
+        "employee_id",
+        "user_id",
+        "tool_id",
+        "tool_name",
+        "risk",
+        "argument_keys",
+        "argument_sha256",
+        "argument_size_bytes",
+        "reason",
+        "succeeded",
+    } == tool_audit_columns
+    assert tool_audit_foreign_keys == []
 
     command.downgrade(config, "base")
 
@@ -91,7 +130,8 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "'tenants', 'users', 'auth_sessions', 'tenant_memberships', "
             "'employees', 'employee_versions'"
             ", 'runs', 'run_events', 'run_commands', 'knowledge_bases', "
-            "'skills', 'skill_versions', 'mcp_servers', 'tools'"
+            "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
+            "'tool_audit_events'"
             ")"
         ).fetchall()
     assert platform_tables == []

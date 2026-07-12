@@ -1,3 +1,6 @@
+from typing import Literal
+
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +14,10 @@ class AppSettings(BaseSettings):
         "@127.0.0.1:5432/agent_platform"
     )
     redis_url: str = "redis://:agent-platform-local-redis@127.0.0.1:6379/0"
+    run_queue_stream_name: str = "agent-platform:runs"
+    run_queue_group_name: str = "agent-platform-workers"
+    queue_pending_min_idle_ms: int = Field(default=1_000, ge=1)
+    worker_retry_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"
@@ -18,6 +25,15 @@ class AppSettings(BaseSettings):
     minio_secret_key: str = "agent-platform-local-minio"
     minio_secure: bool = False
     skill_storage_bucket: str = "agent-platform-skills"
+    local_credentials_file: str | None = None
+    local_credentials_repository_root: str | None = None
+    sandbox_provider: Literal["local-controller"] = "local-controller"
+    sandbox_controller_url: str = "http://sandbox-controller:8090"
+    sandbox_controller_secret: SecretStr = SecretStr("")
+    sandbox_controller_request_timeout_seconds: float = Field(default=130.0, ge=125, le=3_600)
+    sandbox_ttl_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    sandbox_janitor_interval_seconds: float = Field(default=30.0, ge=1, le=3_600)
+    sandbox_janitor_batch_size: int = Field(default=100, ge=1, le=1_000)
     otel_enabled: bool = False
     otel_service_name: str = "agent-platform-api"
     otel_environment: str = "development"

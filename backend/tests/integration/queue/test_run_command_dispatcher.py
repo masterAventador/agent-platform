@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
@@ -46,3 +47,11 @@ async def test_dispatcher_sends_pending_command_and_marks_it_dispatched(factory)
     assert queue.messages[0].command_id == command.id
     async with factory() as session:
         assert await SqlAlchemyRunCommandRepository(session).pending() == []
+
+
+def test_pending_query_uses_skip_locked_on_postgres() -> None:
+    query = SqlAlchemyRunCommandRepository.pending_query(limit=10)
+
+    compiled = str(query.compile(dialect=postgresql.dialect()))
+
+    assert "FOR UPDATE SKIP LOCKED" in compiled

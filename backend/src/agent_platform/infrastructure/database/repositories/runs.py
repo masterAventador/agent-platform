@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import Select
 
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
@@ -260,13 +261,18 @@ class SqlAlchemyRunCommandRepository:
         await self._session.flush()
 
     async def pending(self, *, limit: int = 100) -> list[RunCommand]:
-        result = await self._session.execute(
+        result = await self._session.execute(self.pending_query(limit=limit))
+        return [self._to_entity(record) for record in result.scalars()]
+
+    @staticmethod
+    def pending_query(*, limit: int) -> Select[tuple[RunCommandRecord]]:
+        return (
             select(RunCommandRecord)
             .where(RunCommandRecord.dispatched_at.is_(None))
             .order_by(RunCommandRecord.created_at)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
-        return [self._to_entity(record) for record in result.scalars()]
 
     async def mark_dispatched(self, command_id: UUID) -> None:
         record = await self._session.get(RunCommandRecord, command_id)

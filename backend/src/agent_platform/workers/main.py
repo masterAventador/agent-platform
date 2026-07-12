@@ -1,10 +1,13 @@
 import asyncio
-import importlib
+import logging
 import os
 import signal
 import socket
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -13,6 +16,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
@@ -24,18 +28,20 @@ from agent_platform.infrastructure.object_storage.minio import (
 )
 from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue
 from agent_platform.platform.tool_gateway import (
-    CredentialResolver,
-    ToolAuditSink,
     ToolDefinition,
     ToolGateway,
 )
 from agent_platform.platform.tools.entities import McpServer
-from agent_platform.runtimes.base import RunWorkspaceFactory
 from agent_platform.workers.run_worker import RuntimeResolver, RunWorker
+from agent_platform.workers.runtime_adapters import (
+    BuiltinRuntimeAdapters,
+    RuntimeAdapterConfigurationError,
+    create_runtime_adapters,
+)
 from agent_platform.workers.runtime_composition import (
     ComposedRuntimeResolver,
+    PlatformModelResolver,
     PlatformRuntimeSelector,
-    RuntimeFactory,
 )
 
 
@@ -43,20 +49,16 @@ class WorkerConfigurationError(Exception):
     """Worker 缺少安全运行所需的明确装配。"""
 
 
+logger = logging.getLogger(__name__)
+WORKER_READY_FILE = Path("/tmp/agent-platform-worker-ready")
+
+
 class WorkerLoop(Protocol):
     async def run_once(self, *, block_ms: int = 5_000) -> bool: ...
 
+    async def renew_active_runtimes(self) -> None: ...
 
-class RuntimeAdapters(Protocol):
-    workspace_factory: RunWorkspaceFactory
-    autonomous_factory: RuntimeFactory
-    workflow_factory: RuntimeFactory
-    credential_resolver: CredentialResolver
-    audit_sink: ToolAuditSink
-
-
-class RuntimeAdapterFactory(Protocol):
-    def __call__(self, settings: AppSettings) -> RuntimeAdapters: ...
+    async def aclose(self) -> None: ...
 
 
 @dataclass(slots=True)
@@ -74,15 +76,63 @@ async def serve(
     stop_event: asyncio.Event,
     health: WorkerHealth,
     block_ms: int = 5_000,
+    retry_backoff_seconds: float = 1.0,
+    heartbeat_interval_seconds: float | None = None,
 ) -> None:
     health.live = True
     health.ready = True
+    heartbeat_task = (
+        asyncio.create_task(
+            _heartbeat_loop(
+                worker=worker,
+                stop_event=stop_event,
+                interval_seconds=heartbeat_interval_seconds,
+            )
+        )
+        if heartbeat_interval_seconds is not None
+        else None
+    )
     try:
         while not stop_event.is_set():
-            await worker.run_once(block_ms=block_ms)
+            try:
+                await worker.run_once(block_ms=block_ms)
+            except Exception as error:
+                logger.error(
+                    "worker_delivery_processing_failed",
+                    extra={"error_type": type(error).__name__},
+                )
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=retry_backoff_seconds,
+                    )
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+        await worker.aclose()
         health.ready = False
         health.live = False
+
+
+async def _heartbeat_loop(
+    *, worker: WorkerLoop, stop_event: asyncio.Event, interval_seconds: float
+) -> None:
+    while not stop_event.is_set():
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        if stop_event.is_set():
+            return
+        try:
+            await worker.renew_active_runtimes()
+        except Exception as error:
+            logger.error(
+                "worker_sandbox_heartbeat_failed",
+                extra={"error_type": type(error).__name__},
+            )
+            stop_event.set()
+            return
 
 
 async def run_worker_service(
@@ -93,36 +143,72 @@ async def run_worker_service(
     health: WorkerHealth | None = None,
     consumer_name: str | None = None,
     replicas: int = 1,
+    model_resolver: PlatformModelResolver | None = None,
+    ready_file: Path = WORKER_READY_FILE,
 ) -> None:
     if replicas != 1:
         raise WorkerConfigurationError(
             "only a single replica is supported until the runtime registry is durable"
         )
 
+    initialize_database_metadata()
     app_settings = settings or AppSettings()
     engine = create_async_engine(app_settings.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     redis = Redis.from_url(app_settings.redis_url, decode_responses=True)
-    queue = RedisRunQueue(redis)
+    queue = RedisRunQueue(
+        redis,
+        stream_name=app_settings.run_queue_stream_name,
+        group_name=app_settings.run_queue_group_name,
+        pending_min_idle_ms=app_settings.queue_pending_min_idle_ms,
+    )
     service_stop = stop_event or asyncio.Event()
     service_health = health or WorkerHealth()
+    ready_file.unlink(missing_ok=True)
     _install_signal_handlers(service_stop)
     try:
         resolver = runtime_resolver or _build_runtime_resolver(
             settings=app_settings,
             session_factory=session_factory,
+            model_resolver=model_resolver,
         )
         await queue.setup()
+        ready_file.touch(mode=0o600)
         worker = RunWorker(
             session_factory=session_factory,
             queue=queue,
             runtime_resolver=resolver,
             consumer_name=consumer_name or _default_consumer_name(),
         )
-        await serve(worker=worker, stop_event=service_stop, health=service_health)
+        await serve(
+            worker=worker,
+            stop_event=service_stop,
+            health=service_health,
+            retry_backoff_seconds=app_settings.worker_retry_backoff_seconds,
+            heartbeat_interval_seconds=app_settings.sandbox_ttl_seconds / 3,
+        )
     finally:
+        ready_file.unlink(missing_ok=True)
         service_health.ready = False
         await redis.aclose()
+        await engine.dispose()
+
+
+async def check_worker_configuration(settings: AppSettings | None = None) -> None:
+    initialize_database_metadata()
+    app_settings = settings or AppSettings()
+    engine = create_async_engine(app_settings.database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    resolver: RuntimeResolver | None = None
+    try:
+        resolver = _build_runtime_resolver(
+            settings=app_settings,
+            session_factory=session_factory,
+        )
+    finally:
+        close = getattr(resolver, "aclose", None)
+        if callable(close):
+            await close()
         await engine.dispose()
 
 
@@ -172,8 +258,9 @@ def _build_runtime_resolver(
     *,
     settings: AppSettings,
     session_factory: async_sessionmaker[AsyncSession],
+    model_resolver: PlatformModelResolver | None = None,
 ) -> RuntimeResolver:
-    adapters = _load_runtime_adapters(settings)
+    adapters = _load_runtime_adapters(settings, session_factory=session_factory)
     tool_reader = _SessionToolReader(session_factory)
     gateway = ToolGateway(
         executor=MCPToolExecutor(DatabaseMCPClientResolver(tool_reader)),
@@ -193,53 +280,38 @@ def _build_runtime_resolver(
             client=cast(MinioClient, minio),
             bucket=settings.skill_storage_bucket,
         ),
-        workspace_factory=adapters.workspace_factory,
+        sandbox_manager=adapters.sandbox_manager,
         gateway=gateway,
         runtime_selector=PlatformRuntimeSelector(
-            autonomous_factory=adapters.autonomous_factory,
             workflow_factory=adapters.workflow_factory,
         ),
+        sandbox_ttl=timedelta(seconds=settings.sandbox_ttl_seconds),
+        close_callback=adapters.aclose,
+        model_resolver=model_resolver,
     )
 
 
-def _load_runtime_adapters(settings: AppSettings) -> RuntimeAdapters:
-    target = os.getenv("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", "").strip()
-    if not target:
-        raise WorkerConfigurationError(
-            "a concrete runtime resolver adapter factory with model, safe workspace/sandbox, "
-            "DeepAgent, and LangGraph factories is required"
-        )
-    module_name, separator, attribute = target.partition(":")
-    if not separator or not module_name or not attribute:
-        raise WorkerConfigurationError(
-            "AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY must use module:attribute syntax"
-        )
+def _load_runtime_adapters(
+    settings: AppSettings,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> BuiltinRuntimeAdapters:
     try:
-        factory = cast(
-            RuntimeAdapterFactory,
-            getattr(importlib.import_module(module_name), attribute),
+        return create_runtime_adapters(
+            settings=settings,
+            session_factory=session_factory,
         )
-        adapters = factory(settings)
-    except Exception as error:
-        raise WorkerConfigurationError("runtime adapter factory could not be loaded") from error
-    required_capabilities = (
-        callable(getattr(adapters, "autonomous_factory", None)),
-        callable(getattr(adapters, "workflow_factory", None)),
-        callable(getattr(getattr(adapters, "workspace_factory", None), "create", None)),
-        callable(getattr(getattr(adapters, "credential_resolver", None), "resolve", None)),
-        callable(getattr(getattr(adapters, "audit_sink", None), "emit", None)),
-    )
-    if not all(required_capabilities):
-        raise WorkerConfigurationError(
-            "runtime adapter factory result does not provide required capabilities"
-        )
-    return adapters
+    except (RuntimeAdapterConfigurationError, ValueError) as error:
+        raise WorkerConfigurationError("builtin runtime adapters are not configured") from error
 
 
 def main() -> None:
     replicas = int(os.getenv("AGENT_PLATFORM_WORKER_REPLICAS", "1"))
     try:
-        asyncio.run(run_worker_service(replicas=replicas))
+        if os.getenv("AGENT_PLATFORM_WORKER_CONFIG_CHECK") == "1":
+            asyncio.run(check_worker_configuration())
+        else:
+            asyncio.run(run_worker_service(replicas=replicas))
     except WorkerConfigurationError as error:
         print(f"worker configuration error: {error}", file=sys.stderr)
         raise SystemExit(2) from error

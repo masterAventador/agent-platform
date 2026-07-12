@@ -15,7 +15,12 @@ async def test_redis_stream_queue_enqueues_consumes_and_acknowledges() -> None:
 
     redis = Redis.from_url(redis_url, decode_responses=True)
     stream_name = f"test:runs:{uuid4()}"
-    queue = RedisRunQueue(redis, stream_name=stream_name, group_name="test-workers")
+    queue = RedisRunQueue(
+        redis,
+        stream_name=stream_name,
+        group_name="test-workers",
+        pending_min_idle_ms=0,
+    )
     await queue.setup()
     message = RunQueueMessage(
         command_id=uuid4(),
@@ -30,7 +35,12 @@ async def test_redis_stream_queue_enqueues_consumes_and_acknowledges() -> None:
 
     assert delivery is not None
     assert delivery.message == message
-    await queue.acknowledge(delivery.delivery_id)
+    claimed = await queue.dequeue(consumer_name="worker-2", block_ms=100)
+    assert claimed is not None
+    assert claimed.delivery_id == delivery.delivery_id
+    assert claimed.message == message
+
+    await queue.acknowledge(claimed.delivery_id)
     pending = await redis.xpending(stream_name, "test-workers")
     assert pending["pending"] == 0
 
