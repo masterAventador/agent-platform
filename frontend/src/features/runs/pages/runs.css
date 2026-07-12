@@ -1,0 +1,36 @@
+.run-list,
+.run-empty,
+.run-summary,
+.run-events {
+  margin-top: 24px;
+}
+
+.run-list {
+  display: grid;
+  gap: 12px;
+}
+
+.run-event-item {
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.run-event-item:last-child {
+  border-bottom: 0;
+}
+
+.run-card {
+  width: 100%;
+}
+
+.run-loading {
+  padding: 80px 0;
+}
+
+.run-detail {
+  max-width: 1040px;
+}
+
+.run-input {
+  white-space: pre-wrap;
+}

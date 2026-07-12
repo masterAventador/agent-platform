@@ -31,6 +31,14 @@ const EmployeeDetailPage = lazy(() =>
     default: module.EmployeeDetailPage,
   })),
 )
+const RunsPage = lazy(() =>
+  import('../features/runs/pages/RunsPage').then((module) => ({ default: module.RunsPage })),
+)
+const RunDetailPage = lazy(() =>
+  import('../features/runs/pages/RunDetailPage').then((module) => ({
+    default: module.RunDetailPage,
+  })),
+)
 
 export function App() {
   return (
@@ -88,7 +96,8 @@ function PlatformShell() {
           <Route path="/employees/new" element={<EmployeeEditorPage />} />
           <Route path="/employees/:employeeId" element={<EmployeeDetailPage />} />
           <Route path="/employees/:employeeId/edit" element={<EmployeeEditorPage />} />
-          <Route path="/runs" element={<PlaceholderPage title="任务中心" />} />
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:runId" element={<RunDetailPage />} />
         </Routes>
       </Content>
     </Layout>
@@ -105,10 +114,6 @@ function Dashboard() {
       <BackendStatus />
     </section>
   )
-}
-
-function PlaceholderPage({ title }: { title: string }) {
-  return <Typography.Title level={2}>{title}</Typography.Title>
 }
 
 function RouteLoading() {

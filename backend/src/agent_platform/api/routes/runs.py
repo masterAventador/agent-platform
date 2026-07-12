@@ -141,6 +141,25 @@ async def get_run(
     return RunResponse.from_entity(run)
 
 
+@router.get("/runs", response_model=list[RunResponse])
+async def list_runs(
+    request: Request,
+    tenant_id: TenantHeader = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> list[RunResponse]:
+    async with request.app.state.session_factory() as database_session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=database_session,
+            tenant_id=tenant_id,
+            owner_required=False,
+        )
+        runs = await SqlAlchemyRunRepository(database_session).list(
+            tenant_id=access.tenant.id, limit=limit
+        )
+    return [RunResponse.from_entity(run) for run in runs]
+
+
 @router.get("/runs/{run_id}/events", response_model=list[PlatformEvent])
 async def list_run_events(
     run_id: UUID,

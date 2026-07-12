@@ -1,4 +1,4 @@
-import { Button, Card, Empty, Flex, List, Space, Spin, Tag, Typography } from 'antd'
+import { Button, Card, Empty, Flex, Space, Spin, Tag, Typography } from 'antd'
 import { useNavigate } from 'react-router-dom'
 
 import { useEmployees } from '../api/queries'
@@ -31,35 +31,31 @@ export function EmployeesPage() {
       {employees.isPending ? (
         <Flex className="employee-loading" justify="center"><Spin /></Flex>
       ) : employees.data?.length ? (
-        <List
-          className="employee-list"
-          grid={{ gutter: 16, column: 3 }}
-          dataSource={employees.data}
-          renderItem={(employee) => {
+        <div className="employee-list employee-list-grid">
+          {employees.data.map((employee) => {
             const status = statusLabels[employee.status]
             return (
-              <List.Item>
-                <Card
-                  hoverable
-                  onClick={() => navigate(`/employees/${employee.id}`)}
-                  title={employee.name}
-                  extra={<Tag color={status.color}>{status.text}</Tag>}
-                >
-                  <Space orientation="vertical" size={12}>
-                    <Typography.Paragraph ellipsis={{ rows: 2 }}>
-                      {employee.definition.role_description}
-                    </Typography.Paragraph>
-                    <Typography.Text type="secondary">
-                      {employee.published_version
-                        ? `已发布版本 ${employee.published_version}`
-                        : '尚未发布'}
-                    </Typography.Text>
-                  </Space>
-                </Card>
-              </List.Item>
+              <Card
+                key={employee.id}
+                hoverable
+                onClick={() => navigate(`/employees/${employee.id}`)}
+                title={employee.name}
+                extra={<Tag color={status.color}>{status.text}</Tag>}
+              >
+                <Space orientation="vertical" size={12}>
+                  <Typography.Paragraph ellipsis={{ rows: 2 }}>
+                    {employee.definition.role_description}
+                  </Typography.Paragraph>
+                  <Typography.Text type="secondary">
+                    {employee.published_version
+                      ? `已发布版本 ${employee.published_version}`
+                      : '尚未发布'}
+                  </Typography.Text>
+                </Space>
+              </Card>
             )
-          }}
-        />
+          })}
+        </div>
       ) : (
         <Card className="employee-empty">
           <Empty description="还没有数字员工" />

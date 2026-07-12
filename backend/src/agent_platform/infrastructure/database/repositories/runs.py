@@ -148,6 +148,15 @@ class SqlAlchemyRunRepository:
         record.error_message = run.error_message
         await self._session.flush()
 
+    async def list(self, *, tenant_id: UUID, limit: int = 100) -> list[Run]:
+        result = await self._session.execute(
+            select(RunRecord)
+            .where(RunRecord.tenant_id == tenant_id)
+            .order_by(RunRecord.created_at.desc())
+            .limit(limit)
+        )
+        return [self._to_entity(record) for record in result.scalars()]
+
     @classmethod
     def _to_entity(cls, record: RunRecord) -> Run:
         return Run(

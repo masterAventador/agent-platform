@@ -83,6 +83,10 @@ async def test_create_and_read_queued_run_for_published_employee(run_client: Asy
     assert get_response.status_code == 200
     assert get_response.json() == run
 
+    list_response = await run_client.get("/api/v1/runs", headers=headers)
+    assert list_response.status_code == 200
+    assert list_response.json() == [run]
+
     events_response = await run_client.get(
         f"/api/v1/runs/{run['id']}/events?after_sequence=0",
         headers=headers,
