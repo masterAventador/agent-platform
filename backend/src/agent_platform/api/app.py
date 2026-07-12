@@ -1,8 +1,10 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import cast
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from minio import Minio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -10,13 +12,19 @@ from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
 from agent_platform.api.routes.runs import router as runs_router
+from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.object_storage.minio import (
+    MinioClient,
+    MinioSkillStorage,
+)
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient, RagFlowError
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
+from agent_platform.platform.skills.ports import SkillStorage
 
 
 def create_app(
@@ -25,6 +33,7 @@ def create_app(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     auth_rate_limiter: AuthRateLimiter | None = None,
     knowledge_provider: KnowledgeProvider | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> FastAPI:
     app_settings = settings or AppSettings()
     owned_engine = None
@@ -49,6 +58,18 @@ def create_app(
         )
         knowledge_provider = owned_knowledge_provider
 
+    if skill_storage is None:
+        minio_client = Minio(
+            app_settings.minio_endpoint,
+            access_key=app_settings.minio_access_key,
+            secret_key=app_settings.minio_secret_key,
+            secure=app_settings.minio_secure,
+        )
+        skill_storage = MinioSkillStorage(
+            client=cast(MinioClient, minio_client),
+            bucket=app_settings.skill_storage_bucket,
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
@@ -66,10 +87,12 @@ def create_app(
     app.state.password_hasher = Argon2PasswordHasher()
     app.state.session_token_manager = SessionTokenManager()
     app.state.knowledge_provider = knowledge_provider
+    app.state.skill_storage = skill_storage
     app.include_router(auth_router)
     app.include_router(employees_router)
     app.include_router(runs_router)
     app.include_router(knowledge_router)
+    app.include_router(skills_router)
 
     @app.exception_handler(RagFlowError)
     async def handle_ragflow_error(_: Request, __: RagFlowError) -> JSONResponse:

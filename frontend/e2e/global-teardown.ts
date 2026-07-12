@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,7 +20,8 @@ export default function globalTeardown() {
     )
   } finally {
     if (existsSync(ownershipMarker)) {
-      execFileSync('docker', [...composeArgs, 'down'], {
+      const startedServices = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as string[]
+      execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
         cwd: repositoryRoot,
         stdio: 'inherit',
       })

@@ -29,6 +29,8 @@ export default defineConfig({
           'redis://:agent-platform-local-redis@127.0.0.1:6379/2',
         AGENT_PLATFORM_RAGFLOW_URL: 'http://127.0.0.1:29380',
         AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-e2e-key',
+        AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
+        AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
       },
       url: 'http://127.0.0.1:18000/api/v1/health/live',
       reuseExistingServer: false,

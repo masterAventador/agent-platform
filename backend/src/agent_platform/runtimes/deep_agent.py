@@ -44,18 +44,27 @@ class DeepAgentFactory:
         model: str | BaseChatModel,
         tools: Sequence[BaseTool | Callable[..., Any] | dict[str, Any]],
         backend: BackendProtocol | None = None,
+        agent_builder: Callable[..., object] = create_deep_agent,
     ) -> None:
         self._model = model
         self._tools = tools
         self._backend = backend
+        self._agent_builder = agent_builder
 
     def __call__(self, request: RuntimeStartRequest) -> AgentGraph:
         system_prompt = str(request.employee_definition.get("system_prompt", ""))
-        graph = create_deep_agent(
+        raw_skill_paths = request.employee_definition.get("skill_paths")
+        skill_paths = (
+            TypeAdapter(list[str]).validate_python(raw_skill_paths)
+            if raw_skill_paths is not None
+            else None
+        )
+        graph = self._agent_builder(
             model=self._model,
             tools=self._tools,
             system_prompt=system_prompt,
             backend=self._backend,
+            skills=skill_paths,
         )
         return cast(AgentGraph, graph)
 

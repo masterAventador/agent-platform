@@ -4,3 +4,7 @@ class EmployeeNotFound(Exception):
 
 class EmployeeNameAlreadyExists(Exception):
     """当前租户已存在同名数字员工。"""
+
+
+class EmployeeSkillNotBindable(Exception):
+    """数字员工只能绑定当前租户已发布的 Skill。"""

@@ -16,9 +16,11 @@ dependencies = [
     "httpx>=0.28.1",
     "langgraph==1.2.9",
     "langgraph-checkpoint-postgres==3.1.0",
+    "minio>=7.2.20",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
     "redis>=8.0.1",
     "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.51.0",
@@ -51,4 +53,5 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.21",
+    "types-pyyaml>=6.0.12.20250915",
 ]

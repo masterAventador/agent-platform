@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { getApiErrorMessage } from '../../auth/api/errors'
+import { usePublishedSkills } from '../../skills/api/queries'
 import type { EmployeeDefinition, WorkMode } from '../api/employees'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
 import './employees.css'
@@ -18,6 +19,7 @@ interface EmployeeFormValues {
   conversation: boolean
   fileUpload: boolean
   scheduledTasks: boolean
+  skillIds: string[]
 }
 
 const defaultValues: EmployeeFormValues = {
@@ -30,6 +32,7 @@ const defaultValues: EmployeeFormValues = {
   conversation: true,
   fileUpload: false,
   scheduledTasks: false,
+  skillIds: [],
 }
 
 export function EmployeeEditorPage() {
@@ -38,6 +41,7 @@ export function EmployeeEditorPage() {
   const createEmployee = useCreateEmployee()
   const updateEmployee = useUpdateEmployee(employeeId ?? '')
   const navigate = useNavigate()
+  const skills = usePublishedSkills()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
 
@@ -54,6 +58,7 @@ export function EmployeeEditorPage() {
       conversation: employee.definition.capabilities.conversation,
       fileUpload: employee.definition.capabilities.file_upload,
       scheduledTasks: employee.definition.capabilities.scheduled_tasks,
+      skillIds: employee.definition.skill_ids,
     })
   }, [editingEmployee.data, form])
 
@@ -74,7 +79,7 @@ export function EmployeeEditorPage() {
         scheduled_tasks: values.scheduledTasks,
         file_upload: values.fileUpload,
       },
-      skill_ids: existing?.skill_ids ?? [],
+      skill_ids: values.skillIds,
       tool_ids: existing?.tool_ids ?? [],
       knowledge_base_ids: existing?.knowledge_base_ids ?? [],
       approval_policy: existing?.approval_policy ?? {},
@@ -149,6 +154,17 @@ export function EmployeeEditorPage() {
                 <Checkbox>支持定时任务</Checkbox>
               </Form.Item>
             </Space>
+          </Form.Item>
+          <Form.Item label="Skills" name="skillIds">
+            <Select
+              mode="multiple"
+              loading={skills.isPending}
+              placeholder="选择当前企业已发布的 Skill"
+              options={skills.data?.map((skill) => ({
+                value: skill.id,
+                label: `${skill.name}（版本 ${skill.published_version}）`,
+              }))}
+            />
           </Form.Item>
           <Space>
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>

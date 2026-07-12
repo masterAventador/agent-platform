@@ -46,6 +46,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '数字员工' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务中心' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(await screen.findByText('后端服务正常')).toBeInTheDocument()
   })
 })

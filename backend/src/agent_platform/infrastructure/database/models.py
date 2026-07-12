@@ -13,6 +13,10 @@ from agent_platform.infrastructure.database.repositories.runs import (
     RunEventRecord,
     RunRecord,
 )
+from agent_platform.infrastructure.database.repositories.skills import (
+    SkillRecord,
+    SkillVersionRecord,
+)
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
     TenantRecord,
@@ -29,6 +33,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     RunEventRecord,
     RunCommandRecord,
     KnowledgeBaseRecord,
+    SkillRecord,
+    SkillVersionRecord,
 )
 
 

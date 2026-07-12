@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,15 +16,17 @@ const ownershipMarker = resolve(repositoryRoot, '.local/playwright-owned-core')
 export default function globalSetup() {
   try {
     rmSync(ownershipMarker, { force: true })
-    const running = execFileSync('docker', [...composeArgs, 'ps', '-q', 'postgres', 'redis'], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-    }).trim()
-    if (!running) {
+    const services = ['postgres', 'redis', 'minio']
+    const startedServices = services.filter((service) => !execFileSync(
+      'docker',
+      [...composeArgs, 'ps', '-q', service],
+      { cwd: repositoryRoot, encoding: 'utf8' },
+    ).trim())
+    if (startedServices.length) {
       mkdirSync(dirname(ownershipMarker), { recursive: true })
-      writeFileSync(ownershipMarker, 'owned')
+      writeFileSync(ownershipMarker, JSON.stringify(startedServices))
     }
-    execFileSync('docker', [...composeArgs, 'up', '-d', '--wait', 'postgres', 'redis'], {
+    execFileSync('docker', [...composeArgs, 'up', '-d', '--wait', ...services], {
       cwd: repositoryRoot,
       stdio: 'inherit',
     })
@@ -60,13 +62,22 @@ export default function globalSetup() {
       stdio: 'inherit',
     })
   } catch (error) {
-    if (existsSync(ownershipMarker)) {
-      execFileSync('docker', [...composeArgs, 'down'], {
-        cwd: repositoryRoot,
-        stdio: 'inherit',
-      })
-      rmSync(ownershipMarker, { force: true })
-    }
+    stopOwnedServices()
     throw error
+  }
+}
+
+function stopOwnedServices() {
+  try {
+    if (!existsSync(ownershipMarker)) return
+    const startedServices = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as string[]
+    execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
+      cwd: repositoryRoot,
+      stdio: 'inherit',
+    })
+  } catch {
+    // 标记不存在时没有本轮启动的容器需要停止。
+  } finally {
+    rmSync(ownershipMarker, { force: true })
   }
 }

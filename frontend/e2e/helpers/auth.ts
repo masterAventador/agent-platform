@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 
 
 export async function registerAndLogin(page: Page): Promise<string> {
@@ -11,7 +11,10 @@ export async function registerAndLogin(page: Page): Promise<string> {
   await page.getByLabel('确认密码').fill(password)
   await page.getByRole('button', { name: '创建账号' }).click()
   await page.waitForURL(/\/login$/)
-  await page.getByLabel('密码', { exact: true }).fill(password)
+  await page.getByRole('heading', { name: '登录' }).waitFor()
+  const passwordInput = page.getByLabel('密码', { exact: true })
+  await passwordInput.fill(password)
+  await expect(passwordInput).toHaveValue(password)
   await page.getByRole('button', { name: /登\s*录/ }).click()
   await page.waitForURL(/\/$/)
 

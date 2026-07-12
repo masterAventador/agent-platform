@@ -13,6 +13,11 @@ class AppSettings(BaseSettings):
     redis_url: str = "redis://:agent-platform-local-redis@127.0.0.1:6379/0"
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
+    minio_endpoint: str = "127.0.0.1:9000"
+    minio_access_key: str = "agent_platform"
+    minio_secret_key: str = "agent-platform-local-minio"
+    minio_secure: bool = False
+    skill_storage_bucket: str = "agent-platform-skills"
     require_email_verification: bool = False
     auth_cookie_name: str = "agent_platform_session"
     auth_cookie_secure: bool = False

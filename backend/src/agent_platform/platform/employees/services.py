@@ -3,8 +3,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from agent_platform.platform.employees.entities import Employee, EmployeeDraft, EmployeeVersion
-from agent_platform.platform.employees.errors import EmployeeNotFound
-from agent_platform.platform.employees.ports import EmployeeRepository, EmployeeVersionRepository
+from agent_platform.platform.employees.errors import EmployeeNotFound, EmployeeSkillNotBindable
+from agent_platform.platform.employees.ports import (
+    EmployeeRepository,
+    EmployeeSkillPolicy,
+    EmployeeVersionRepository,
+)
 
 
 class EmployeeService:
@@ -13,9 +17,11 @@ class EmployeeService:
         *,
         employees: EmployeeRepository,
         versions: EmployeeVersionRepository,
+        skills: EmployeeSkillPolicy,
     ) -> None:
         self._employees = employees
         self._versions = versions
+        self._skills = skills
 
     async def create(
         self,
@@ -24,6 +30,7 @@ class EmployeeService:
         created_by: UUID,
         draft: EmployeeDraft,
     ) -> Employee:
+        await self._ensure_skills_bindable(tenant_id=tenant_id, skill_ids=draft.skill_ids)
         employee = Employee.create(tenant_id=tenant_id, created_by=created_by, draft=draft)
         await self._employees.add(employee)
         return employee
@@ -35,6 +42,7 @@ class EmployeeService:
         employee_id: UUID,
         draft: EmployeeDraft,
     ) -> Employee:
+        await self._ensure_skills_bindable(tenant_id=tenant_id, skill_ids=draft.skill_ids)
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
         updated = employee.update(draft)
         await self._employees.update(updated)
@@ -48,6 +56,10 @@ class EmployeeService:
         published_by: UUID,
     ) -> Employee:
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
+        await self._ensure_skills_bindable(
+            tenant_id=tenant_id,
+            skill_ids=employee.draft.skill_ids,
+        )
         published, version = employee.publish(published_by=published_by)
         await self._employees.update(published)
         await self._versions.add(version)
@@ -73,3 +85,12 @@ class EmployeeService:
         if employee is None:
             raise EmployeeNotFound
         return employee
+
+    async def _ensure_skills_bindable(
+        self,
+        *,
+        tenant_id: UUID,
+        skill_ids: list[UUID],
+    ) -> None:
+        if not await self._skills.are_bindable(tenant_id=tenant_id, skill_ids=skill_ids):
+            raise EmployeeSkillNotBindable
