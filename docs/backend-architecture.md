@@ -400,34 +400,11 @@ OpenTelemetry 不能替代审计日志。审计必须记录：
 - 所有外部副作用操作必须考虑幂等、超时、重试和补偿；
 - Prompt、文件和工具结果进入观测系统前必须脱敏。
 
-## 12. 建议项目结构
+## 12. 后端代码组织边界
 
-```text
-ai-agent-platform/
-├── apps/
-│   ├── api/
-│   └── worker/
-├── platform/
-│   ├── tenants/
-│   ├── users/
-│   ├── employees/
-│   ├── runs/
-│   ├── approvals/
-│   ├── permissions/
-│   └── audit/
-├── runtimes/
-│   ├── base.py
-│   ├── deep_agent.py
-│   └── langgraph.py
-├── skills/
-├── tools/
-├── knowledge/
-├── memory/
-├── observability/
-└── tests/
-```
+后端位于单仓库的 `backend/` 中。完整物理目录、文件归属、测试位置和跨工程契约以 [`project-structure.md`](project-structure.md) 为唯一权威说明，本文不重复维护目录树。
 
-具体创建项目时再根据 Python 工程规则和测试策略细化包结构，不在当前架构阶段锁定所有实现细节。
+本文只规定后端逻辑边界：平台业务、Agent 运行时、Knowledge Service、Tool Gateway、记忆、沙盒、基础设施和观测必须保持职责分离；FastAPI API 与 Agent Worker 共用同一套业务模块，但作为独立进程运行。
 
 ## 13. 前端协议边界
 

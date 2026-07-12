@@ -156,67 +156,11 @@ SkillExecution
 
 所有浏览器和桌面差异均封装为 `PlatformAdapter`。业务代码只依赖公共接口，不感知 Web 或 Tauri。
 
-## 5. 前端工程结构
+## 5. 前端代码组织边界
 
-```text
-frontend/
-├── src/
-│   ├── app/
-│   │   ├── providers/             # Router、Query、主题、权限等 Provider
-│   │   ├── router/                # 路由定义和路由守卫
-│   │   ├── layouts/               # 平台、认证和全屏任务布局
-│   │   └── App.tsx
-│   ├── features/
-│   │   ├── auth/                  # 邮箱注册登录、OIDC 回调和当前用户
-│   │   ├── dashboard/             # 工作台
-│   │   ├── employees/             # 员工广场、详情和配置
-│   │   ├── runs/                  # 任务创建、执行、历史和事件
-│   │   ├── approvals/             # 审批中心
-│   │   ├── knowledge/             # 知识库
-│   │   ├── skills/                # Skill 中心
-│   │   ├── tools/                 # 工具与 MCP
-│   │   ├── artifacts/             # 文件与任务产物
-│   │   ├── observability/         # 运行观测
-│   │   ├── audit/                 # 审计日志
-│   │   └── organization/          # 成员、角色、模型和配额
-│   ├── components/
-│   │   ├── ui/                    # Ant Design 通用薄封装
-│   │   └── ai/                    # Ant Design X 平台业务封装
-│   ├── api/
-│   │   ├── client.ts              # Axios 实例和统一错误转换
-│   │   ├── streaming.ts           # SSE / Fetch Stream 客户端
-│   │   └── query-client.ts        # TanStack Query 全局配置
-│   ├── platform/
-│   │   ├── types.ts               # PlatformAdapter 和公共类型
-│   │   ├── index.ts               # 唯一运行环境选择入口
-│   │   ├── web.ts                 # 浏览器实现
-│   │   └── tauri.ts               # Tauri 实现
-│   ├── stores/                    # 跨功能的纯客户端状态
-│   ├── schemas/                   # 跨功能复用的 Zod Schema
-│   ├── hooks/                     # 跨功能复用的 Hook
-│   ├── styles/                    # 主题 Token、全局样式和 CSS 变量
-│   ├── assets/                    # 静态资源
-│   ├── test/                      # 测试环境和公共测试工具
-│   └── main.tsx
-├── e2e/                           # Playwright E2E
-├── public/                        # 公共静态资源
-├── src-tauri/
-│   ├── capabilities/              # Tauri 最小权限配置
-│   ├── src/
-│   │   ├── commands/              # 文件、凭据和更新等原生命令
-│   │   ├── lib.rs
-│   │   └── main.rs
-│   ├── icons/
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── index.html
-├── package.json
-├── playwright.config.ts
-├── tsconfig.json
-└── vite.config.ts
-```
+前端位于单仓库的 `frontend/` 中，与 `backend/` 保持独立依赖、测试和构建配置。完整物理目录、文件归属和跨端契约以 [`project-structure.md`](project-structure.md) 为唯一权威说明，本文不重复维护目录树。
 
-目录约束：
+逻辑组织约束：
 
 - Feature 内部代码就近维护，禁止把所有业务代码堆入全局目录；
 - 顶层公共目录只接收真正跨 Feature 复用的内容；
