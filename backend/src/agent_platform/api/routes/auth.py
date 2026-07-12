@@ -3,11 +3,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_platform.infrastructure.database.repositories.auth import (
-    SqlAlchemyAuthSessionRepository,
-    SqlAlchemyUserRepository,
+from agent_platform.api.dependencies.authentication import build_auth_service
+from agent_platform.infrastructure.database.repositories.tenants import (
+    SqlAlchemyWorkspaceRepository,
 )
 from agent_platform.platform.auth.errors import (
     AuthenticationRequired,
@@ -15,7 +14,7 @@ from agent_platform.platform.auth.errors import (
     RateLimitExceeded,
     RegistrationUnavailable,
 )
-from agent_platform.platform.auth.services import AuthService
+from agent_platform.platform.tenants.memberships import WorkspaceAccess
 from agent_platform.platform.users.entities import User
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -32,22 +31,32 @@ class UserResponse(BaseModel):
     id: UUID
     email: str
     email_verified: bool
+    workspaces: list["WorkspaceResponse"]
 
     @classmethod
-    def from_entity(cls, user: User) -> "UserResponse":
-        return cls(id=user.id, email=user.email, email_verified=user.email_verified)
+    def from_entity(cls, user: User, workspaces: list[WorkspaceAccess]) -> "UserResponse":
+        return cls(
+            id=user.id,
+            email=user.email,
+            email_verified=user.email_verified,
+            workspaces=[WorkspaceResponse.from_access(access) for access in workspaces],
+        )
 
 
-def _service(request: Request, database_session: AsyncSession) -> AuthService:
-    return AuthService(
-        users=SqlAlchemyUserRepository(database_session),
-        sessions=SqlAlchemyAuthSessionRepository(database_session),
-        password_hasher=request.app.state.password_hasher,
-        rate_limiter=request.app.state.auth_rate_limiter,
-        token_manager=request.app.state.session_token_manager,
-        session_ttl_seconds=request.app.state.settings.auth_session_ttl_seconds,
-        require_email_verification=request.app.state.settings.require_email_verification,
-    )
+class WorkspaceResponse(BaseModel):
+    id: UUID
+    name: str
+    slug: str
+    role: str
+
+    @classmethod
+    def from_access(cls, access: WorkspaceAccess) -> "WorkspaceResponse":
+        return cls(
+            id=access.tenant.id,
+            name=access.tenant.name,
+            slug=access.tenant.slug,
+            role=access.role.value,
+        )
 
 
 def _client_key(request: Request) -> str:
@@ -86,17 +95,21 @@ async def register(payload: CredentialsRequest, request: Request) -> UserRespons
                 scope="register_ip",
                 key=_client_key(request),
             )
-            user = await _service(request, database_session).register(
+            user = await build_auth_service(request, database_session).register(
                 email=str(payload.email),
                 password=payload.password,
             )
+            workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
+                user.id
+            )
+            await database_session.commit()
         except (
             RegistrationUnavailable,
             RateLimitExceeded,
         ) as error:
             _raise_auth_error(error)
             raise AssertionError("unreachable") from error
-    return UserResponse.from_entity(user)
+    return UserResponse.from_entity(user, workspaces)
 
 
 @router.post("/login", response_model=UserResponse)
@@ -107,10 +120,14 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
                 scope="login_ip",
                 key=_client_key(request),
             )
-            issued_session = await _service(request, database_session).login(
+            issued_session = await build_auth_service(request, database_session).login(
                 email=str(payload.email),
                 password=payload.password,
             )
+            workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
+                issued_session.user.id
+            )
+            await database_session.commit()
         except (InvalidCredentials, RateLimitExceeded) as error:
             _raise_auth_error(error)
             raise AssertionError("unreachable") from error
@@ -125,7 +142,7 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
         samesite="lax",
         path="/",
     )
-    return UserResponse.from_entity(issued_session.user)
+    return UserResponse.from_entity(issued_session.user, workspaces)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -133,11 +150,14 @@ async def current_user(request: Request) -> UserResponse:
     raw_token = request.cookies.get(request.app.state.settings.auth_cookie_name)
     async with request.app.state.session_factory() as database_session:
         try:
-            user = await _service(request, database_session).authenticate(raw_token)
+            user = await build_auth_service(request, database_session).authenticate(raw_token)
+            workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
+                user.id
+            )
         except AuthenticationRequired as error:
             _raise_auth_error(error)
             raise AssertionError("unreachable") from error
-    return UserResponse.from_entity(user)
+    return UserResponse.from_entity(user, workspaces)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -145,7 +165,8 @@ async def logout(request: Request, response: Response) -> None:
     settings = request.app.state.settings
     raw_token = request.cookies.get(settings.auth_cookie_name)
     async with request.app.state.session_factory() as database_session:
-        await _service(request, database_session).logout(raw_token)
+        await build_auth_service(request, database_session).logout(raw_token)
+        await database_session.commit()
     response.delete_cookie(
         key=settings.auth_cookie_name,
         httponly=True,

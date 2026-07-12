@@ -15,6 +15,9 @@ from agent_platform.infrastructure.database.repositories.auth import (
     SqlAlchemyUserRepository,
     UserRecord,
 )
+from agent_platform.infrastructure.database.repositories.tenants import (
+    SqlAlchemyWorkspaceRepository,
+)
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
@@ -44,6 +47,7 @@ async def test_password_and_session_secrets_are_not_stored_in_plaintext() -> Non
             token_manager=SessionTokenManager(),
             session_ttl_seconds=3600,
             require_email_verification=False,
+            workspaces=SqlAlchemyWorkspaceRepository(database_session),
         )
         await service.register(email="secure@example.com", password=password)
         issued_session = await service.login(email="secure@example.com", password=password)

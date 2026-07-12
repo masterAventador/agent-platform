@@ -11,7 +11,14 @@ from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
 )
-from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
+from agent_platform.infrastructure.database.repositories.employees import (
+    EmployeeRecord,
+    EmployeeVersionRecord,
+)
+from agent_platform.infrastructure.database.repositories.tenants import (
+    TenantMembershipRecord,
+    TenantRecord,
+)
 
 config = context.config
 
@@ -24,6 +31,8 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 _tenant_record = TenantRecord
 _auth_records = (UserRecord, AuthSessionRecord)
+_tenant_records = (TenantMembershipRecord,)
+_employee_records = (EmployeeRecord, EmployeeVersionRecord)
 
 
 def run_migrations_offline() -> None:

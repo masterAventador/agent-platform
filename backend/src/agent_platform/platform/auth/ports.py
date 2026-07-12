@@ -2,6 +2,7 @@ from typing import Protocol
 from uuid import UUID
 
 from agent_platform.platform.auth.entities import AuthSession
+from agent_platform.platform.tenants.memberships import WorkspaceAccess
 from agent_platform.platform.users.entities import User
 
 
@@ -37,3 +38,9 @@ class SessionTokenManager(Protocol):
     def issue(self) -> tuple[str, str]: ...
 
     def digest(self, raw_token: str) -> str: ...
+
+
+class WorkspaceRepository(Protocol):
+    async def provision_owner_workspace(self, user: User) -> WorkspaceAccess: ...
+
+    async def list_for_user(self, user_id: UUID) -> list[WorkspaceAccess]: ...

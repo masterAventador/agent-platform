@@ -54,7 +54,7 @@ class SqlAlchemyUserRepository:
             )
         )
         try:
-            await self._session.commit()
+            await self._session.flush()
         except IntegrityError as error:
             await self._session.rollback()
             raise RegistrationUnavailable from error
@@ -99,7 +99,7 @@ class SqlAlchemyAuthSessionRepository:
                 revoked_at=session.revoked_at,
             )
         )
-        await self._session.commit()
+        await self._session.flush()
 
     async def get_by_token_digest(self, token_digest: str) -> AuthSession | None:
         result = await self._session.execute(
@@ -123,7 +123,7 @@ class SqlAlchemyAuthSessionRepository:
             .where(AuthSessionRecord.id == session.id)
             .values(revoked_at=datetime.now(UTC))
         )
-        await self._session.commit()
+        await self._session.flush()
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:

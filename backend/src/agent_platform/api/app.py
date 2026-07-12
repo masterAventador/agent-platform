@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.routes.auth import router as auth_router
+from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
@@ -49,6 +50,7 @@ def create_app(
     app.state.password_hasher = Argon2PasswordHasher()
     app.state.session_token_manager = SessionTokenManager()
     app.include_router(auth_router)
+    app.include_router(employees_router)
 
     @app.get("/api/v1/health/live")
     async def liveness() -> dict[str, str]:

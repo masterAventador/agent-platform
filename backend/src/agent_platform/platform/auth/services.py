@@ -12,6 +12,7 @@ from agent_platform.platform.auth.ports import (
     PasswordHasher,
     SessionTokenManager,
     UserRepository,
+    WorkspaceRepository,
 )
 from agent_platform.platform.users.entities import User
 
@@ -33,6 +34,7 @@ class AuthService:
         token_manager: SessionTokenManager,
         session_ttl_seconds: int,
         require_email_verification: bool,
+        workspaces: WorkspaceRepository,
     ) -> None:
         self._users = users
         self._sessions = sessions
@@ -41,6 +43,7 @@ class AuthService:
         self._token_manager = token_manager
         self._session_ttl_seconds = session_ttl_seconds
         self._require_email_verification = require_email_verification
+        self._workspaces = workspaces
 
     async def register(self, *, email: str, password: str) -> User:
         normalized_email = email.strip().lower()
@@ -53,6 +56,7 @@ class AuthService:
             password_hash=self._password_hasher.hash(password),
         )
         await self._users.add(user)
+        await self._workspaces.provision_owner_workspace(user)
         return user
 
     async def login(self, *, email: str, password: str) -> IssuedSession:
