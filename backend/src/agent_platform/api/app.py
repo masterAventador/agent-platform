@@ -1,18 +1,22 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.employees import router as employees_router
+from agent_platform.api.routes.knowledge import router as knowledge_router
 from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
+from agent_platform.knowledge.ragflow import RagFlowClient, RagFlowError
 from agent_platform.platform.auth.ports import AuthRateLimiter
+from agent_platform.platform.knowledge.ports import KnowledgeProvider
 
 
 def create_app(
@@ -20,6 +24,7 @@ def create_app(
     settings: AppSettings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     auth_rate_limiter: AuthRateLimiter | None = None,
+    knowledge_provider: KnowledgeProvider | None = None,
 ) -> FastAPI:
     app_settings = settings or AppSettings()
     owned_engine = None
@@ -36,6 +41,14 @@ def create_app(
             login_limit=app_settings.auth_login_limit_per_minute,
         )
 
+    owned_knowledge_provider: RagFlowClient | None = None
+    if knowledge_provider is None:
+        owned_knowledge_provider = RagFlowClient(
+            base_url=app_settings.ragflow_url,
+            api_key=app_settings.ragflow_api_key,
+        )
+        knowledge_provider = owned_knowledge_provider
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
@@ -43,6 +56,8 @@ def create_app(
             await owned_engine.dispose()
         if owned_redis is not None:
             await owned_redis.aclose()
+        if owned_knowledge_provider is not None:
+            await owned_knowledge_provider.aclose()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
     app.state.settings = app_settings
@@ -50,9 +65,23 @@ def create_app(
     app.state.auth_rate_limiter = auth_rate_limiter
     app.state.password_hasher = Argon2PasswordHasher()
     app.state.session_token_manager = SessionTokenManager()
+    app.state.knowledge_provider = knowledge_provider
     app.include_router(auth_router)
     app.include_router(employees_router)
     app.include_router(runs_router)
+    app.include_router(knowledge_router)
+
+    @app.exception_handler(RagFlowError)
+    async def handle_ragflow_error(_: Request, __: RagFlowError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": {
+                    "code": "knowledge_provider_unavailable",
+                    "message": "知识服务暂时不可用，请稍后重试",
+                }
+            },
+        )
 
     @app.get("/api/v1/health/live")
     async def liveness() -> dict[str, str]:

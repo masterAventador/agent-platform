@@ -1,0 +1,27 @@
+.knowledge-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.knowledge-empty,
+.knowledge-section {
+  margin-top: 24px;
+}
+
+.knowledge-detail {
+  max-width: 1040px;
+}
+
+.knowledge-documents,
+.knowledge-results {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.knowledge-document {
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}

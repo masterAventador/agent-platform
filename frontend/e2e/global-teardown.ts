@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -8,6 +9,7 @@ const repositoryRoot = resolve(frontendRoot, '..')
 const composeFile = resolve(repositoryRoot, 'infra/compose/core.yml')
 const composeEnv = resolve(repositoryRoot, 'infra/compose/.env.example')
 const composeArgs = ['compose', '--env-file', composeEnv, '-f', composeFile]
+const ownershipMarker = resolve(repositoryRoot, '.local/playwright-owned-core')
 
 export default function globalTeardown() {
   try {
@@ -17,9 +19,12 @@ export default function globalTeardown() {
       { cwd: repositoryRoot, stdio: 'inherit' },
     )
   } finally {
-    execFileSync('docker', [...composeArgs, 'down'], {
-      cwd: repositoryRoot,
-      stdio: 'inherit',
-    })
+    if (existsSync(ownershipMarker)) {
+      execFileSync('docker', [...composeArgs, 'down'], {
+        cwd: repositoryRoot,
+        stdio: 'inherit',
+      })
+      rmSync(ownershipMarker, { force: true })
+    }
   }
 }

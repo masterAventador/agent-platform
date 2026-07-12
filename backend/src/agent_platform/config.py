@@ -11,6 +11,8 @@ class AppSettings(BaseSettings):
         "@127.0.0.1:5432/agent_platform"
     )
     redis_url: str = "redis://:agent-platform-local-redis@127.0.0.1:6379/0"
+    ragflow_url: str = "http://127.0.0.1:19380"
+    ragflow_api_key: str = ""
     require_email_verification: bool = False
     auth_cookie_name: str = "agent_platform_session"
     auth_cookie_secure: bool = False

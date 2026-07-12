@@ -1,0 +1,5 @@
+services:
+  es01:
+    environment:
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    mem_limit: 1536m

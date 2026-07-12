@@ -267,14 +267,17 @@ skills/builtin/report-writer/
 ```text
 infra/compose/
 ├── core.yml                      # PostgreSQL、Redis、MinIO
-├── knowledge.yml                 # RAGFlow 及其依赖
 └── observability.yml             # OTel Collector、Tempo、Prometheus 等
+infra/ragflow/
+├── VERSION                       # 锁定的官方稳定 tag
+├── manage.sh                     # 原样管理官方独立 Compose
+└── README.md                     # 独立端口和升级说明
 ```
 
 拆分 Compose 文件是为了按需启动：
 
 - 普通平台开发只启动 `core.yml`；
-- 开发知识库时再叠加 `knowledge.yml`；
+- 开发知识库时由 `infra/ragflow/manage.sh` 在 `.local/` 准备并运行对应官方 tag；
 - 调试完整观测链路时再叠加 `observability.yml`；
 - 本地服务使用完毕必须停止，不设置开机自启。
 

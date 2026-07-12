@@ -39,6 +39,16 @@ const RunDetailPage = lazy(() =>
     default: module.RunDetailPage,
   })),
 )
+const KnowledgeBasesPage = lazy(() =>
+  import('../features/knowledge/pages/KnowledgeBasesPage').then((module) => ({
+    default: module.KnowledgeBasesPage,
+  })),
+)
+const KnowledgeBaseDetailPage = lazy(() =>
+  import('../features/knowledge/pages/KnowledgeBaseDetailPage').then((module) => ({
+    default: module.KnowledgeBaseDetailPage,
+  })),
+)
 
 export function App() {
   return (
@@ -80,6 +90,7 @@ function PlatformShell() {
             <Link to="/">工作台</Link>
             <Link to="/employees">数字员工</Link>
             <Link to="/runs">任务中心</Link>
+            <Link to="/knowledge-bases">知识库</Link>
           </Space>
         </nav>
       </Sider>
@@ -98,6 +109,8 @@ function PlatformShell() {
           <Route path="/employees/:employeeId/edit" element={<EmployeeEditorPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:runId" element={<RunDetailPage />} />
+          <Route path="/knowledge-bases" element={<KnowledgeBasesPage />} />
+          <Route path="/knowledge-bases/:knowledgeBaseId" element={<KnowledgeBaseDetailPage />} />
         </Routes>
       </Content>
     </Layout>

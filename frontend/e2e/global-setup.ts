@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -10,13 +11,39 @@ const composeEnv = resolve(repositoryRoot, 'infra/compose/.env.example')
 const composeArgs = ['compose', '--env-file', composeEnv, '-f', composeFile]
 const databaseUrl =
   'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_e2e'
+const ownershipMarker = resolve(repositoryRoot, '.local/playwright-owned-core')
 
 export default function globalSetup() {
   try {
+    rmSync(ownershipMarker, { force: true })
+    const running = execFileSync('docker', [...composeArgs, 'ps', '-q', 'postgres', 'redis'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+    }).trim()
+    if (!running) {
+      mkdirSync(dirname(ownershipMarker), { recursive: true })
+      writeFileSync(ownershipMarker, 'owned')
+    }
     execFileSync('docker', [...composeArgs, 'up', '-d', '--wait', 'postgres', 'redis'], {
       cwd: repositoryRoot,
       stdio: 'inherit',
     })
+    execFileSync(
+      'docker',
+      [
+        ...composeArgs,
+        'exec',
+        '-T',
+        '-e',
+        'REDISCLI_AUTH=agent-platform-local-redis',
+        'redis',
+        'redis-cli',
+        '-n',
+        '2',
+        'FLUSHDB',
+      ],
+      { cwd: repositoryRoot, stdio: 'inherit' },
+    )
     execFileSync(
       'docker',
       [...composeArgs, 'exec', '-T', 'postgres', 'dropdb', '--force', '--if-exists', '-U', 'agent_platform', 'agent_platform_e2e'],
@@ -33,10 +60,13 @@ export default function globalSetup() {
       stdio: 'inherit',
     })
   } catch (error) {
-    execFileSync('docker', [...composeArgs, 'down'], {
-      cwd: repositoryRoot,
-      stdio: 'inherit',
-    })
+    if (existsSync(ownershipMarker)) {
+      execFileSync('docker', [...composeArgs, 'down'], {
+        cwd: repositoryRoot,
+        stdio: 'inherit',
+      })
+      rmSync(ownershipMarker, { force: true })
+    }
     throw error
   }
 }
