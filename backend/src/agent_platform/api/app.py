@@ -23,6 +23,7 @@ from agent_platform.infrastructure.security.passwords import Argon2PasswordHashe
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient, RagFlowError
+from agent_platform.observability.telemetry import Telemetry, configure_telemetry
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.skills.ports import SkillStorage
@@ -35,8 +36,11 @@ def create_app(
     auth_rate_limiter: AuthRateLimiter | None = None,
     knowledge_provider: KnowledgeProvider | None = None,
     skill_storage: SkillStorage | None = None,
+    telemetry: Telemetry | None = None,
 ) -> FastAPI:
     app_settings = settings or AppSettings()
+    app_telemetry = telemetry or configure_telemetry(app_settings)
+    app_telemetry.instrument_libraries()
     owned_engine = None
     if session_factory is None:
         owned_engine = create_async_engine(app_settings.database_url)
@@ -73,16 +77,22 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        if owned_engine is not None:
-            await owned_engine.dispose()
-        if owned_redis is not None:
-            await owned_redis.aclose()
-        if owned_knowledge_provider is not None:
-            await owned_knowledge_provider.aclose()
+        try:
+            yield
+        finally:
+            try:
+                if owned_engine is not None:
+                    await owned_engine.dispose()
+                if owned_redis is not None:
+                    await owned_redis.aclose()
+                if owned_knowledge_provider is not None:
+                    await owned_knowledge_provider.aclose()
+            finally:
+                app_telemetry.shutdown()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
     app.state.settings = app_settings
+    app.state.telemetry = app_telemetry
     app.state.session_factory = session_factory
     app.state.auth_rate_limiter = auth_rate_limiter
     app.state.password_hasher = Argon2PasswordHasher()
@@ -113,6 +123,7 @@ def create_app(
     async def liveness() -> dict[str, str]:
         return {"status": "ok"}
 
+    app_telemetry.instrument_app(app)
     return app
 
 

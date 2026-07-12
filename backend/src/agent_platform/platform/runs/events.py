@@ -1,9 +1,12 @@
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
+
+from agent_platform.observability.spans import PlatformSpan, with_trace_correlation
 
 
 class EventType(StrEnum):
@@ -47,6 +50,10 @@ class PlatformEvent(BaseModel):
         event_type: EventType,
         payload: dict[str, JsonValue],
     ) -> "PlatformEvent":
+        correlated_payload = with_trace_correlation(
+            payload,
+            cast(PlatformSpan, trace.get_current_span()),
+        )
         return cls(
             event_id=uuid4(),
             tenant_id=tenant_id,
@@ -55,5 +62,5 @@ class PlatformEvent(BaseModel):
             sequence=sequence,
             type=event_type,
             occurred_at=datetime.now(UTC),
-            payload=payload,
+            payload=correlated_payload,
         )

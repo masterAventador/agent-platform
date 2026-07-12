@@ -18,6 +18,11 @@ class AppSettings(BaseSettings):
     minio_secret_key: str = "agent-platform-local-minio"
     minio_secure: bool = False
     skill_storage_bucket: str = "agent-platform-skills"
+    otel_enabled: bool = False
+    otel_service_name: str = "agent-platform-api"
+    otel_environment: str = "development"
+    otel_otlp_endpoint: str = "http://127.0.0.1:4317"
+    otel_otlp_insecure: bool = True
     require_email_verification: bool = False
     auth_cookie_name: str = "agent_platform_session"
     auth_cookie_secure: bool = False
