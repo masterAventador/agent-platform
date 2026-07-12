@@ -9,6 +9,15 @@ vi.mock('../features/system/api/health', () => ({
   getHealth: vi.fn().mockResolvedValue({ status: 'ok' }),
 }))
 
+vi.mock('../features/auth/api/auth', () => ({
+  getCurrentUser: vi.fn().mockResolvedValue({
+    id: '00000000-0000-0000-0000-000000000001',
+    email: 'owner@example.com',
+    email_verified: false,
+  }),
+  logout: vi.fn().mockResolvedValue(undefined),
+}))
+
 describe('App', () => {
   it('展示数字员工平台的基础导航和后端状态', async () => {
     const queryClient = new QueryClient({
@@ -23,7 +32,9 @@ describe('App', () => {
       </QueryClientProvider>,
     )
 
-    expect(screen.getByRole('heading', { name: 'AI 数字员工平台' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: 'AI 数字员工平台' }),
+    ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '数字员工' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务中心' })).toBeInTheDocument()

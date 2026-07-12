@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -13,6 +14,9 @@ from agent_platform.infrastructure.database.repositories.auth import (
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
 
 config = context.config
+
+if database_url := os.getenv("AGENT_PLATFORM_DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

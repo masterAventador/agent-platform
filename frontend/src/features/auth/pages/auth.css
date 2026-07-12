@@ -1,0 +1,44 @@
+.auth-page {
+  display: grid;
+  min-height: 100vh;
+  padding: 32px 20px;
+  place-items: center;
+  background:
+    radial-gradient(circle at 12% 18%, rgb(22 119 255 / 16%), transparent 30%),
+    radial-gradient(circle at 88% 78%, rgb(19 194 194 / 14%), transparent 32%),
+    #f5f7fb;
+}
+
+.auth-card {
+  width: min(100%, 440px);
+  border: 1px solid rgb(5 5 5 / 8%);
+  box-shadow: 0 24px 64px rgb(15 23 42 / 12%);
+}
+
+.auth-heading {
+  width: 100%;
+  margin-bottom: 28px;
+}
+
+.auth-heading .ant-typography {
+  margin: 0;
+}
+
+.auth-eyebrow {
+  color: #1677ff;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.auth-alert {
+  margin-bottom: 20px;
+}
+
+.auth-switch {
+  margin: 24px 0 0;
+  text-align: center;
+}
+
+.auth-loading {
+  min-height: 100vh;
+}
