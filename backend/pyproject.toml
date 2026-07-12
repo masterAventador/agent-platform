@@ -8,8 +8,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.18.5",
+    "asyncpg>=0.31.0",
     "fastapi>=0.139.0",
     "pydantic-settings>=2.14.2",
+    "sqlalchemy[asyncio]>=2.0.51",
     "uvicorn[standard]>=0.51.0",
 ]
 
@@ -34,6 +37,7 @@ packages = ["agent_platform"]
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
     "mypy>=2.2.0",
     "pytest>=9.1.1",
