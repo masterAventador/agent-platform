@@ -13,6 +13,7 @@ from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
 from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
+from agent_platform.api.routes.tools import mcp_router, tool_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
@@ -93,6 +94,8 @@ def create_app(
     app.include_router(runs_router)
     app.include_router(knowledge_router)
     app.include_router(skills_router)
+    app.include_router(mcp_router)
+    app.include_router(tool_router)
 
     @app.exception_handler(RagFlowError)
     async def handle_ragflow_error(_: Request, __: RagFlowError) -> JSONResponse:

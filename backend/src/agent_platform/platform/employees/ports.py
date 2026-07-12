@@ -22,3 +22,7 @@ class EmployeeVersionRepository(Protocol):
 
 class EmployeeSkillPolicy(Protocol):
     async def are_bindable(self, *, tenant_id: UUID, skill_ids: list[UUID]) -> bool: ...
+
+
+class EmployeeToolPolicy(Protocol):
+    async def are_bindable(self, *, tenant_id: UUID, tool_ids: list[UUID]) -> bool: ...

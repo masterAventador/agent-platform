@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 
 import { getApiErrorMessage } from '../../auth/api/errors'
 import { usePublishedSkills } from '../../skills/api/queries'
+import { useAvailableTools } from '../../tools/api/queries'
 import type { EmployeeDefinition, WorkMode } from '../api/employees'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
 import './employees.css'
@@ -20,6 +21,7 @@ interface EmployeeFormValues {
   fileUpload: boolean
   scheduledTasks: boolean
   skillIds: string[]
+  toolIds: string[]
 }
 
 const defaultValues: EmployeeFormValues = {
@@ -33,6 +35,7 @@ const defaultValues: EmployeeFormValues = {
   fileUpload: false,
   scheduledTasks: false,
   skillIds: [],
+  toolIds: [],
 }
 
 export function EmployeeEditorPage() {
@@ -42,6 +45,7 @@ export function EmployeeEditorPage() {
   const updateEmployee = useUpdateEmployee(employeeId ?? '')
   const navigate = useNavigate()
   const skills = usePublishedSkills()
+  const tools = useAvailableTools()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
 
@@ -59,6 +63,7 @@ export function EmployeeEditorPage() {
       fileUpload: employee.definition.capabilities.file_upload,
       scheduledTasks: employee.definition.capabilities.scheduled_tasks,
       skillIds: employee.definition.skill_ids,
+      toolIds: employee.definition.tool_ids,
     })
   }, [editingEmployee.data, form])
 
@@ -80,7 +85,7 @@ export function EmployeeEditorPage() {
         file_upload: values.fileUpload,
       },
       skill_ids: values.skillIds,
-      tool_ids: existing?.tool_ids ?? [],
+      tool_ids: values.toolIds,
       knowledge_base_ids: existing?.knowledge_base_ids ?? [],
       approval_policy: existing?.approval_policy ?? {},
       release_strategy: existing?.release_strategy ?? { mode: 'all' },
@@ -164,6 +169,20 @@ export function EmployeeEditorPage() {
                 value: skill.id,
                 label: `${skill.name}（版本 ${skill.published_version}）`,
               }))}
+            />
+          </Form.Item>
+          <Form.Item label="Tools" name="toolIds">
+            <Select
+              mode="multiple"
+              loading={tools.isPending}
+              placeholder="选择当前企业已启用的 Tool"
+              options={tools.data?.map((tool) => {
+                const server = tools.servers?.find((candidate) => candidate.id === tool.server_id)
+                return {
+                  value: tool.id,
+                  label: `${server?.name ?? tool.server_id} / ${tool.name}`,
+                }
+              })}
             />
           </Form.Item>
           <Space>

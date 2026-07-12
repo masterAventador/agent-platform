@@ -21,6 +21,7 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
     TenantRecord,
 )
+from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
 
 ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     UserRecord,
@@ -35,6 +36,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     KnowledgeBaseRecord,
     SkillRecord,
     SkillVersionRecord,
+    McpServerRecord,
+    ToolRecord,
 )
 
 

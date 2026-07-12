@@ -59,6 +59,11 @@ const SkillDetailPage = lazy(() =>
     default: module.SkillDetailPage,
   })),
 )
+const ToolsPage = lazy(() =>
+  import('../features/tools/pages/ToolsPage').then((module) => ({
+    default: module.ToolsPage,
+  })),
+)
 
 export function App() {
   return (
@@ -102,6 +107,7 @@ function PlatformShell() {
             <Link to="/runs">任务中心</Link>
             <Link to="/knowledge-bases">知识库</Link>
             <Link to="/skills">Skill 中心</Link>
+            <Link to="/tools">工具与 MCP</Link>
           </Space>
         </nav>
       </Sider>
@@ -124,6 +130,7 @@ function PlatformShell() {
           <Route path="/knowledge-bases/:knowledgeBaseId" element={<KnowledgeBaseDetailPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/skills/:skillId" element={<SkillDetailPage />} />
+          <Route path="/tools" element={<ToolsPage />} />
         </Routes>
       </Content>
     </Layout>

@@ -8,3 +8,7 @@ class EmployeeNameAlreadyExists(Exception):
 
 class EmployeeSkillNotBindable(Exception):
     """数字员工只能绑定当前租户已发布的 Skill。"""
+
+
+class EmployeeToolNotBindable(Exception):
+    """数字员工只能绑定当前租户中已启用 Server 的已启用 Tool。"""

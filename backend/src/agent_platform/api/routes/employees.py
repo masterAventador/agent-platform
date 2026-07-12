@@ -11,6 +11,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeVersionRepository,
 )
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
+from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
 from agent_platform.platform.employees.entities import (
     Employee,
     EmployeeDraft,
@@ -22,6 +23,7 @@ from agent_platform.platform.employees.errors import (
     EmployeeNameAlreadyExists,
     EmployeeNotFound,
     EmployeeSkillNotBindable,
+    EmployeeToolNotBindable,
 )
 from agent_platform.platform.employees.services import EmployeeService
 
@@ -127,6 +129,7 @@ def _service(database_session: AsyncSession) -> EmployeeService:
         employees=SqlAlchemyEmployeeRepository(database_session),
         versions=SqlAlchemyEmployeeVersionRepository(database_session),
         skills=SqlAlchemySkillRepository(database_session),
+        tools=SqlAlchemyToolRepository(database_session),
     )
 
 
@@ -145,6 +148,11 @@ def _raise_employee_error(error: Exception) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "skill_not_bindable", "message": "只能绑定本企业已发布的 Skill"},
+        ) from error
+    if isinstance(error, EmployeeToolNotBindable):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "tool_not_bindable", "message": "只能绑定本企业已启用的 Tool"},
         ) from error
     raise error
 
@@ -172,7 +180,11 @@ async def create_employee(
                 draft=payload.to_draft(),
             )
             await database_session.commit()
-        except (EmployeeNameAlreadyExists, EmployeeSkillNotBindable) as error:
+        except (
+            EmployeeNameAlreadyExists,
+            EmployeeSkillNotBindable,
+            EmployeeToolNotBindable,
+        ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
     return EmployeeResponse.from_entity(employee)
@@ -239,7 +251,12 @@ async def update_employee(
                 draft=payload.to_draft(),
             )
             await database_session.commit()
-        except (EmployeeNotFound, EmployeeNameAlreadyExists, EmployeeSkillNotBindable) as error:
+        except (
+            EmployeeNotFound,
+            EmployeeNameAlreadyExists,
+            EmployeeSkillNotBindable,
+            EmployeeToolNotBindable,
+        ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
     return EmployeeResponse.from_entity(employee)
@@ -265,7 +282,7 @@ async def publish_employee(
                 published_by=user.id,
             )
             await database_session.commit()
-        except (EmployeeNotFound, EmployeeSkillNotBindable) as error:
+        except (EmployeeNotFound, EmployeeSkillNotBindable, EmployeeToolNotBindable) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
     return EmployeeResponse.from_entity(employee)
