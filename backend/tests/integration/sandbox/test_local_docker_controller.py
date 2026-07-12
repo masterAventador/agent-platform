@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from agent_platform.sandbox.controller.api import create_controller_app
 from agent_platform.sandbox.controller.config import ControllerSettings
-from agent_platform.sandbox.controller.service import LEASE_LABEL, MANAGED_LABEL
+from agent_platform.sandbox.controller.service import EPOCH_LABEL, LEASE_LABEL, MANAGED_LABEL
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_LOCAL_DOCKER_SANDBOX_TESTS") != "1",
@@ -30,13 +30,26 @@ def test_real_arm64_sandbox_lifecycle_is_hardened_and_leaves_no_container() -> N
     )
     client = TestClient(app, headers={"Authorization": f"Bearer {secret}"})
     lease_id = uuid4()
-    lease_headers = {"X-Sandbox-Lease-ID": str(lease_id)}
+    lease_headers = {
+        "X-Sandbox-Lease-ID": str(lease_id),
+        "X-Sandbox-Epoch": "1",
+    }
     sandbox_id: str | None = None
 
     try:
-        created = client.post("/v1/sandboxes", json={"lease_id": str(lease_id)})
+        created = client.post(
+            "/v1/sandboxes",
+            json={"lease_id": str(lease_id), "sandbox_epoch": 1},
+        )
         assert created.status_code == 200, created.text
         sandbox_id = created.json()["sandbox_id"]
+
+        discovered = client.get(
+            "/v1/sandboxes",
+            params={"lease_id": str(lease_id), "sandbox_epoch": 1},
+        )
+        assert discovered.status_code == 200, discovered.text
+        assert discovered.json() == {"sandbox_ids": [sandbox_id]}
 
         uploaded = client.put(
             f"/v1/sandboxes/{sandbox_id}/files",
@@ -139,6 +152,7 @@ def test_real_arm64_sandbox_lifecycle_is_hardened_and_leaves_no_container() -> N
         host = container.attrs["HostConfig"]
         assert container.attrs["Config"]["User"] == "65532:65532"
         assert container.attrs["Config"]["Labels"] == {
+            EPOCH_LABEL: "1",
             LEASE_LABEL: str(lease_id),
             MANAGED_LABEL: "true",
         }
@@ -155,7 +169,10 @@ def test_real_arm64_sandbox_lifecycle_is_hardened_and_leaves_no_container() -> N
 
         wrong_lease = client.post(
             f"/v1/sandboxes/{sandbox_id}/exec",
-            headers={"X-Sandbox-Lease-ID": str(uuid4())},
+            headers={
+                "X-Sandbox-Lease-ID": str(uuid4()),
+                "X-Sandbox-Epoch": "1",
+            },
             json={"command": "true"},
         )
         assert wrong_lease.status_code == 404
@@ -171,8 +188,12 @@ def test_real_arm64_sandbox_lifecycle_is_hardened_and_leaves_no_container() -> N
         assert all("yes bounded-output" not in " ".join(process) for process in processes)
     finally:
         if sandbox_id is not None:
-            deleted = client.delete(f"/v1/sandboxes/{sandbox_id}", headers=lease_headers)
-            assert deleted.status_code == 204
+            deleted = client.delete(
+                "/v1/sandboxes",
+                params={"lease_id": str(lease_id), "sandbox_epoch": 1},
+            )
+            assert deleted.status_code == 200
+            assert deleted.json() == {"sandbox_id": sandbox_id}
         remaining = docker_client.containers.list(
             all=True,
             filters={"label": [f"{MANAGED_LABEL}=true", f"{LEASE_LABEL}={lease_id}"]},

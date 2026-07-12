@@ -38,7 +38,10 @@ class FakeClient:
         self,
         name: str,
         arguments: Mapping[str, JsonValue],
+        *,
+        invocation_id: UUID | None = None,
     ) -> JsonValue:
+        del invocation_id
         return {"name": name, "argument_count": len(arguments)}
 
 

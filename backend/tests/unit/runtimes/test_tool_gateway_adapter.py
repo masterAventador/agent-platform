@@ -17,6 +17,7 @@ from agent_platform.platform.tool_gateway import (
 from agent_platform.platform.tools.entities import Tool, ToolRiskLevel
 from agent_platform.runtimes.tool_gateway_adapter import (
     InvocationContext,
+    OneTimeToolApprovalStore,
     ToolApprovalRequired,
     ToolGatewayAdapter,
 )
@@ -209,3 +210,59 @@ async def test_gateway_execution_error_is_sanitized_for_the_model() -> None:
 
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_one_time_approval_is_bound_to_run_tool_and_exact_arguments() -> None:
+    metadata = registry_tool()
+    trusted = invocation_context(tenant_id=metadata.tenant_id)
+    gateway = RecordingGateway(
+        ToolInvocationOutcome(decision=PolicyDecision.ALLOW, result={"ok": True})
+    )
+    approvals = OneTimeToolApprovalStore()
+    invocation_id = uuid4()
+    approvals.grant(
+        invocation_id=invocation_id,
+        run_id=trusted.run_id,
+        tool_id=metadata.id,
+        tool_name=metadata.name,
+        arguments={"customer_id": 42},
+    )
+    tool = ToolGatewayAdapter(
+        gateway=gateway,
+        invocation_context=trusted,
+        policy_context=PolicyContext(allowed_tool_ids=frozenset({metadata.id})),
+        approval_store=approvals,
+    ).adapt(metadata)
+
+    await tool.ainvoke({"customer_id": 41})
+    await tool.ainvoke({"customer_id": 42})
+    await tool.ainvoke({"customer_id": 42})
+
+    assert [context.approval_granted for _, context in gateway.calls] == [
+        False,
+        True,
+        False,
+    ]
+    assert gateway.calls[1][0].invocation_id == invocation_id
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"value": float("nan")},
+        {"value": object()},
+        {1: "non-string-key"},
+    ],
+)
+def test_one_time_approval_rejects_non_canonical_json(arguments: dict[object, object]) -> None:
+    approvals = OneTimeToolApprovalStore()
+
+    with pytest.raises((TypeError, ValueError)):
+        approvals.grant(
+            invocation_id=uuid4(),
+            run_id=uuid4(),
+            tool_id=uuid4(),
+            tool_name="unsafe",
+            arguments=arguments,
+        )

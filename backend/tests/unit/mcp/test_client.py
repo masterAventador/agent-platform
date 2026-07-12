@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from mcp import types
@@ -33,6 +34,7 @@ class FakeSession:
         self.initialized = False
         self.list_cursors: list[str | None] = []
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.call_metadata: list[dict[str, Any] | None] = []
 
     async def initialize(self) -> object:
         self.initialized = True
@@ -47,8 +49,11 @@ class FakeSession:
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> types.CallToolResult:
         self.calls.append((name, arguments or {}))
+        self.call_metadata.append(meta)
         await self._wait_or_raise()
         assert self.tool_result is not None
         return self.tool_result
@@ -164,6 +169,27 @@ async def test_call_tool_prefers_structured_content() -> None:
 
     assert result == {"count": 2, "items": ["a", "b"]}
     assert session.calls == [("search", {"query": "invoice"})]
+
+
+@pytest.mark.asyncio
+async def test_call_tool_sends_invocation_id_as_standard_request_metadata() -> None:
+    invocation_id: UUID = uuid4()
+    session = FakeSession(
+        tool_result=types.CallToolResult(
+            content=[types.TextContent(type="text", text="done")],
+        )
+    )
+    client = PythonSDKMCPClient(
+        MCPStreamableHTTPConfig(url="https://mcp.example.test/mcp"),
+        session_factory=session_factory_for(session),
+    )
+
+    await client.call_tool("external_write", {"value": "one"}, invocation_id=invocation_id)
+
+    assert session.calls == [("external_write", {"value": "one"})]
+    assert session.call_metadata == [
+        {"io.agent-platform/invocation-id": str(invocation_id)}
+    ]
 
 
 @pytest.mark.asyncio

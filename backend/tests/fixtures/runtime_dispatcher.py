@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from sqlalchemy import text
@@ -10,7 +11,10 @@ from agent_platform.config import AppSettings
 from agent_platform.workers.dispatcher_main import DispatcherHealth, run_dispatcher_service
 
 RUNTIME_E2E_DISPATCHER_READY_FILE = Path(
-    "/tmp/agent-platform-runtime-e2e-dispatcher-ready"
+    os.getenv(
+        "RUNTIME_E2E_DISPATCHER_READY_FILE",
+        "/tmp/agent-platform-runtime-e2e-dispatcher-ready",
+    )
 )
 
 

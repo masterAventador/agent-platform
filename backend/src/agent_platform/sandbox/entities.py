@@ -43,6 +43,8 @@ class SandboxLease:
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    epoch: int = 0
+    sandbox_epoch: int = 1
 
     @property
     def scope(self) -> SandboxScope:
@@ -79,6 +81,7 @@ class SandboxLease:
             last_error=None,
             created_at=timestamp,
             updated_at=timestamp,
+            sandbox_epoch=1,
         )
 
     def begin_provisioning(self, *, ttl: timedelta, now: datetime | None = None) -> SandboxLease:
@@ -91,6 +94,8 @@ class SandboxLease:
             expires_at=timestamp + ttl,
             last_error=None,
             updated_at=timestamp,
+            epoch=self.epoch + 1,
+            sandbox_epoch=self.sandbox_epoch + 1,
         )
 
     def activate(self, sandbox_id: str, *, now: datetime | None = None) -> SandboxLease:
@@ -102,6 +107,7 @@ class SandboxLease:
             status=SandboxLeaseStatus.ACTIVE,
             last_error=None,
             updated_at=_utc_now(now),
+            epoch=self.epoch + 1,
         )
 
     def begin_delete(self, *, now: datetime | None = None) -> SandboxLease:
@@ -110,6 +116,7 @@ class SandboxLease:
             status=SandboxLeaseStatus.DELETING,
             last_error=None,
             updated_at=_utc_now(now),
+            epoch=self.epoch + 1,
         )
 
     def renew(self, *, ttl: timedelta, now: datetime | None = None) -> SandboxLease:
@@ -125,6 +132,7 @@ class SandboxLease:
             status=SandboxLeaseStatus.DELETED,
             last_error=None,
             updated_at=_utc_now(now),
+            epoch=self.epoch + 1,
         )
 
     def mark_expired(self, *, now: datetime | None = None) -> SandboxLease:
@@ -133,6 +141,7 @@ class SandboxLease:
             status=SandboxLeaseStatus.EXPIRED,
             last_error=None,
             updated_at=_utc_now(now),
+            epoch=self.epoch + 1,
         )
 
     def mark_error(self, code: str, *, now: datetime | None = None) -> SandboxLease:
@@ -143,6 +152,7 @@ class SandboxLease:
             status=SandboxLeaseStatus.ERROR,
             last_error=code,
             updated_at=_utc_now(now),
+            epoch=self.epoch + 1,
         )
 
 

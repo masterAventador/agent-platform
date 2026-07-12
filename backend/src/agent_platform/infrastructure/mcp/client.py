@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
 from typing import Any, Protocol, cast, runtime_checkable
+from uuid import UUID
 
 import httpx
 from mcp import ClientSession, StdioServerParameters, types
@@ -44,6 +45,8 @@ class MCPSession(Protocol):
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> types.CallToolResult: ...
 
 
@@ -59,6 +62,8 @@ class MCPClient(Protocol):
         self,
         name: str,
         arguments: Mapping[str, JsonValue],
+        *,
+        invocation_id: UUID | None = None,
     ) -> JsonValue: ...
 
 
@@ -142,12 +147,23 @@ class PythonSDKMCPClient:
         self,
         name: str,
         arguments: Mapping[str, JsonValue],
+        *,
+        invocation_id: UUID | None = None,
     ) -> JsonValue:
         try:
             async with asyncio.timeout(self._config.timeout_seconds):
                 async with self._session_factory(self._config) as session:
                     await session.initialize()
-                    result = await session.call_tool(name, dict(arguments))
+                    metadata = (
+                        {"io.agent-platform/invocation-id": str(invocation_id)}
+                        if invocation_id is not None
+                        else None
+                    )
+                    result = await session.call_tool(
+                        name,
+                        dict(arguments),
+                        meta=metadata,
+                    )
                     if result.isError:
                         raise MCPToolExecutionError()
                     return self._normalize_result(result)

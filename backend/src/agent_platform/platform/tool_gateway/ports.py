@@ -26,6 +26,7 @@ class ToolExecutor(Protocol):
         definition: ToolDefinition,
         arguments: Mapping[str, object],
         credentials: Mapping[str, str],
+        invocation_id: UUID | None,
     ) -> object: ...
 
 

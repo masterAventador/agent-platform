@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, JsonValue
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import PlatformEvent
 
+PLATFORM_TERMINAL_STATUS_KEY = "agent_platform_terminal_status"
+
 
 class RuntimeStartRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -98,5 +100,7 @@ class PreparedRuntime(Protocol):
     def employee_definition(self) -> dict[str, JsonValue]: ...
 
     async def close(self) -> None: ...
+
+    async def detach(self) -> None: ...
 
     async def renew(self) -> None: ...

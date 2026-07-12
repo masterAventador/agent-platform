@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -10,6 +11,7 @@ from agent_platform.sandbox.entities import SandboxLease, SandboxLeaseStatus, Sa
 from agent_platform.sandbox.errors import (
     SandboxLeaseBusy,
     SandboxLeaseNotFound,
+    SandboxLeaseUnavailable,
     SandboxProviderNotConfigured,
 )
 from agent_platform.sandbox.manager import SandboxManager
@@ -29,6 +31,19 @@ class MemoryLeaseRepository(SandboxLeaseRepository):
 
     async def update(self, lease: SandboxLease) -> None:
         self.leases[lease.id] = lease
+
+    async def update_if_current(
+        self,
+        lease: SandboxLease,
+        *,
+        expected_status: SandboxLeaseStatus,
+        expected_epoch: int,
+    ) -> bool:
+        current = self.leases[lease.id]
+        if current.status is not expected_status or getattr(current, "epoch", 0) != expected_epoch:
+            return False
+        self.leases[lease.id] = lease
+        return True
 
     async def get(self, *, tenant_id: UUID, lease_id: UUID) -> SandboxLease | None:
         lease = self.leases.get(lease_id)
@@ -110,11 +125,15 @@ class FakeProvider:
         self.acquire_calls = 0
         self.reconnect_calls: list[str] = []
         self.delete_calls: list[str] = []
+        self.delete_generation_calls: list[tuple[str, int]] = []
+        self.discover_calls: list[UUID] = []
+        self.delete_by_lease_calls: list[tuple[UUID, int]] = []
+        self.disconnect_calls: list[str] = []
+        self.discovered: dict[UUID, list[str]] = {}
         self.acquire_error: Exception | None = None
         self.delete_error: Exception | None = None
 
     async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
-        del request
         self.acquire_calls += 1
         if self.acquire_error is not None:
             raise self.acquire_error
@@ -123,22 +142,53 @@ class FakeProvider:
             sandbox_id=sandbox_id,
             workspace=FakeWorkspace(),
             backend=FakeBackend(sandbox_id),
+            sandbox_epoch=request.sandbox_epoch,
         )
 
-    async def reconnect(self, *, sandbox_id: str, lease_id: UUID) -> ProviderSandbox:
+    async def reconnect(
+        self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+    ) -> ProviderSandbox:
         del lease_id
         self.reconnect_calls.append(sandbox_id)
         return ProviderSandbox(
             sandbox_id=sandbox_id,
             workspace=FakeWorkspace(),
             backend=FakeBackend(sandbox_id),
+            sandbox_epoch=sandbox_epoch,
         )
 
-    async def delete(self, *, sandbox_id: str, lease_id: UUID) -> None:
+    async def delete(self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int) -> None:
         del lease_id
         self.delete_calls.append(sandbox_id)
+        self.delete_generation_calls.append((sandbox_id, sandbox_epoch))
         if self.delete_error is not None:
             raise self.delete_error
+
+    async def discover(self, *, lease_id: UUID, sandbox_epoch: int) -> list[str]:
+        del sandbox_epoch
+        self.discover_calls.append(lease_id)
+        return list(self.discovered.get(lease_id, []))
+
+    async def delete_by_lease(self, *, lease_id: UUID, sandbox_epoch: int) -> str | None:
+        self.delete_by_lease_calls.append((lease_id, sandbox_epoch))
+        discovered = await self.discover(
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        )
+        if len(discovered) > 1:
+            raise RuntimeError("ambiguous sandbox discovery")
+        if not discovered:
+            return None
+        sandbox_id = discovered[0]
+        await self.delete(
+            sandbox_id=sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        )
+        return sandbox_id
+
+    async def disconnect(self, *, sandbox_id: str) -> None:
+        self.disconnect_calls.append(sandbox_id)
 
 
 class FakeBackendValidator:
@@ -155,6 +205,75 @@ def scope() -> SandboxScope:
         run_id=uuid4(),
         thread_id="thread-1",
     )
+
+
+def test_sandbox_epoch_changes_only_when_a_new_container_generation_starts(
+    scope: SandboxScope,
+) -> None:
+    lease = SandboxLease.create(
+        scope=scope,
+        provider="fake",
+        ttl=timedelta(minutes=30),
+    )
+
+    assert lease.sandbox_epoch == 1
+    assert lease.activate("sandbox-1").sandbox_epoch == 1
+    assert lease.activate("sandbox-1").begin_delete().sandbox_epoch == 1
+    assert lease.mark_error("failed").sandbox_epoch == 1
+    assert lease.activate("sandbox-1").renew(ttl=timedelta(minutes=30)).sandbox_epoch == 1
+    assert lease.begin_provisioning(ttl=timedelta(minutes=30)).sandbox_epoch == 2
+
+
+def test_provider_generation_contracts_require_an_explicit_sandbox_epoch(
+    scope: SandboxScope,
+) -> None:
+    with pytest.raises(TypeError, match="sandbox_epoch"):
+        SandboxAcquireRequest(
+            lease_id=uuid4(),
+            scope=scope,
+            expires_at=datetime(2026, 7, 14, tzinfo=UTC),
+        )
+    with pytest.raises(TypeError, match="sandbox_epoch"):
+        ProviderSandbox(
+            sandbox_id="sandbox",
+            workspace=FakeWorkspace(),
+            backend=FakeBackend("sandbox"),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_wrong_provider_generation_is_cleaned_with_its_actual_epoch(
+    scope: SandboxScope,
+    cleanup_fails: bool,
+) -> None:
+    repository = MemoryLeaseRepository()
+
+    class WrongGenerationProvider(FakeProvider):
+        async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
+            if cleanup_fails:
+                self.delete_error = RuntimeError("cleanup failed")
+            return ProviderSandbox(
+                sandbox_id="wrong-generation",
+                workspace=FakeWorkspace(),
+                backend=FakeBackend("wrong-generation"),
+                sandbox_epoch=request.sandbox_epoch + 1,
+            )
+
+    provider = WrongGenerationProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+
+    with pytest.raises(ValueError, match="generation"):
+        await manager.acquire(scope=scope, ttl=timedelta(minutes=30))
+
+    assert provider.delete_generation_calls == [("wrong-generation", 2)]
+    assert all(epoch != 1 for _, epoch in provider.delete_generation_calls)
+    assert provider.disconnect_calls == (["wrong-generation"] if cleanup_fails else [])
 
 
 @pytest.fixture
@@ -213,6 +332,31 @@ async def test_reconnect_requires_the_complete_trusted_scope(
 
 
 @pytest.mark.asyncio
+async def test_recovery_claim_renews_lease_before_provider_reconnect(
+    scope: SandboxScope,
+    dependencies: tuple[SandboxManager, MemoryLeaseRepository, FakeProvider],
+) -> None:
+    manager, repository, provider = dependencies
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    environment = await manager.acquire(
+        scope=scope,
+        ttl=timedelta(seconds=5),
+        now=now,
+    )
+
+    recovered = await manager.reconnect_active(
+        scope=scope,
+        ttl=timedelta(minutes=30),
+        now=now + timedelta(seconds=4),
+    )
+
+    persisted = repository.leases[environment.lease.id]
+    assert persisted.expires_at == now + timedelta(seconds=4, minutes=30)
+    assert recovered.lease == persisted
+    assert provider.reconnect_calls == [environment.lease.sandbox_id]
+
+
+@pytest.mark.asyncio
 async def test_delete_is_idempotent(
     scope: SandboxScope,
     dependencies: tuple[SandboxManager, MemoryLeaseRepository, FakeProvider],
@@ -243,6 +387,270 @@ async def test_cleanup_deletes_expired_provider_sandbox(
     assert cleaned == [environment.lease.id]
     assert repository.leases[environment.lease.id].status is SandboxLeaseStatus.EXPIRED
     assert provider.delete_calls == [environment.lease.sandbox_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discovered", [[], ["orphan-box"]])
+async def test_cleanup_discovers_expired_provisioning_lease_without_sandbox_id(
+    scope: SandboxScope,
+    dependencies: tuple[SandboxManager, MemoryLeaseRepository, FakeProvider],
+    discovered: list[str],
+) -> None:
+    manager, repository, provider = dependencies
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    lease = SandboxLease.create(
+        scope=scope,
+        provider=provider.name,
+        ttl=timedelta(seconds=1),
+        now=now,
+    )
+    await repository.add(lease)
+    provider.discovered[lease.id] = discovered
+
+    cleaned = await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+
+    assert cleaned == [lease.id]
+    assert repository.leases[lease.id].status is SandboxLeaseStatus.EXPIRED
+    assert provider.discover_calls == [lease.id]
+    assert len(provider.delete_by_lease_calls) == 1
+    assert provider.delete_calls == discovered
+
+
+@pytest.mark.asyncio
+async def test_cleanup_fails_closed_when_lease_discovery_is_ambiguous(
+    scope: SandboxScope,
+    dependencies: tuple[SandboxManager, MemoryLeaseRepository, FakeProvider],
+) -> None:
+    manager, repository, provider = dependencies
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    lease = SandboxLease.create(
+        scope=scope,
+        provider=provider.name,
+        ttl=timedelta(seconds=1),
+        now=now,
+    )
+    await repository.add(lease)
+    provider.discovered[lease.id] = ["box-one", "box-two"]
+
+    cleaned = await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+
+    assert cleaned == []
+    assert repository.leases[lease.id].status is SandboxLeaseStatus.ERROR
+    assert repository.leases[lease.id].last_error == "cleanup_failed"
+    assert provider.delete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_late_acquire_cannot_overwrite_expired_lease_and_is_deleted(
+    scope: SandboxScope,
+) -> None:
+    repository = MemoryLeaseRepository()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeProvider):
+        async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
+            self.acquire_calls += 1
+            started.set()
+            await release.wait()
+            sandbox_id = "late-created-box"
+            self.discovered[request.lease_id] = [sandbox_id]
+            return ProviderSandbox(
+                sandbox_id=sandbox_id,
+                workspace=FakeWorkspace(),
+                backend=FakeBackend(sandbox_id),
+                sandbox_epoch=request.sandbox_epoch,
+            )
+
+    provider = BlockingProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    acquire_task = asyncio.create_task(
+        manager.acquire(scope=scope, ttl=timedelta(seconds=1), now=now)
+    )
+    await started.wait()
+
+    cleaned = await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+    release.set()
+
+    with pytest.raises(SandboxLeaseUnavailable):
+        await acquire_task
+    lease = next(iter(repository.leases.values()))
+    assert cleaned == [lease.id]
+    assert lease.status is SandboxLeaseStatus.EXPIRED
+    assert provider.delete_calls == ["late-created-box"]
+
+
+@pytest.mark.asyncio
+async def test_late_acquire_failure_cannot_overwrite_expired_lease(
+    scope: SandboxScope,
+) -> None:
+    repository = MemoryLeaseRepository()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingFailureProvider(FakeProvider):
+        async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
+            del request
+            started.set()
+            await release.wait()
+            raise RuntimeError("late provider failure")
+
+    provider = BlockingFailureProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    acquire_task = asyncio.create_task(
+        manager.acquire(scope=scope, ttl=timedelta(seconds=1), now=now)
+    )
+    await started.wait()
+    await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+    release.set()
+
+    with pytest.raises(RuntimeError, match="late provider failure"):
+        await acquire_task
+    lease = next(iter(repository.leases.values()))
+    assert lease.status is SandboxLeaseStatus.EXPIRED
+    assert lease.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_late_reconnect_failure_cannot_overwrite_expired_lease(
+    scope: SandboxScope,
+) -> None:
+    repository = MemoryLeaseRepository()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingReconnectProvider(FakeProvider):
+        async def reconnect(
+            self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+        ) -> ProviderSandbox:
+            del sandbox_id, lease_id, sandbox_epoch
+            started.set()
+            await release.wait()
+            raise RuntimeError("late reconnect failure")
+
+    provider = BlockingReconnectProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    environment = await manager.acquire(scope=scope, ttl=timedelta(seconds=1), now=now)
+    reconnect_task = asyncio.create_task(
+        manager.reconnect(lease_id=environment.lease.id, scope=scope)
+    )
+    await started.wait()
+    await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+    release.set()
+
+    with pytest.raises(RuntimeError, match="late reconnect failure"):
+        await reconnect_task
+    persisted = repository.leases[environment.lease.id]
+    assert persisted.status is SandboxLeaseStatus.EXPIRED
+    assert persisted.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_late_reconnect_success_disconnects_client_without_deleting_new_owner_sandbox(
+    scope: SandboxScope,
+) -> None:
+    repository = MemoryLeaseRepository()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingReconnectProvider(FakeProvider):
+        async def reconnect(
+            self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+        ) -> ProviderSandbox:
+            del lease_id
+            started.set()
+            await release.wait()
+            return ProviderSandbox(
+                sandbox_id=sandbox_id,
+                workspace=FakeWorkspace(),
+                backend=FakeBackend(sandbox_id),
+                sandbox_epoch=sandbox_epoch,
+            )
+
+    provider = BlockingReconnectProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    environment = await manager.acquire(scope=scope, ttl=timedelta(seconds=1), now=now)
+    reconnect_task = asyncio.create_task(
+        manager.reconnect(lease_id=environment.lease.id, scope=scope)
+    )
+    await started.wait()
+    await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+    release.set()
+
+    with pytest.raises(SandboxLeaseUnavailable):
+        await reconnect_task
+    assert provider.disconnect_calls == [environment.lease.sandbox_id]
+    assert provider.delete_calls == [environment.lease.sandbox_id]
+
+
+@pytest.mark.asyncio
+async def test_late_old_generation_cleanup_failure_does_not_poison_new_provisioning_epoch(
+    scope: SandboxScope,
+) -> None:
+    repository = MemoryLeaseRepository()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeProvider):
+        async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
+            started.set()
+            await release.wait()
+            sandbox_id = "late-old-generation-box"
+            return ProviderSandbox(
+                sandbox_id=sandbox_id,
+                workspace=FakeWorkspace(),
+                backend=FakeBackend(sandbox_id),
+                sandbox_epoch=request.sandbox_epoch,
+            )
+
+    provider = BlockingProvider()
+    manager = SandboxManager(
+        unit_of_work_factory=MemoryUnitOfWorkFactory(repository),
+        providers={provider.name: provider},
+        provider_name=provider.name,
+        backend_validator=FakeBackendValidator(),
+    )
+    now = datetime(2026, 7, 13, tzinfo=UTC)
+    acquire_task = asyncio.create_task(
+        manager.acquire(scope=scope, ttl=timedelta(seconds=1), now=now)
+    )
+    await started.wait()
+    await manager.cleanup_expired(now=now + timedelta(seconds=2), limit=10)
+    expired = next(iter(repository.leases.values()))
+    new_generation = expired.begin_provisioning(
+        ttl=timedelta(minutes=30), now=now + timedelta(seconds=3)
+    )
+    await repository.update(new_generation)
+    provider.delete_error = RuntimeError("late cleanup failed")
+    release.set()
+
+    with pytest.raises(SandboxLeaseUnavailable):
+        await acquire_task
+    assert repository.leases[new_generation.id] == new_generation
 
 
 @pytest.mark.asyncio
@@ -380,6 +788,7 @@ async def test_backend_capability_is_validated_before_environment_is_returned(
                 sandbox_id=provisioned.sandbox_id,
                 workspace=provisioned.workspace,
                 backend=object(),
+                sandbox_epoch=provisioned.sandbox_epoch,
             )
 
     provider = InvalidBackendProvider()
@@ -411,6 +820,7 @@ async def test_validation_error_survives_cleanup_error_and_lease_is_stable_error
                 sandbox_id=provisioned.sandbox_id,
                 workspace=provisioned.workspace,
                 backend=object(),
+                sandbox_epoch=provisioned.sandbox_epoch,
             )
 
     provider = InvalidBackendProvider()
@@ -481,7 +891,9 @@ async def test_reconnect_failure_marks_lease_error(
     repository = MemoryLeaseRepository()
 
     class ReconnectFailingProvider(FakeProvider):
-        async def reconnect(self, *, sandbox_id: str, lease_id: UUID) -> ProviderSandbox:
+        async def reconnect(
+            self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+        ) -> ProviderSandbox:
             del lease_id
             self.reconnect_calls.append(sandbox_id)
             raise RuntimeError("provider reconnect secret")
@@ -534,11 +946,17 @@ async def test_lifecycle_state_is_committed_before_each_external_provider_call(
             )
             return await super().acquire(request)
 
-        async def delete(self, *, sandbox_id: str, lease_id: UUID) -> None:
+        async def delete(
+            self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+        ) -> None:
             assert unit_of_work_factory.commits[-1][environment.lease.id].status is (
                 SandboxLeaseStatus.DELETING
             )
-            await super().delete(sandbox_id=sandbox_id, lease_id=lease_id)
+            await super().delete(
+                sandbox_id=sandbox_id,
+                lease_id=lease_id,
+                sandbox_epoch=sandbox_epoch,
+            )
 
     provider = DurabilityCheckingProvider()
     manager = SandboxManager(

@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Uuid
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Uuid, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agent_platform.infrastructure.database.base import Base
-from agent_platform.platform.tool_gateway.models import ToolAuditEvent
+from agent_platform.platform.tool_gateway.models import AuditEventType, ToolAuditEvent
 
 
 class ToolAuditPersistenceError(RuntimeError):
@@ -17,6 +17,14 @@ class ToolAuditPersistenceError(RuntimeError):
 
 class ToolAuditRecord(Base):
     __tablename__ = "tool_audit_events"
+    __table_args__ = (
+        Index(
+            "ix_tool_audit_events_invocation_id",
+            "invocation_id",
+            postgresql_where=text("invocation_id IS NOT NULL"),
+            sqlite_where=text("invocation_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(64))
@@ -33,6 +41,10 @@ class ToolAuditRecord(Base):
     argument_size_bytes: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     succeeded: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    invocation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+    )
 
 
 class SqlAlchemyToolAuditSink:
@@ -67,4 +79,29 @@ class SqlAlchemyToolAuditSink:
             argument_size_bytes=event.argument_summary.size_bytes,
             reason=event.reason,
             succeeded=event.succeeded,
+            invocation_id=event.invocation_id,
         )
+
+
+class SqlAlchemyToolAuditReader:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def has_started(
+        self,
+        *,
+        tenant_id: UUID,
+        run_id: UUID,
+        invocation_id: UUID,
+    ) -> bool:
+        result = await self._session.execute(
+            select(ToolAuditRecord.id)
+            .where(
+                ToolAuditRecord.invocation_id == invocation_id,
+                ToolAuditRecord.tenant_id == tenant_id,
+                ToolAuditRecord.run_id == run_id,
+                ToolAuditRecord.event_type == AuditEventType.STARTED.value,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None

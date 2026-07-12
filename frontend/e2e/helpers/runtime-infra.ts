@@ -17,6 +17,13 @@ export const runtimeReadyFiles = [
   '/tmp/agent-platform-runtime-e2e-worker-ready',
 ] as const
 
+export const recoveryDatabaseName = 'agent_platform_runtime_recovery_e2e'
+export const recoveryDatabaseUrl =
+  'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_runtime_recovery_e2e'
+export const recoveryRedisUrl = 'redis://:agent-platform-local-redis@127.0.0.1:6379/4'
+export const recoveryQueueStream = 'agent-platform:runtime-recovery-e2e:runs'
+export const recoveryQueueGroup = 'agent-platform-runtime-recovery-e2e-workers'
+
 const composeFile = resolve(repositoryRoot, 'infra/compose/core.yml')
 const composeEnv = resolve(repositoryRoot, 'infra/compose/.env.example')
 const composeArgs = ['compose', '--env-file', composeEnv, '-f', composeFile]
@@ -62,6 +69,13 @@ export function queryRuntimeDatabase(sql: string): string {
     'ON_ERROR_STOP=1',
     '-c',
     sql,
+  ])
+}
+
+export function queryRecoveryDatabase(sql: string): string {
+  return composeExec('postgres', [
+    'psql', '-U', 'agent_platform', '-d', recoveryDatabaseName,
+    '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql,
   ])
 }
 

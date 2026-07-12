@@ -53,10 +53,18 @@ docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T \
   AGENT_PLATFORM_DATABASE_URL="postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/${DATABASE_NAME}" \
     uv run alembic upgrade head
 )
+HEAD_REVISION="$(cd "${ROOT_DIR}/backend" && uv run alembic heads | sed -E 's/ .*//')"
+DATABASE_REVISION="$(docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T \
+  postgres psql -U agent_platform -d "${DATABASE_NAME}" -Atc 'select version_num from alembic_version')"
+if [[ "${DATABASE_REVISION}" != "${HEAD_REVISION}" ]]; then
+  echo "Runtime E2E database is not at Alembic head" >&2
+  exit 2
+fi
 
 cd "${ROOT_DIR}/frontend"
 PLAYWRIGHT_RUNTIME_BASE_URL="http://127.0.0.1:15174" \
 PLAYWRIGHT_RUNTIME_MODEL_PROVIDER="openai" \
 PLAYWRIGHT_RUNTIME_MODEL_NAME="gpt-5" \
 PLAYWRIGHT_RUNTIME_EXPECTED_OUTPUT="Runtime E2E completed in the real worker." \
+PLAYWRIGHT_RUNTIME_EXPECTED_SCHEMA_VERSION="${HEAD_REVISION}" \
 pnpm exec playwright test --config playwright.runtime.config.ts

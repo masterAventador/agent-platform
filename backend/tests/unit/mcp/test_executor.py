@@ -20,7 +20,7 @@ from agent_platform.platform.tool_gateway import ToolDefinition, ToolExecutor, T
 class RecordingClient:
     result: JsonValue = None
     error: Exception | None = None
-    calls: list[tuple[str, Mapping[str, JsonValue]]] = field(default_factory=list)
+    calls: list[tuple[str, Mapping[str, JsonValue], UUID | None]] = field(default_factory=list)
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -29,8 +29,10 @@ class RecordingClient:
         self,
         name: str,
         arguments: Mapping[str, JsonValue],
+        *,
+        invocation_id: UUID | None = None,
     ) -> JsonValue:
-        self.calls.append((name, arguments))
+        self.calls.append((name, arguments, invocation_id))
         if self.error is not None:
             raise self.error
         return self.result
@@ -81,17 +83,19 @@ async def test_execute_resolves_client_from_trusted_definition_and_calls_tool() 
         "fields": ["name", None],
     }
 
+    invocation_id = uuid4()
     result = await accepts_tool_executor(executor).execute(
         definition=definition,
         arguments=arguments,
         credentials=credentials,
+        invocation_id=invocation_id,
     )
 
     assert result == {"records": [1, 2]}
     assert resolver.calls == [
         (definition.tenant_id, definition.server_id, credentials)
     ]
-    assert client.calls == [(definition.name, arguments)]
+    assert client.calls == [(definition.name, arguments, invocation_id)]
 
 
 @pytest.mark.asyncio

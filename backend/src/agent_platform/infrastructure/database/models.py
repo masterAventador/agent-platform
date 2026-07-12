@@ -4,6 +4,7 @@ from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
 )
+from agent_platform.infrastructure.database.repositories.dead_letters import RunDeadLetterRecord
 from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
     EmployeeVersionRecord,
@@ -13,6 +14,9 @@ from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
     RunEventRecord,
     RunRecord,
+)
+from agent_platform.infrastructure.database.repositories.runtime_ownership import (
+    RuntimeOwnershipRecord,
 )
 from agent_platform.infrastructure.database.repositories.sandbox import SandboxLeaseRecord
 from agent_platform.infrastructure.database.repositories.skills import (
@@ -35,6 +39,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     RunRecord,
     RunEventRecord,
     RunCommandRecord,
+    RuntimeOwnershipRecord,
+    RunDeadLetterRecord,
     KnowledgeBaseRecord,
     SkillRecord,
     SkillVersionRecord,

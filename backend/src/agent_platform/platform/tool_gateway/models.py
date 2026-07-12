@@ -33,6 +33,7 @@ class ToolInvocation:
     tool_id: UUID
     tool_name: str
     arguments: Mapping[str, object]
+    invocation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class ToolAuditEvent:
     argument_summary: ArgumentSummary
     reason: str | None = None
     succeeded: bool | None = None
+    invocation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

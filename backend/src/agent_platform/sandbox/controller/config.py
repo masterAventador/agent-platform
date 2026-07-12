@@ -17,6 +17,7 @@ class ControllerSettings:
     max_output_bytes: int = 1024 * 1024
     max_batch_bytes: int = 16 * 1024 * 1024
     max_timeout_seconds: int = 120
+    tombstone_ttl_seconds: int = 3_600
     workspace_bytes: int = 64 * 1024 * 1024
     memory_limit: str = "256m"
     nano_cpus: int = 500_000_000
@@ -34,6 +35,7 @@ class ControllerSettings:
             self.max_output_bytes,
             self.max_batch_bytes,
             self.max_timeout_seconds,
+            self.tombstone_ttl_seconds,
             self.workspace_bytes,
             self.nano_cpus,
             self.pids_limit,
@@ -44,6 +46,8 @@ class ControllerSettings:
             raise ValueError("controller 单文件限制超过安全上限")
         if self.max_file_bytes > self.max_batch_bytes:
             raise ValueError("controller 单文件限制不能超过批量限制")
+        if self.tombstone_ttl_seconds < self.max_timeout_seconds:
+            raise ValueError("controller tombstone TTL 不能短于最大请求时长")
 
     @property
     def max_request_bytes(self) -> int:

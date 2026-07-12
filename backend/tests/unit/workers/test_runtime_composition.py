@@ -24,6 +24,7 @@ from agent_platform.workers.runtime_composition import (
     UntrustedRuntimeDefinition,
     extend_runtime_definition,
 )
+from agent_platform.workers.runtime_recovery import RuntimeRecoveryTransient
 
 
 class EmptyStorage:
@@ -39,13 +40,22 @@ class RecordingWorkspace:
         self.writes.append((path, content))
 
 
+class RecordingBackend(SandboxBackendProtocol):
+    def __init__(self) -> None:
+        self.detach_calls = 0
+
+    async def aclose(self) -> None:
+        self.detach_calls += 1
+
+
 class RecordingSandboxManager:
     def __init__(self) -> None:
         self.scope: SandboxScope | None = None
         self.ttl: timedelta | None = None
         self.workspace = RecordingWorkspace()
-        self.backend = SandboxBackendProtocol()
+        self.backend = RecordingBackend()
         self.deleted: list[tuple[UUID, SandboxScope]] = []
+        self.reconnected: list[SandboxScope] = []
         self.delete_error: Exception | None = None
 
     async def acquire(self, *, scope: SandboxScope, ttl: timedelta):
@@ -63,15 +73,38 @@ class RecordingSandboxManager:
         if self.delete_error is not None:
             raise self.delete_error
 
+    async def reconnect_active(
+        self,
+        *,
+        scope: SandboxScope,
+        ttl: timedelta,
+    ):
+        del ttl
+        self.reconnected.append(scope)
+        lease = SandboxLease.create(scope=scope, provider="test", ttl=timedelta(hours=1))
+        return RunExecutionEnvironment(
+            lease=lease.activate("box"),
+            workspace=self.workspace,
+            backend=self.backend,
+        )
+
 
 class RecordingSelector:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        error: Exception | None = None,
+    ) -> None:
         self.selection: dict[str, object] | None = None
         self.runtime = object()
         self.fail = fail
+        self.error = error
 
     def select(self, **selection):
         self.selection = selection
+        if self.error is not None:
+            raise self.error
         if self.fail:
             raise RuntimeError("selection failed")
         return self.runtime
@@ -228,7 +261,41 @@ async def test_composed_resolver_uses_one_environment_for_skills_and_runtime(
 
 
 @pytest.mark.asyncio
-async def test_resolver_releases_environment_when_runtime_selection_fails(
+async def test_composed_resolver_recovers_the_existing_sandbox_without_acquiring_another(
+    session_factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+    )
+
+    prepared = await resolver.recover(run, autonomous_definition())
+
+    scope = SandboxScope(
+        tenant_id=run.tenant_id,
+        user_id=run.created_by,
+        run_id=run.id,
+        thread_id=run.thread_id,
+    )
+    assert manager.scope is None
+    assert manager.reconnected == [scope]
+    assert prepared.environment.workspace is manager.workspace
+
+
+@pytest.mark.asyncio
+async def test_initial_transient_preparation_detaches_without_deleting_environment(
     session_factory,
 ) -> None:
     run = Run.create(
@@ -250,20 +317,44 @@ async def test_resolver_releases_environment_when_runtime_selection_fails(
     with pytest.raises(RuntimeError, match="selection failed"):
         await resolver.resolve(run, autonomous_definition())
 
+    assert manager.deleted == []
+    assert manager.backend.detach_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_initial_permanent_preparation_defers_delete_until_failure_is_persisted(
+    session_factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(
+            error=UntrustedRuntimeDefinition("permanent")
+        ),
+    )
+
+    with pytest.raises(UntrustedRuntimeDefinition) as captured:
+        await resolver.resolve(run, autonomous_definition())
+
+    assert manager.deleted == []
+    await captured.value.cleanup_after_failure()
     assert len(manager.deleted) == 1
 
 
 @pytest.mark.asyncio
-async def test_preparation_error_is_not_masked_when_sandbox_delete_fails(
+async def test_transient_recovery_composition_detaches_without_deleting_and_can_retry(
     session_factory,
-    monkeypatch,
 ) -> None:
-    logged: list[tuple[str, dict[str, str]]] = []
-    monkeypatch.setattr(
-        runtime_composition_module.logger,
-        "error",
-        lambda message, *, extra: logged.append((message, extra)),
-    )
     run = Run.create(
         tenant_id=uuid4(),
         employee_id=uuid4(),
@@ -272,7 +363,38 @@ async def test_preparation_error_is_not_masked_when_sandbox_delete_fails(
         input_data={},
     )
     manager = RecordingSandboxManager()
-    manager.delete_error = ValueError("provider secret must not be logged")
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(fail=True),
+    )
+
+    with pytest.raises(RuntimeRecoveryTransient):
+        await resolver.recover(run, autonomous_definition())
+
+    assert manager.deleted == []
+    assert manager.backend.detach_calls == 1
+
+    resolver._runtime_selector.fail = False
+    prepared = await resolver.recover(run, autonomous_definition())
+    assert prepared.runtime is resolver._runtime_selector.runtime
+    assert manager.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_transient_preparation_error_detaches_without_deleting_sandbox(
+    session_factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
@@ -284,9 +406,8 @@ async def test_preparation_error_is_not_masked_when_sandbox_delete_fails(
     with pytest.raises(RuntimeError, match="selection failed"):
         await resolver.resolve(run, autonomous_definition())
 
-    assert len(manager.deleted) == 1
-    assert logged == [("runtime_preparation_cleanup_failed", {"run_id": str(run.id)})]
-    assert "provider secret" not in str(logged)
+    assert manager.deleted == []
+    assert manager.backend.detach_calls == 1
 
 
 @pytest.mark.asyncio
@@ -356,3 +477,44 @@ def test_selector_routes_only_published_workflow_references() -> None:
         ("deep-agent", environment, "openai:gpt-5"),
         (workflow_id, 3, environment, "openai:gpt-5"),
     ]
+
+
+def test_default_autonomous_selector_injects_durable_checkpointer(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+    checkpointer = object()
+    monkeypatch.setattr(
+        runtime_composition_module,
+        "create_deep_agent_runtime",
+        lambda tools, environment, model, durable_checkpointer, approval_store: (
+            calls.append((environment, model, durable_checkpointer)) or object()
+        ),
+    )
+    selector = PlatformRuntimeSelector(
+        workflow_factory=lambda workflow_id, version, tools, environment, model: object(),
+        checkpointer=checkpointer,
+    )
+    manager = RecordingSandboxManager()
+    scope = SandboxScope(
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        run_id=uuid4(),
+        thread_id="thread",
+    )
+    environment = RunExecutionEnvironment(
+        lease=SandboxLease.create(
+            scope=scope,
+            provider="test",
+            ttl=timedelta(hours=1),
+        ).activate("box"),
+        workspace=manager.workspace,
+        backend=manager.backend,
+    )
+
+    selector.select(
+        capabilities=PublishedRuntimeCapabilities.from_definition(autonomous_definition()),
+        tools=[],
+        environment=environment,
+        model="openai:gpt-5",
+    )
+
+    assert calls == [(environment, "openai:gpt-5", checkpointer)]

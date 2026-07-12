@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,8 +16,12 @@ class AppSettings(BaseSettings):
     redis_url: str = "redis://:agent-platform-local-redis@127.0.0.1:6379/0"
     run_queue_stream_name: str = "agent-platform:runs"
     run_queue_group_name: str = "agent-platform-workers"
+    run_queue_dead_letter_stream_name: str = "agent-platform:runs:dlq"
     queue_pending_min_idle_ms: int = Field(default=1_000, ge=1)
+    queue_max_delivery_attempts: int = Field(default=5, ge=1, le=100)
     worker_retry_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
+    runtime_lease_seconds: int = Field(default=30, ge=3, le=300)
+    runtime_heartbeat_seconds: float = Field(default=10.0, ge=1, le=100)
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"
@@ -45,3 +49,9 @@ class AppSettings(BaseSettings):
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
+
+    @model_validator(mode="after")
+    def validate_runtime_heartbeat(self) -> "AppSettings":
+        if self.runtime_heartbeat_seconds >= self.runtime_lease_seconds:
+            raise ValueError("runtime heartbeat must be shorter than runtime lease")
+        return self

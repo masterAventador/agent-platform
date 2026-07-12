@@ -66,7 +66,9 @@ class RecordingExecutor:
         definition: ToolDefinition,
         arguments: Mapping[str, object],
         credentials: Mapping[str, str],
+        invocation_id: UUID | None,
     ) -> object:
+        del invocation_id
         self.calls.append((definition, arguments, credentials))
         return self.result
 
@@ -78,9 +80,29 @@ class SecretLeakingExecutor:
         definition: ToolDefinition,
         arguments: Mapping[str, object],
         credentials: Mapping[str, str],
+        invocation_id: UUID | None,
     ) -> object:
-        del definition, arguments
+        del definition, arguments, invocation_id
         raise RuntimeError(f"upstream rejected token {credentials['token']}")
+
+
+@dataclass
+class IdempotencyRecordingExecutor:
+    invocation_ids: list[UUID | None] = field(default_factory=list)
+    arguments: list[Mapping[str, object]] = field(default_factory=list)
+
+    async def execute(
+        self,
+        *,
+        definition: ToolDefinition,
+        arguments: Mapping[str, object],
+        credentials: Mapping[str, str],
+        invocation_id: UUID | None,
+    ) -> object:
+        del definition, credentials
+        self.invocation_ids.append(invocation_id)
+        self.arguments.append(arguments)
+        return {"ok": True}
 
 
 def invocation(
@@ -165,6 +187,38 @@ async def test_allowed_invocation_executes_with_resolved_credentials_and_safe_au
         assert event.occurred_at.tzinfo is UTC
         assert event.argument_summary.keys == ("customer_id", "password")
         assert len(event.argument_summary.sha256) == 64
+
+
+@pytest.mark.asyncio
+async def test_allowed_invocation_forwards_idempotency_out_of_band() -> None:
+    invocation_id = uuid4()
+    request = invocation()
+    request = ToolInvocation(
+        tenant_id=request.tenant_id,
+        run_id=request.run_id,
+        employee_id=request.employee_id,
+        user_id=request.user_id,
+        tool_id=request.tool_id,
+        tool_name=request.tool_name,
+        arguments=request.arguments,
+        invocation_id=invocation_id,
+    )
+    executor = IdempotencyRecordingExecutor()
+    gateway = ToolGateway(
+        executor=executor,
+        definition_resolver=RecordingDefinitionResolver(
+            definition(tenant_id=request.tenant_id)
+        ),
+        credential_resolver=RecordingCredentialResolver(),
+        audit_sink=RecordingAuditSink(),
+    )
+
+    outcome = await gateway.invoke(request, context())
+
+    assert outcome.decision is PolicyDecision.ALLOW
+    assert executor.invocation_ids == [invocation_id]
+    assert executor.arguments == [request.arguments]
+    assert "invocation_id" not in request.arguments
 
 
 @pytest.mark.asyncio

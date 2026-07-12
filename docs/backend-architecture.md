@@ -264,6 +264,8 @@ skill-name/
 - 调用审计；
 - 凭据隔离。
 
+有外部副作用的工具调用采用明确的崩溃安全边界：每次审批对应唯一且耐久的 `invocation_id`，Tool Gateway 必须先独立提交 `tool.started` 审计，再执行外部调用。若 Worker 恢复时发现同一租户、Run 和 `invocation_id` 已有 STARTED 审计，但运行时检查点仍停在原审批中断，平台必须以稳定错误 `tool_execution_uncertain` 终止该 Run，绝不能自动重放。若检查点已前进到下一中断或终态，则数据库状态只向前对齐，并仅结算旧审批命令。平台内部的这套协议无法替代外部系统幂等：所有产生副作用的工具适配器仍必须把 `invocation_id` 作为外部幂等键传递，或提供等价的查询、去重或补偿能力；不具备这些能力的工具必须显式声明其“结果不确定、禁止自动重试”语义。
+
 ## 7. 知识库
 
 知识库独立为 `Knowledge Service`，Agent 不直接绑定具体实现。
@@ -321,6 +323,8 @@ skill-name/
 - 限流。
 
 Redis 不作为最终业务数据的唯一存储。
+
+Worker 的 Redis Stream 投递重试次数以 Consumer Group 的持久 delivery count 为准，不使用进程内计数。超过有界阈值后，PostgreSQL `run_dead_letters` 是死信唯一真相源，结算采用可靠的两阶段协议，而不宣称死信记录与业务收敛跨事务原子：平台先耐久写入稳定错误类型和最小元数据；取得对应 Run 的 runtime ownership 后，再在独立结算事务中锁定 Run 行，必要时将原任务标记失败、将原命令标记已处理，并写入 `settled_run_id`。若仍有存活的外部 Worker 持有 ownership，死信保持待结算且 Redis 原消息不得 ACK，后续以同一 delivery 重入并继续幂等结算；只有死信已经结算，或畸形消息无法通过受限字段交叉验证到原 Run/Command 时，才能 ACK 原消息。Redis DLQ Stream 只提供幂等、可补偿的运维镜像。死信重放必须创建新的 Run 与 RunCommand，再由正常 Dispatcher 投递；不得复用原 command ID，也不得向终态旧 Run 追加重放命令。合法消息不复制原 payload，畸形消息只保存受限字段元数据、大小和摘要，不保存原值或异常文本。
 
 ### 9.3 MinIO / S3
 

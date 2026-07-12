@@ -1,15 +1,21 @@
 from collections.abc import AsyncIterator, Callable, Mapping
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
+from langgraph.types import Command, StateSnapshot
 from pydantic import JsonValue, TypeAdapter
 
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.runtimes.base import (
+    PLATFORM_TERMINAL_STATUS_KEY,
     ArtifactReference,
     RuntimeStartRequest,
     RuntimeState,
+)
+from agent_platform.workers.runtime_recovery import (
+    RuntimeControlMismatch,
+    RuntimeRecoveryUnavailable,
 )
 
 
@@ -24,11 +30,13 @@ class RuntimeOperationNotSupported(Exception):
 class LangGraphAgentGraph(Protocol):
     def astream(
         self,
-        input_data: dict[str, object],
+        input_data: dict[str, object] | Command[Any],
         config: dict[str, object],
         *,
         stream_mode: str,
     ) -> AsyncIterator[Mapping[str, object]]: ...
+
+    async def aget_state(self, config: dict[str, object]) -> StateSnapshot: ...
 
 
 class LangGraphRuntime:
@@ -42,6 +50,7 @@ class LangGraphRuntime:
         self._requests: dict[UUID, RuntimeStartRequest] = {}
         self._states: dict[UUID, RuntimeState] = {}
         self._history: dict[UUID, list[PlatformEvent]] = {}
+        self._pending_interrupts: dict[UUID, tuple[str, UUID | None]] = {}
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
         self._requests[request.run_id] = request
@@ -51,26 +60,10 @@ class LangGraphRuntime:
             EventType.RUN_STARTED,
             {"thread_id": request.thread_id},
         )
-        output: JsonValue = None
-
         try:
             graph = self._graph_factory(request)
             self._graphs[request.run_id] = graph
-            async for update in graph.astream(
-                {"input": request.input_data},
-                {"configurable": {"thread_id": request.thread_id}},
-                stream_mode="updates",
-            ):
-                for step, state_update in update.items():
-                    self._append_event(
-                        request,
-                        EventType.RUN_PROGRESS,
-                        {"step": str(step), "status": "completed"},
-                    )
-                    if isinstance(state_update, Mapping) and "output" in state_update:
-                        output = TypeAdapter(JsonValue).validate_python(
-                            state_update["output"]
-                        )
+            return await self._drive(graph, request, {"input": request.input_data})
         except Exception as error:
             self._append_event(
                 request,
@@ -88,12 +81,78 @@ class LangGraphRuntime:
             self._states[request.run_id] = state
             return state
 
-        self._append_event(request, EventType.RUN_COMPLETED, {"status": "completed"})
-        state = RuntimeState(
-            run_id=request.run_id,
-            status=RunStatus.COMPLETED,
-            data={"output": output},
-        )
+    async def recover(
+        self,
+        request: RuntimeStartRequest,
+        status: RunStatus,
+    ) -> RuntimeState:
+        graph = self._graph_factory(request)
+        snapshot = await graph.aget_state(self._config(request))
+        interrupts = self._interrupt_values(snapshot)
+        if status not in {
+            RunStatus.WAITING_FOR_INPUT,
+            RunStatus.WAITING_FOR_APPROVAL,
+        }:
+            raise RuntimeRecoveryUnavailable
+        self._graphs[request.run_id] = graph
+        self._requests[request.run_id] = request
+        self._history[request.run_id] = []
+        if not snapshot.next:
+            if "output" not in snapshot.values:
+                raise RuntimeRecoveryUnavailable
+            output: JsonValue = TypeAdapter(JsonValue).validate_python(
+                snapshot.values.get("output")
+            )
+            if (
+                (snapshot.metadata or {}).get(PLATFORM_TERMINAL_STATUS_KEY)
+                == RunStatus.CANCELLED.value
+            ):
+                self._append_event(
+                    request,
+                    EventType.RUN_CANCELLED,
+                    {"status": "cancelled"},
+                )
+                state = RuntimeState(
+                    run_id=request.run_id,
+                    status=RunStatus.CANCELLED,
+                    data={},
+                )
+                self._states[request.run_id] = state
+                return state
+            if output is not None:
+                self._append_event(
+                    request,
+                    EventType.MESSAGE_OUTPUT,
+                    {"content": output},
+                )
+            self._append_event(
+                request,
+                EventType.RUN_COMPLETED,
+                {"status": "completed"},
+            )
+            state = RuntimeState(
+                run_id=request.run_id,
+                status=RunStatus.COMPLETED,
+                data={"output": output},
+            )
+            self._states[request.run_id] = state
+            return state
+        if not interrupts:
+            raise RuntimeRecoveryUnavailable
+        pending = self._pending_interrupt(interrupts, status=status)
+        self._pending_interrupts[request.run_id] = pending
+        if status is RunStatus.WAITING_FOR_APPROVAL:
+            approval_id = pending[1]
+            assert approval_id is not None
+            self._append_event(
+                request,
+                EventType.APPROVAL_REQUIRED,
+                {
+                    "status": "waiting_for_approval",
+                    "approval_id": str(approval_id),
+                },
+            )
+        state = RuntimeState(run_id=request.run_id, status=status, data={})
         self._states[request.run_id] = state
         return state
 
@@ -111,12 +170,17 @@ class LangGraphRuntime:
         return iterate()
 
     async def send_message(self, run_id: UUID, message: str) -> None:
-        del run_id, message
-        raise RuntimeOperationNotSupported
+        kind, _ = self._required_pending(run_id)
+        if kind != "input":
+            raise RuntimeControlMismatch
+        await self._resume(run_id, {"message": message})
 
     async def approve(self, run_id: UUID, approval_id: UUID) -> None:
-        del run_id, approval_id
-        raise RuntimeOperationNotSupported
+        self._require_approval(run_id, approval_id)
+        await self._resume(
+            run_id,
+            {"action": "approve", "approval_id": str(approval_id)},
+        )
 
     async def reject(
         self,
@@ -124,12 +188,22 @@ class LangGraphRuntime:
         approval_id: UUID,
         reason: str | None = None,
     ) -> None:
-        del run_id, approval_id, reason
-        raise RuntimeOperationNotSupported
+        self._require_approval(run_id, approval_id)
+        await self._resume(
+            run_id,
+            {
+                "action": "reject",
+                "approval_id": str(approval_id),
+                "reason": reason,
+            },
+            completion_status=RunStatus.CANCELLED,
+        )
 
     async def resume(self, run_id: UUID) -> None:
-        del run_id
-        raise RuntimeOperationNotSupported
+        kind, _ = self._required_pending(run_id)
+        if kind != "input":
+            raise RuntimeControlMismatch
+        await self._resume(run_id, None)
 
     async def cancel(self, run_id: UUID) -> None:
         request = self._required_request(run_id)
@@ -170,6 +244,155 @@ class LangGraphRuntime:
                 payload=payload,
             )
         )
+
+    async def _resume(
+        self,
+        run_id: UUID,
+        value: JsonValue,
+        *,
+        completion_status: RunStatus = RunStatus.COMPLETED,
+    ) -> None:
+        request = self._required_request(run_id)
+        graph = self._graphs[run_id]
+        await self._drive(
+            graph,
+            request,
+            Command(resume=value),
+            completion_status=completion_status,
+        )
+
+    async def _drive(
+        self,
+        graph: LangGraphAgentGraph,
+        request: RuntimeStartRequest,
+        input_data: dict[str, object] | Command[Any],
+        completion_status: RunStatus = RunStatus.COMPLETED,
+    ) -> RuntimeState:
+        output: JsonValue = None
+        interrupted = False
+        config = self._config(request)
+        if completion_status is RunStatus.CANCELLED:
+            config["metadata"] = {
+                PLATFORM_TERMINAL_STATUS_KEY: RunStatus.CANCELLED.value,
+            }
+        async for update in graph.astream(
+            input_data,
+            config,
+            stream_mode="updates",
+        ):
+            for step, state_update in update.items():
+                if step == "__interrupt__":
+                    interrupted = True
+                    continue
+                self._append_event(
+                    request,
+                    EventType.RUN_PROGRESS,
+                    {"step": str(step), "status": "completed"},
+                )
+                if isinstance(state_update, Mapping) and "output" in state_update:
+                    output = TypeAdapter(JsonValue).validate_python(state_update["output"])
+        if interrupted:
+            snapshot = await graph.aget_state(self._config(request))
+            interrupts = self._interrupt_values(snapshot)
+            waiting_status = (
+                RunStatus.WAITING_FOR_APPROVAL
+                if any(value.get("kind") == "approval" for value in interrupts)
+                else RunStatus.WAITING_FOR_INPUT
+            )
+            pending = self._pending_interrupt(interrupts, status=waiting_status)
+            self._pending_interrupts[request.run_id] = pending
+            if waiting_status is RunStatus.WAITING_FOR_APPROVAL:
+                approval_id = pending[1]
+                assert approval_id is not None
+                self._append_event(
+                    request,
+                    EventType.APPROVAL_REQUIRED,
+                    {
+                        "status": "waiting_for_approval",
+                        "approval_id": str(approval_id),
+                    },
+                )
+            state = RuntimeState(run_id=request.run_id, status=waiting_status, data={})
+            self._states[request.run_id] = state
+            return state
+        self._pending_interrupts.pop(request.run_id, None)
+        if completion_status is RunStatus.CANCELLED:
+            self._append_event(request, EventType.RUN_CANCELLED, {"status": "cancelled"})
+            state = RuntimeState(
+                run_id=request.run_id,
+                status=RunStatus.CANCELLED,
+                data={},
+            )
+            self._states[request.run_id] = state
+            return state
+        if output is not None:
+            self._append_event(
+                request,
+                EventType.MESSAGE_OUTPUT,
+                {"content": output},
+            )
+        self._append_event(request, EventType.RUN_COMPLETED, {"status": "completed"})
+        state = RuntimeState(
+            run_id=request.run_id,
+            status=RunStatus.COMPLETED,
+            data={"output": output},
+        )
+        self._states[request.run_id] = state
+        return state
+
+    @staticmethod
+    def _config(request: RuntimeStartRequest) -> dict[str, object]:
+        return {"configurable": {"thread_id": request.thread_id}}
+
+    @staticmethod
+    def _interrupt_values(snapshot: StateSnapshot) -> list[dict[str, JsonValue]]:
+        values: list[dict[str, JsonValue]] = []
+        for task in snapshot.tasks:
+            for item in task.interrupts:
+                if isinstance(item.value, Mapping):
+                    values.append(
+                        TypeAdapter(dict[str, JsonValue]).validate_python(item.value)
+                    )
+        return values
+
+    @staticmethod
+    def _pending_interrupt(
+        interrupts: list[dict[str, JsonValue]],
+        *,
+        status: RunStatus,
+    ) -> tuple[str, UUID | None]:
+        if len(interrupts) != 1:
+            raise RuntimeRecoveryUnavailable
+        if status is RunStatus.WAITING_FOR_APPROVAL:
+            for value in interrupts:
+                if value.get("kind") == "approval":
+                    try:
+                        return "approval", TypeAdapter(UUID).validate_python(
+                            value.get("approval_id")
+                        )
+                    except ValueError:
+                        raise RuntimeRecoveryUnavailable from None
+            raise RuntimeRecoveryUnavailable
+        if status is RunStatus.WAITING_FOR_INPUT:
+            if any(value.get("kind") == "input" for value in interrupts):
+                return "input", None
+            raise RuntimeRecoveryUnavailable
+        raise RuntimeRecoveryUnavailable
+
+    def _required_pending(self, run_id: UUID) -> tuple[str, UUID | None]:
+        try:
+            return self._pending_interrupts[run_id]
+        except KeyError as error:
+            raise RuntimeControlMismatch from error
+
+    def pending_approval_id(self, run_id: UUID) -> UUID | None:
+        kind, approval_id = self._required_pending(run_id)
+        return approval_id if kind == "approval" else None
+
+    def _require_approval(self, run_id: UUID, approval_id: UUID) -> None:
+        kind, expected_id = self._required_pending(run_id)
+        if kind != "approval" or expected_id != approval_id:
+            raise RuntimeControlMismatch
 
     def _required_request(self, run_id: UUID) -> RuntimeStartRequest:
         try:

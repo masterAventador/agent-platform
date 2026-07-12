@@ -1,11 +1,15 @@
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.audit import (
+    SqlAlchemyToolAuditReader,
+)
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeVersionRepository,
 )
@@ -14,7 +18,22 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
 )
-from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue, RunQueueDelivery
+from agent_platform.infrastructure.database.repositories.runtime_ownership import (
+    RuntimeOwnership,
+    RuntimeOwnershipBusy,
+    RuntimeOwnershipLost,
+    SqlAlchemyRuntimeOwnershipRepository,
+)
+from agent_platform.infrastructure.queue.dead_letters import (
+    DELIVERY_PROCESSING_ERROR_TYPE,
+    MALFORMED_MESSAGE_ERROR_TYPE,
+    RunDeadLetterService,
+)
+from agent_platform.infrastructure.queue.redis_streams import (
+    MalformedRunQueueMessage,
+    RedisRunQueue,
+    RunQueueDelivery,
+)
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.runtimes.base import (
@@ -24,10 +43,24 @@ from agent_platform.runtimes.base import (
     RuntimeState,
 )
 from agent_platform.workers.runtime_composition import PermanentRuntimePreparationError
+from agent_platform.workers.runtime_recovery import (
+    ApprovalCheckpointRuntime,
+    RecoverableEmployeeRuntime,
+    RuntimeInterrupted,
+    RuntimeRecoveryTransient,
+    RuntimeRecoveryUnavailable,
+    ToolExecutionUncertain,
+)
 
 
 class RuntimeResolver(Protocol):
     async def resolve(
+        self,
+        run: Run,
+        definition: dict[str, object],
+    ) -> PreparedRuntime: ...
+
+    async def recover(
         self,
         run: Run,
         definition: dict[str, object],
@@ -44,6 +77,10 @@ class RuntimeAlreadyPrepared(Exception):
 
 class RuntimeCleanupError(RuntimeError):
     """Sanitized runtime environment cleanup failure."""
+
+
+class WorkerFenced(RuntimeError):
+    """当前 Worker 已失去执行 epoch，必须停止消费。"""
 
 
 logger = logging.getLogger(__name__)
@@ -64,23 +101,188 @@ class RunWorker:
         queue: RedisRunQueue,
         runtime_resolver: RuntimeResolver,
         consumer_name: str,
+        runtime_lease_duration: timedelta = timedelta(seconds=30),
+        dead_letter_service: RunDeadLetterService | None = None,
     ) -> None:
+        if runtime_lease_duration <= timedelta(0):
+            raise ValueError("runtime_lease_duration must be positive")
         self._session_factory = session_factory
         self._queue = queue
         self._runtime_resolver = runtime_resolver
         self._consumer_name = consumer_name
+        self._owner_id = str(uuid4())
+        self._fenced = False
+        self._runtime_lease_duration = runtime_lease_duration
+        self._dead_letters = dead_letter_service or RunDeadLetterService(
+            session_factory=session_factory
+        )
         self._prepared_runtimes: dict[UUID, PreparedRuntime] = {}
+        self._ownerships: dict[UUID, RuntimeOwnership] = {}
         self._active_runs: dict[UUID, Run] = {}
         self._terminal_cleanup_pending: set[UUID] = set()
         self._pending_results: dict[UUID, _PendingRuntimeResult] = {}
+        self._recovery_cleanup_pending: dict[UUID, PreparedRuntime] = {}
 
     async def run_once(self, *, block_ms: int = 5_000) -> bool:
-        delivery = await self._queue.dequeue(consumer_name=self._consumer_name, block_ms=block_ms)
+        if self._fenced:
+            raise WorkerFenced
+        try:
+            delivery = await self._queue.dequeue(
+                consumer_name=self._consumer_name,
+                block_ms=block_ms,
+            )
+        except MalformedRunQueueMessage as error:
+            if not error.exhausted:
+                raise
+            try:
+                dead_letter = await self._dead_letters.record_malformed(
+                    delivery_id=error.delivery_id,
+                    attempts=error.attempts,
+                    error_type=MALFORMED_MESSAGE_ERROR_TYPE,
+                    raw_fields=error.raw_fields,
+                    source_stream=error.source_stream,
+                    ownerships=tuple(self._ownerships.values()),
+                )
+            except RuntimeOwnershipLost as ownership_error:
+                self._fenced = True
+                if ownership_error.run_id in self._ownerships:
+                    await self._abandon_runtime(ownership_error.run_id)
+                raise WorkerFenced from None
+            if dead_letter.settled_run_id is not None:
+                await self._discard_dead_letter_runtime(dead_letter.settled_run_id)
+            await self._queue.acknowledge(error.delivery_id)
+            await self._reconcile_dead_letter_mirrors()
+            return True
         if delivery is None:
+            await self._reconcile_dead_letter_mirrors()
             return False
-        await self._process(delivery)
+        try:
+            await self._process(delivery)
+        except RuntimeOwnershipLost:
+            self._fenced = True
+            await self._abandon_runtime(delivery.message.run_id)
+            raise WorkerFenced from None
+        except RuntimeOwnershipBusy:
+            await self._abandon_runtime(delivery.message.run_id)
+            raise
+        except Exception:
+            attempts = await self._queue.exhausted_delivery_attempts(delivery.delivery_id)
+            if attempts is None:
+                raise
+            try:
+                await self._dead_letters.record_failure(
+                    delivery,
+                    attempts=attempts,
+                    error_type=DELIVERY_PROCESSING_ERROR_TYPE,
+                    ownership=self._ownerships.get(delivery.message.run_id),
+                )
+            except RuntimeOwnershipLost:
+                self._fenced = True
+                await self._abandon_runtime(delivery.message.run_id)
+                raise WorkerFenced from None
+            await self._discard_dead_letter_runtime(delivery.message.run_id)
+            await self._queue.acknowledge(delivery.delivery_id)
+            await self._reconcile_dead_letter_mirrors()
+            return True
         await self._queue.acknowledge(delivery.delivery_id)
+        await self._reconcile_dead_letter_mirrors()
         return True
+
+    async def recover_incomplete_runs(self, *, limit: int = 100) -> int:
+        if limit <= 0:
+            raise ValueError("recovery limit must be positive")
+        recovered = 0
+        after_updated_at: datetime | None = None
+        after_run_id: UUID | None = None
+        while True:
+            async with self._session_factory() as session:
+                candidates = await SqlAlchemyRunRepository(
+                    session
+                ).list_recovery_candidates(
+                    limit=limit,
+                    after_updated_at=after_updated_at,
+                    after_run_id=after_run_id,
+                )
+            if not candidates:
+                break
+            for run in candidates:
+                recovered += await self._recover_candidate(run)
+            last = candidates[-1]
+            after_updated_at = last.updated_at
+            after_run_id = last.id
+        return recovered
+
+    async def _recover_candidate(self, run: Run) -> int:
+        if run.id in self._prepared_runtimes:
+            return 0
+        if run.status is RunStatus.RUNNING:
+            await self._claim_ownership(run)
+            await self._persist_orphaned_run_failure(
+                run,
+                error_code=RuntimeInterrupted.code,
+            )
+            return 0
+        async with self._session_factory() as session:
+            version = await SqlAlchemyEmployeeVersionRepository(session).get(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                version=run.employee_version,
+            )
+        if version is None:
+            await self._claim_ownership(run)
+            await self._persist_orphaned_run_failure(
+                run,
+                error_code=RuntimeRecoveryUnavailable.code,
+            )
+            return 0
+        replay_invocation_id = await self._started_approval_invocation(run)
+        try:
+            prepared = await self._recover_runtime(
+                run,
+                version.definition,
+                replay_invocation_id=replay_invocation_id,
+            )
+        except RuntimeRecoveryUnavailable as error:
+            await self._persist_orphaned_run_failure(
+                run,
+                error_code=error.code,
+                settle_approval_id=(
+                    error.approval_id
+                    if isinstance(error, ToolExecutionUncertain)
+                    else None
+                ),
+            )
+            await self._close_failed_recovery(run.id)
+            await self._run_deferred_recovery_cleanup(error, run_id=run.id)
+            return 0
+        self._prepared_runtimes[run.id] = prepared
+        self._active_runs[run.id] = run
+        state = await prepared.runtime.get_state(run.id)
+        history = [event async for event in prepared.runtime.stream(run.id)]
+        current_approval_id = (
+            prepared.runtime.pending_approval_id(run.id)
+            if isinstance(prepared.runtime, ApprovalCheckpointRuntime)
+            else None
+        )
+        persisted_status = await self._persist_recovered_snapshot(
+            run=run,
+            state=state,
+            history=history,
+            current_approval_id=current_approval_id,
+        )
+        if self._is_terminal(persisted_status):
+            await self._release_runtime(run.id)
+            return 0
+        return 1
+
+    async def _reconcile_dead_letter_mirrors(self) -> None:
+        try:
+            await self._dead_letters.reconcile_mirrors(
+                publisher=self._queue,
+                limit=100,
+            )
+        except Exception:
+            logger.error("dead_letter_mirror_reconciliation_failed", extra={})
 
     async def _process(self, delivery: RunQueueDelivery) -> None:
         message = delivery.message
@@ -130,6 +332,7 @@ class RunWorker:
                     await self._release_runtime(run.id)
                 else:
                     raise RuntimeAlreadyPrepared(run.id)
+            await self._claim_ownership(run)
             try:
                 prepared = await self._runtime_resolver.resolve(run, version.definition)
             except PermanentRuntimePreparationError as error:
@@ -138,29 +341,30 @@ class RunWorker:
                     message_command_id=message.command_id,
                     error_code=error.code,
                 )
+                try:
+                    await error.cleanup_after_failure()
+                except Exception:
+                    logger.error(
+                        "runtime_preparation_cleanup_failed",
+                        extra={"run_id": str(run.id)},
+                    )
                 return
             self._prepared_runtimes[run.id] = prepared
             self._active_runs[run.id] = run
             runtime = prepared.runtime
             try:
-                await self._mark_running(run)
+                marked_running = await self._mark_running(
+                    run,
+                    message_command_id=message.command_id,
+                )
             except Exception:
                 await self._release_runtime_preserving_error(run.id)
                 raise
+            if not marked_running:
+                await self._release_runtime(run.id)
+                return
             try:
-                state = await runtime.start(
-                    RuntimeStartRequest(
-                        run_id=run.id,
-                        tenant_id=run.tenant_id,
-                        user_id=run.created_by,
-                        employee_id=run.employee_id,
-                        thread_id=run.thread_id,
-                        employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
-                            prepared.employee_definition
-                        ),
-                        input_data=run.input_data,
-                    )
-                )
+                state = await runtime.start(self._runtime_request(run, prepared))
             except Exception as error:
                 state = RuntimeState(
                     run_id=run.id,
@@ -191,6 +395,42 @@ class RunWorker:
             else:
                 history = None
         else:
+            if run.id not in self._prepared_runtimes:
+                if run.status is RunStatus.RUNNING:
+                    await self._claim_ownership(run)
+                    await self._persist_preparation_failure(
+                        run=run,
+                        message_command_id=message.command_id,
+                        error_code=RuntimeInterrupted.code,
+                    )
+                    return
+                if run.status not in {
+                    RunStatus.WAITING_FOR_INPUT,
+                    RunStatus.WAITING_FOR_APPROVAL,
+                }:
+                    raise RuntimeNotPrepared(run.id)
+                replay_invocation_id = (
+                    UUID(str(message.payload["approval_id"]))
+                    if message.action == "approve"
+                    else None
+                )
+                try:
+                    prepared = await self._recover_runtime(
+                        run,
+                        version.definition,
+                        replay_invocation_id=replay_invocation_id,
+                    )
+                except RuntimeRecoveryUnavailable as error:
+                    await self._persist_preparation_failure(
+                        run=run,
+                        message_command_id=message.command_id,
+                        error_code=error.code,
+                    )
+                    await self._close_failed_recovery(run.id)
+                    await self._run_deferred_recovery_cleanup(error, run_id=run.id)
+                    return
+                self._prepared_runtimes[run.id] = prepared
+                self._active_runs[run.id] = run
             runtime = self._required_runtime(run.id)
             await self._invoke_control(runtime, delivery)
             state = await runtime.get_state(run.id)
@@ -208,7 +448,7 @@ class RunWorker:
                 raise
 
         try:
-            await self._persist_runtime_result(
+            persisted_status = await self._persist_runtime_result(
                 run=run,
                 message_command_id=message.command_id,
                 state=state,
@@ -222,7 +462,7 @@ class RunWorker:
             )
             raise
         self._pending_results.pop(run.id, None)
-        if self._should_release(run.id, state.status):
+        if self._should_release(run.id, persisted_status):
             await self._release_runtime(run.id)
 
     async def _persist_runtime_result(
@@ -232,12 +472,19 @@ class RunWorker:
         message_command_id: UUID,
         state: RuntimeState,
         history: list[PlatformEvent],
-    ) -> None:
+    ) -> RunStatus:
         async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
-            current = await runs.get(tenant_id=run.tenant_id, run_id=run.id)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
             if current is None:
                 raise LookupError(run.id)
+            if self._is_terminal(current.status):
+                await SqlAlchemyRunCommandRepository(session).mark_processed(
+                    message_command_id
+                )
+                await session.commit()
+                return current.status
             events = SqlAlchemyRunEventRepository(session)
             existing_event_ids = {
                 event.event_id for event in await events.list(run_id=run.id, after_sequence=0)
@@ -249,6 +496,14 @@ class RunWorker:
                 await events.append(event.model_copy(update={"sequence": sequence}))
                 sequence += 1
             if current.status != state.status:
+                if current.status in {
+                    RunStatus.WAITING_FOR_INPUT,
+                    RunStatus.WAITING_FOR_APPROVAL,
+                } and state.status not in {
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    current = current.transition_to(RunStatus.RUNNING)
                 current = current.transition_to(
                     state.status,
                     error_code=str(state.data.get("error_code", "runtime_failed")),
@@ -257,15 +512,32 @@ class RunWorker:
                 await runs.update(current)
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await session.commit()
+            return state.status
 
-    async def _mark_running(self, run: Run) -> None:
+    async def _mark_running(
+        self,
+        run: Run,
+        *,
+        message_command_id: UUID,
+    ) -> bool:
         async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
             repository = SqlAlchemyRunRepository(session)
-            current = await repository.get(tenant_id=run.tenant_id, run_id=run.id)
+            current = await repository.get_for_update(
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+            )
             if current is None:
                 raise LookupError(run.id)
+            if self._is_terminal(current.status):
+                await SqlAlchemyRunCommandRepository(session).mark_processed(
+                    message_command_id
+                )
+                await session.commit()
+                return False
             await repository.update(current.transition_to(RunStatus.RUNNING))
             await session.commit()
+            return True
 
     async def _persist_preparation_failure(
         self,
@@ -275,10 +547,25 @@ class RunWorker:
         error_code: str,
     ) -> None:
         async with self._session_factory() as session:
+            ownership = self._ownerships.get(run.id)
+            await self._assert_owned(session=session, run_id=run.id)
+            assert ownership is not None
             runs = SqlAlchemyRunRepository(session)
-            current = await runs.get(tenant_id=run.tenant_id, run_id=run.id)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
             if current is None:
                 raise LookupError(run.id)
+            if self._is_terminal(current.status):
+                await SqlAlchemyRunCommandRepository(session).mark_processed(
+                    message_command_id
+                )
+                await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                    run_id=run.id,
+                    owner_id=ownership.owner_id or "",
+                    epoch=ownership.epoch,
+                )
+                await session.commit()
+                self._ownerships.pop(run.id, None)
+                return
             await runs.update(
                 current.transition_to(
                     RunStatus.FAILED,
@@ -298,7 +585,13 @@ class RunWorker:
                 )
             )
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
+            await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                run_id=run.id,
+                owner_id=ownership.owner_id or "",
+                epoch=ownership.epoch,
+            )
             await session.commit()
+        self._ownerships.pop(run.id, None)
 
     def _required_runtime(self, run_id: UUID) -> EmployeeRuntime:
         try:
@@ -320,6 +613,7 @@ class RunWorker:
     async def _release_runtime(self, run_id: UUID) -> None:
         prepared = self._prepared_runtimes.get(run_id)
         if prepared is None:
+            await self._release_ownership(run_id)
             return
         try:
             await prepared.close()
@@ -330,6 +624,7 @@ class RunWorker:
         self._active_runs.pop(run_id, None)
         self._terminal_cleanup_pending.discard(run_id)
         self._pending_results.pop(run_id, None)
+        await self._release_ownership(run_id)
 
     async def _release_runtime_preserving_error(self, run_id: UUID) -> None:
         try:
@@ -340,11 +635,41 @@ class RunWorker:
                 extra={"run_id": str(run_id)},
             )
 
+    async def _discard_dead_letter_runtime(self, run_id: UUID) -> None:
+        prepared = self._prepared_runtimes.pop(run_id, None)
+        self._active_runs.pop(run_id, None)
+        self._terminal_cleanup_pending.discard(run_id)
+        self._pending_results.pop(run_id, None)
+        self._ownerships.pop(run_id, None)
+        if prepared is None:
+            return
+        try:
+            await prepared.close()
+            return
+        except Exception:
+            logger.error(
+                "dead_letter_runtime_cleanup_failed",
+                extra={"run_id": str(run_id)},
+            )
+        try:
+            await prepared.detach()
+        except Exception:
+            logger.error(
+                "dead_letter_runtime_detach_failed",
+                extra={"run_id": str(run_id)},
+            )
+
     async def renew_active_runtimes(self) -> None:
         failures = 0
         for run_id, prepared in list(self._prepared_runtimes.items()):
             try:
+                run = self._active_runs.get(run_id)
+                if run is not None:
+                    await self._claim_ownership(run)
                 await prepared.renew()
+            except (RuntimeOwnershipBusy, RuntimeOwnershipLost):
+                await self._abandon_runtime(run_id)
+                raise RuntimeCleanupError("Runtime ownership was lost") from None
             except Exception:
                 failures += 1
                 logger.error(
@@ -361,7 +686,11 @@ class RunWorker:
     async def aclose(self) -> None:
         for run_id in list(self._prepared_runtimes):
             try:
-                await self._release_runtime(run_id)
+                run = self._active_runs.get(run_id)
+                if run is not None and not self._is_terminal(run.status):
+                    await self._abandon_runtime(run_id)
+                else:
+                    await self._release_runtime(run_id)
             except Exception:
                 logger.error(
                     "runtime_environment_shutdown_cleanup_failed",
@@ -378,8 +707,9 @@ class RunWorker:
 
     async def _persist_renewal_failure(self, run: Run) -> None:
         async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
-            current = await runs.get(tenant_id=run.tenant_id, run_id=run.id)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
             if current is None or current.status in {
                 RunStatus.COMPLETED,
                 RunStatus.FAILED,
@@ -406,6 +736,314 @@ class RunWorker:
                 )
             )
             await session.commit()
+
+    async def _persist_orphaned_run_failure(
+        self,
+        run: Run,
+        *,
+        error_code: str,
+        settle_approval_id: UUID | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
+            runs = SqlAlchemyRunRepository(session)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
+            if current is None:
+                raise LookupError(run.id)
+            if self._is_terminal(current.status):
+                ownership = self._ownerships[run.id]
+                await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                    run_id=run.id,
+                    owner_id=ownership.owner_id or "",
+                    epoch=ownership.epoch,
+                )
+                await session.commit()
+                self._ownerships.pop(run.id, None)
+                return
+            await runs.update(
+                current.transition_to(
+                    RunStatus.FAILED,
+                    error_code=error_code,
+                    error_message=None,
+                )
+            )
+            events = SqlAlchemyRunEventRepository(session)
+            await events.append(
+                PlatformEvent.create(
+                    tenant_id=run.tenant_id,
+                    employee_id=run.employee_id,
+                    run_id=run.id,
+                    sequence=await events.next_sequence(run_id=run.id),
+                    event_type=EventType.RUN_FAILED,
+                    payload={"code": error_code},
+                )
+            )
+            if settle_approval_id is not None:
+                await self._settle_approval_commands(
+                    session=session,
+                    run_id=run.id,
+                    approval_ids={settle_approval_id},
+                )
+            ownership = self._ownerships[run.id]
+            await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                run_id=run.id,
+                owner_id=ownership.owner_id or "",
+                epoch=ownership.epoch,
+            )
+            await session.commit()
+        self._ownerships.pop(run.id, None)
+
+    async def _persist_recovered_snapshot(
+        self,
+        *,
+        run: Run,
+        state: RuntimeState,
+        history: list[PlatformEvent],
+        current_approval_id: UUID | None,
+    ) -> RunStatus:
+        async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
+            runs = SqlAlchemyRunRepository(session)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
+            if current is None:
+                raise LookupError(run.id)
+            if self._is_terminal(current.status):
+                await session.commit()
+                return current.status
+            events = SqlAlchemyRunEventRepository(session)
+            existing = await events.list(run_id=run.id, after_sequence=0)
+            existing_ids = {event.event_id for event in existing}
+            existing_approvals = {
+                str(event.payload.get("approval_id"))
+                for event in existing
+                if event.type is EventType.APPROVAL_REQUIRED
+                and event.payload.get("approval_id") is not None
+            }
+            sequence = await events.next_sequence(run_id=run.id)
+            for event in history:
+                if event.event_id in existing_ids:
+                    continue
+                if (
+                    event.type is EventType.APPROVAL_REQUIRED
+                    and str(event.payload.get("approval_id")) in existing_approvals
+                ):
+                    continue
+                await events.append(event.model_copy(update={"sequence": sequence}))
+                sequence += 1
+            stale_approval_ids = {
+                UUID(value)
+                for value in existing_approvals
+                if value != str(current_approval_id)
+            }
+            if stale_approval_ids:
+                await self._settle_approval_commands(
+                    session=session,
+                    run_id=run.id,
+                    approval_ids=stale_approval_ids,
+                )
+            if current.status != state.status:
+                if current.status in {
+                    RunStatus.WAITING_FOR_INPUT,
+                    RunStatus.WAITING_FOR_APPROVAL,
+                } and state.status not in {RunStatus.FAILED, RunStatus.CANCELLED}:
+                    current = current.transition_to(RunStatus.RUNNING)
+                current = current.transition_to(
+                    state.status,
+                    error_code=str(state.data.get("error_code", "runtime_failed")),
+                    error_message=str(state.data.get("error_message", "")) or None,
+                )
+                await runs.update(current)
+            await session.commit()
+            return state.status
+
+    @staticmethod
+    async def _settle_approval_commands(
+        *,
+        session: AsyncSession,
+        run_id: UUID,
+        approval_ids: set[UUID],
+    ) -> None:
+        commands = SqlAlchemyRunCommandRepository(session)
+        for command in await commands.unprocessed_approval_commands(run_id=run_id):
+            raw_approval_id = command.payload.get("approval_id")
+            try:
+                approval_id = UUID(str(raw_approval_id))
+            except ValueError:
+                continue
+            if approval_id in approval_ids:
+                await commands.mark_processed(command.id)
+
+    async def _started_approval_invocation(self, run: Run) -> UUID | None:
+        async with self._session_factory() as session:
+            commands = await SqlAlchemyRunCommandRepository(
+                session
+            ).unprocessed_approval_commands(run_id=run.id)
+            audits = SqlAlchemyToolAuditReader(session)
+            for command in commands:
+                try:
+                    approval_id = UUID(str(command.payload.get("approval_id")))
+                except ValueError:
+                    continue
+                if await audits.has_started(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    invocation_id=approval_id,
+                ):
+                    return approval_id
+        return None
+
+    async def _recover_runtime(
+        self,
+        run: Run,
+        definition: dict[str, object],
+        *,
+        replay_invocation_id: UUID | None = None,
+    ) -> PreparedRuntime:
+        recover = getattr(self._runtime_resolver, "recover", None)
+        if not callable(recover):
+            raise RuntimeRecoveryUnavailable
+        await self._claim_ownership(run)
+        prepared: PreparedRuntime | None = None
+        try:
+            prepared = await recover(run, definition)
+            runtime = prepared.runtime
+            if not isinstance(runtime, RecoverableEmployeeRuntime):
+                raise RuntimeRecoveryUnavailable
+            if replay_invocation_id is not None:
+                async with self._session_factory() as session:
+                    started = await SqlAlchemyToolAuditReader(session).has_started(
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        invocation_id=replay_invocation_id,
+                    )
+                if started:
+                    raise ToolExecutionUncertain(approval_id=replay_invocation_id)
+            state = await runtime.recover(
+                self._runtime_request(run, prepared),
+                run.status,
+            )
+            if (
+                state.status is RunStatus.WAITING_FOR_APPROVAL
+                and isinstance(runtime, ApprovalCheckpointRuntime)
+            ):
+                approval_id = runtime.pending_approval_id(run.id)
+                if approval_id is not None:
+                    async with self._session_factory() as session:
+                        started = await SqlAlchemyToolAuditReader(session).has_started(
+                            tenant_id=run.tenant_id,
+                            run_id=run.id,
+                            invocation_id=approval_id
+                        )
+                    if started:
+                        raise ToolExecutionUncertain(approval_id=approval_id)
+            return prepared
+        except RuntimeRecoveryUnavailable:
+            if prepared is not None:
+                self._recovery_cleanup_pending[run.id] = prepared
+            raise
+        except Exception:
+            try:
+                if prepared is not None:
+                    await prepared.detach()
+            except Exception:
+                logger.error(
+                    "runtime_recovery_detach_failed",
+                    extra={"run_id": str(run.id)},
+                )
+            finally:
+                await self._release_ownership(run.id)
+            raise RuntimeRecoveryTransient from None
+
+    @staticmethod
+    def _runtime_request(run: Run, prepared: PreparedRuntime) -> RuntimeStartRequest:
+        return RuntimeStartRequest(
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            user_id=run.created_by,
+            employee_id=run.employee_id,
+            thread_id=run.thread_id,
+            employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
+                prepared.employee_definition
+            ),
+            input_data=run.input_data,
+        )
+
+    async def _claim_ownership(self, run: Run) -> RuntimeOwnership:
+        async with self._session_factory() as session:
+            ownership = await SqlAlchemyRuntimeOwnershipRepository(session).claim(
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                owner_id=self._owner_id,
+                now=datetime.now(UTC),
+                lease_duration=self._runtime_lease_duration,
+            )
+            await session.commit()
+        self._ownerships[run.id] = ownership
+        return ownership
+
+    async def _assert_owned(self, *, session: AsyncSession, run_id: UUID) -> None:
+        ownership = self._ownerships.get(run_id)
+        if ownership is None:
+            raise RuntimeOwnershipLost(run_id)
+        await SqlAlchemyRuntimeOwnershipRepository(session).assert_owned(
+            run_id=run_id,
+            owner_id=ownership.owner_id or "",
+            epoch=ownership.epoch,
+            now=datetime.now(UTC),
+        )
+
+    async def _release_ownership(self, run_id: UUID) -> None:
+        ownership = self._ownerships.get(run_id)
+        if ownership is None:
+            return
+        async with self._session_factory() as session:
+            await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                run_id=run_id,
+                owner_id=ownership.owner_id or "",
+                epoch=ownership.epoch,
+            )
+            await session.commit()
+        self._ownerships.pop(run_id, None)
+
+    async def _abandon_runtime(self, run_id: UUID) -> None:
+        prepared = self._prepared_runtimes.pop(run_id, None)
+        if prepared is not None:
+            try:
+                await prepared.detach()
+            except Exception:
+                logger.error(
+                    "runtime_environment_detach_failed",
+                    extra={"run_id": str(run_id)},
+                )
+        self._active_runs.pop(run_id, None)
+        self._pending_results.pop(run_id, None)
+        await self._release_ownership(run_id)
+
+    async def _close_failed_recovery(self, run_id: UUID) -> None:
+        prepared = self._recovery_cleanup_pending.pop(run_id, None)
+        if prepared is None:
+            return
+        try:
+            await prepared.close()
+        except Exception:
+            logger.error(
+                "failed_recovery_environment_cleanup_failed",
+                extra={"run_id": str(run_id)},
+            )
+
+    @staticmethod
+    async def _run_deferred_recovery_cleanup(
+        error: RuntimeRecoveryUnavailable,
+        *,
+        run_id: UUID,
+    ) -> None:
+        try:
+            await error.cleanup_after_failure()
+        except Exception:
+            logger.error(
+                "failed_recovery_environment_cleanup_failed",
+                extra={"run_id": str(run_id)},
+            )
 
     @staticmethod
     async def _invoke_control(runtime: EmployeeRuntime, delivery: RunQueueDelivery) -> None:

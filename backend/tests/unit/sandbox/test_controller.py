@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import socket
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import sleep
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from docker.errors import NotFound
@@ -13,11 +14,14 @@ from fastapi.testclient import TestClient
 from agent_platform.sandbox.controller.api import create_controller_app
 from agent_platform.sandbox.controller.config import ControllerSettings
 from agent_platform.sandbox.controller.service import (
+    EPOCH_LABEL,
     EXECUTE_SUPERVISOR_SCRIPT,
     LEASE_LABEL,
     MANAGED_LABEL,
     DockerSandboxController,
+    SandboxDiscoveryAmbiguous,
     SandboxLeaseMismatch,
+    SandboxLeaseRetired,
 )
 
 PINNED_IMAGE = "python:3.12.13-slim-bookworm@sha256:" + "a" * 64
@@ -35,13 +39,15 @@ class FakeContainers:
             reload=lambda: None,
             remove=lambda **_kwargs: None,
         )
+        self.listed: list[object] = []
 
     def list(self, *, all: bool, filters: dict[str, object]) -> list[object]:
         del all, filters
-        return []
+        return self.listed
 
     def run(self, image: str, **kwargs: object) -> object:
         self.created.append({"image": image, **kwargs})
+        self.container.labels = kwargs["labels"]
         return self.container
 
     def get(self, sandbox_id: str) -> object:
@@ -87,12 +93,50 @@ def test_api_requires_bearer_auth_and_never_echoes_secret() -> None:
     assert invalid.status_code == 401
     assert "test-secret" not in missing.text + invalid.text
 
+    discovery = client.get("/v1/sandboxes", params={"lease_id": str(uuid4())})
+    delete_by_lease = client.delete(
+        "/v1/sandboxes",
+        params={"lease_id": str(uuid4()), "sandbox_epoch": 1},
+    )
+    assert discovery.status_code == 401
+    assert delete_by_lease.status_code == 401
+
+
+def test_delete_by_lease_rejects_negative_epoch_as_validation_error() -> None:
+    client = TestClient(
+        create_controller_app(settings=settings(), docker_client=FakeDocker()),
+        headers={"Authorization": "Bearer test-secret-long-enough"},
+    )
+
+    response = client.delete(
+        "/v1/sandboxes",
+        params={"lease_id": str(uuid4()), "sandbox_epoch": -1},
+    )
+
+    assert response.status_code == 422
+
+
+def test_create_requires_an_explicit_sandbox_epoch() -> None:
+    docker = FakeDocker()
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+    client = TestClient(
+        create_controller_app(settings=settings(), docker_client=docker),
+        headers={"Authorization": "Bearer test-secret-long-enough"},
+    )
+
+    with pytest.raises(TypeError, match="sandbox_epoch"):
+        controller.create(lease_id=uuid4())
+
+    response = client.post("/v1/sandboxes", json={"lease_id": str(uuid4())})
+    assert response.status_code == 422
+    assert docker.containers.created == []
+
 
 def test_create_uses_only_controller_owned_hardened_options() -> None:
     docker = FakeDocker()
     controller = DockerSandboxController(settings=settings(), docker_client=docker)
 
-    result = controller.create(lease_id=uuid4())
+    result = controller.create(lease_id=uuid4(), sandbox_epoch=1)
 
     assert result.sandbox_id == SANDBOX_ID
     options = docker.containers.created[0]
@@ -115,15 +159,177 @@ def test_create_uses_only_controller_owned_hardened_options() -> None:
     assert forbidden.isdisjoint(options)
 
 
+def test_discovery_accepts_only_exact_managed_canonical_lease_labels() -> None:
+    docker = FakeDocker()
+    lease_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+    def container(container_id: str, labels: dict[str, str]) -> object:
+        return SimpleNamespace(id=container_id, labels=labels, reload=lambda: None)
+
+    exact = container(
+        "1" * 64,
+        {MANAGED_LABEL: "true", LEASE_LABEL: str(lease_id), EPOCH_LABEL: "1"},
+    )
+    docker.containers.listed = [
+        exact,
+        container("2" * 64, {MANAGED_LABEL: "false", LEASE_LABEL: str(lease_id)}),
+        container("3" * 64, {MANAGED_LABEL: "true", LEASE_LABEL: str(uuid4())}),
+        container("4" * 64, {MANAGED_LABEL: "true", LEASE_LABEL: "not-a-uuid"}),
+        container("5" * 64, {MANAGED_LABEL: "true", LEASE_LABEL: str(lease_id).upper()}),
+    ]
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+
+    assert controller.find_by_lease(lease_id=lease_id, sandbox_epoch=1) == ["1" * 64]
+
+
+def test_discovery_of_multiple_exact_containers_fails_closed_and_logs_alarm(caplog) -> None:
+    controller_logger = logging.getLogger("agent_platform.sandbox.controller.service")
+    controller_logger.disabled = False
+    caplog.set_level(logging.ERROR, logger=controller_logger.name)
+    docker = FakeDocker()
+    lease_id = uuid4()
+    docker.containers.listed = [
+        SimpleNamespace(
+            id=value * 64,
+            labels={MANAGED_LABEL: "true", LEASE_LABEL: str(lease_id), EPOCH_LABEL: "1"},
+            reload=lambda: None,
+        )
+        for value in ("1", "2")
+    ]
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+
+    with pytest.raises(SandboxDiscoveryAmbiguous):
+        controller.find_by_lease(lease_id=lease_id, sandbox_epoch=1)
+
+    assert "sandbox_discovery_ambiguous" in caplog.text
+    assert all(not getattr(item, "removed", False) for item in docker.containers.listed)
+
+
+def test_delete_by_lease_tombstone_rejects_late_create() -> None:
+    docker = FakeDocker()
+    lease_id = uuid4()
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+
+    assert controller.delete_by_lease(lease_id=lease_id, sandbox_epoch=3) is None
+    with pytest.raises(SandboxLeaseRetired):
+        controller.create(lease_id=lease_id, sandbox_epoch=2)
+
+    assert docker.containers.created == []
+
+
+def test_delete_zero_result_serializes_with_and_rejects_queued_late_create() -> None:
+    lease_id = uuid4()
+    delete_holds_lock = Event()
+    allow_delete_to_finish = Event()
+
+    class BarrierContainers(FakeContainers):
+        def list(self, *, all: bool, filters: dict[str, object]) -> list[object]:
+            del all, filters
+            if not delete_holds_lock.is_set():
+                delete_holds_lock.set()
+                assert allow_delete_to_finish.wait(timeout=1)
+            return []
+
+    docker = FakeDocker()
+    docker.containers = BarrierContainers()
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+    create_errors: list[Exception] = []
+
+    delete_thread = Thread(
+        target=controller.delete_by_lease,
+        kwargs={"lease_id": lease_id, "sandbox_epoch": 7},
+    )
+
+    def late_create() -> None:
+        try:
+            controller.create(lease_id=lease_id, sandbox_epoch=6)
+        except Exception as error:
+            create_errors.append(error)
+
+    create_thread = Thread(target=late_create)
+    delete_thread.start()
+    assert delete_holds_lock.wait(timeout=1)
+    create_thread.start()
+    assert docker.containers.created == []
+    allow_delete_to_finish.set()
+    delete_thread.join(timeout=1)
+    create_thread.join(timeout=1)
+
+    assert len(create_errors) == 1
+    assert isinstance(create_errors[0], SandboxLeaseRetired)
+    assert docker.containers.created == []
+
+
+def test_tombstone_and_lease_lock_registry_are_bounded_with_a_controllable_clock() -> None:
+    docker = FakeDocker()
+    now = [100.0]
+    lease_id = uuid4()
+    limited = ControllerSettings(
+        bearer_secret="test-secret-long-enough",
+        sandbox_image=PINNED_IMAGE,
+        tombstone_ttl_seconds=300,
+    )
+    controller = DockerSandboxController(
+        settings=limited,
+        docker_client=docker,
+        monotonic_clock=lambda: now[0],
+    )
+
+    controller.delete_by_lease(lease_id=lease_id, sandbox_epoch=2)
+
+    assert controller.tracked_lease_lock_count == 0
+    assert controller.tracked_tombstone_count == 1
+    with pytest.raises(SandboxLeaseRetired):
+        controller.create(lease_id=lease_id, sandbox_epoch=2)
+
+    now[0] += 301
+    controller.create(lease_id=lease_id, sandbox_epoch=2)
+
+    assert controller.tracked_tombstone_count == 0
+    assert controller.tracked_lease_lock_count == 0
+
+
+def test_controller_api_discovers_and_deletes_one_exact_lease_container() -> None:
+    docker = FakeDocker()
+    lease_id = uuid4()
+    removed: list[bool] = []
+    docker.containers.listed = [
+        SimpleNamespace(
+            id=SANDBOX_ID,
+            labels={MANAGED_LABEL: "true", LEASE_LABEL: str(lease_id), EPOCH_LABEL: "1"},
+            reload=lambda: None,
+            remove=lambda *, force: removed.append(force),
+        )
+    ]
+    client = TestClient(
+        create_controller_app(settings=settings(), docker_client=docker),
+        headers={"Authorization": "Bearer test-secret-long-enough"},
+    )
+
+    found = client.get(
+        "/v1/sandboxes",
+        params={"lease_id": str(lease_id), "sandbox_epoch": 1},
+    )
+    deleted = client.delete(
+        "/v1/sandboxes",
+        params={"lease_id": str(lease_id), "sandbox_epoch": 1},
+    )
+
+    assert found.json() == {"sandbox_ids": [SANDBOX_ID]}
+    assert deleted.status_code == 200
+    assert deleted.json() == {"sandbox_id": SANDBOX_ID}
+    assert removed == [True]
+
+
 def test_idempotent_delete_discards_lock_after_container_was_force_removed() -> None:
     docker = FakeDocker()
     controller = DockerSandboxController(settings=settings(), docker_client=docker)
     lease_id = uuid4()
-    created = controller.create(lease_id=lease_id)
+    created = controller.create(lease_id=lease_id, sandbox_epoch=1)
     assert controller.tracked_execution_lock_count == 1
     docker.containers.missing = True
 
-    controller.delete(created.sandbox_id, lease_id=lease_id)
+    controller.delete(created.sandbox_id, lease_id=lease_id, sandbox_epoch=1)
 
     assert controller.tracked_execution_lock_count == 0
 
@@ -146,7 +352,12 @@ def test_create_rejects_client_owned_container_configuration() -> None:
     response = client.post(
         "/v1/sandboxes",
         headers={"Authorization": "Bearer test-secret-long-enough"},
-        json={"lease_id": str(uuid4()), "image": "evil", "privileged": True},
+        json={
+            "lease_id": str(uuid4()),
+            "sandbox_epoch": 1,
+            "image": "evil",
+            "privileged": True,
+        },
     )
 
     assert response.status_code == 422
@@ -159,13 +370,92 @@ def test_every_operation_rejects_a_different_lease() -> None:
     docker.containers.container.labels = {
         MANAGED_LABEL: "true",
         LEASE_LABEL: str(expected_lease),
+        EPOCH_LABEL: "1",
     }
     controller = DockerSandboxController(settings=settings(), docker_client=docker)
 
     with pytest.raises(SandboxLeaseMismatch, match="lease mismatch"):
-        controller.reconnect(SANDBOX_ID, lease_id=uuid4())
+        controller.reconnect(SANDBOX_ID, lease_id=uuid4(), sandbox_epoch=1)
     with pytest.raises(SandboxLeaseMismatch, match="lease mismatch"):
-        controller.delete(SANDBOX_ID, lease_id=uuid4())
+        controller.delete(SANDBOX_ID, lease_id=uuid4(), sandbox_epoch=1)
+
+
+def test_old_epoch_cannot_create_discover_or_delete_a_new_epoch_container() -> None:
+    docker = FakeDocker()
+    lease_id = uuid4()
+    removed: list[bool] = []
+    container = SimpleNamespace(
+        id=SANDBOX_ID,
+        status="running",
+        labels={
+            MANAGED_LABEL: "true",
+            LEASE_LABEL: str(lease_id),
+            EPOCH_LABEL: "8",
+        },
+        reload=lambda: None,
+        remove=lambda *, force: removed.append(force),
+    )
+    docker.containers.container = container
+    docker.containers.listed = [container]
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+
+    with pytest.raises(SandboxLeaseRetired):
+        controller.create(lease_id=lease_id, sandbox_epoch=7)
+
+    assert controller.find_by_lease(lease_id=lease_id, sandbox_epoch=7) == []
+    assert controller.delete_by_lease(lease_id=lease_id, sandbox_epoch=7) is None
+    assert removed == []
+
+
+@pytest.mark.parametrize("operation", ["reconnect", "execute", "upload", "download", "delete"])
+def test_old_epoch_data_plane_operation_cannot_reach_a_new_epoch_container(
+    operation: str,
+) -> None:
+    docker = FakeDocker()
+    lease_id = uuid4()
+    removed: list[bool] = []
+    docker.containers.container = SimpleNamespace(
+        id=SANDBOX_ID,
+        status="running",
+        labels={
+            MANAGED_LABEL: "true",
+            LEASE_LABEL: str(lease_id),
+            EPOCH_LABEL: "8",
+        },
+        reload=lambda: None,
+        remove=lambda *, force: removed.append(force),
+    )
+    controller = DockerSandboxController(settings=settings(), docker_client=docker)
+
+    with pytest.raises(SandboxLeaseMismatch, match="epoch mismatch"):
+        if operation == "reconnect":
+            controller.reconnect(SANDBOX_ID, lease_id=lease_id, sandbox_epoch=7)
+        elif operation == "execute":
+            controller.execute(
+                SANDBOX_ID,
+                lease_id=lease_id,
+                sandbox_epoch=7,
+                command="true",
+                timeout=1,
+            )
+        elif operation == "upload":
+            controller.upload(
+                SANDBOX_ID,
+                lease_id=lease_id,
+                sandbox_epoch=7,
+                files=[("/workspace/demo", b"old")],
+            )
+        elif operation == "download":
+            controller.download(
+                SANDBOX_ID,
+                lease_id=lease_id,
+                sandbox_epoch=7,
+                paths=["/workspace/demo"],
+            )
+        else:
+            controller.delete(SANDBOX_ID, lease_id=lease_id, sandbox_epoch=7)
+
+    assert removed == []
 
 
 def test_execute_calls_for_one_sandbox_are_serialized() -> None:
@@ -177,7 +467,11 @@ def test_execute_calls_for_one_sandbox_are_serialized() -> None:
     class ExecutableContainer:
         id = SANDBOX_ID
         status = "running"
-        labels = {MANAGED_LABEL: "true", LEASE_LABEL: str(expected_lease)}
+        labels = {
+            MANAGED_LABEL: "true",
+            LEASE_LABEL: str(expected_lease),
+            EPOCH_LABEL: "1",
+        }
 
         @staticmethod
         def reload() -> None:
@@ -210,7 +504,8 @@ def test_execute_calls_for_one_sandbox_are_serialized() -> None:
             target=controller.execute,
             kwargs={
                 "sandbox_id": SANDBOX_ID,
-                "lease_id": expected_lease,
+                    "lease_id": expected_lease,
+                    "sandbox_epoch": 1,
                 "command": "true",
                 "timeout": 1,
             },
@@ -231,7 +526,11 @@ def test_upload_inspect_timeout_force_removes_the_sandbox() -> None:
     class TimeoutContainer:
         id = SANDBOX_ID
         status = "running"
-        labels = {MANAGED_LABEL: "true", LEASE_LABEL: str(expected_lease)}
+        labels = {
+            MANAGED_LABEL: "true",
+            LEASE_LABEL: str(expected_lease),
+            EPOCH_LABEL: "1",
+        }
         removed = False
 
         @staticmethod
@@ -275,6 +574,7 @@ def test_upload_inspect_timeout_force_removes_the_sandbox() -> None:
         controller.upload(
             SANDBOX_ID,
             lease_id=expected_lease,
+            sandbox_epoch=1,
             files=[("/workspace/demo", b"content")],
         )
 
@@ -289,7 +589,11 @@ def test_upload_stdin_failure_force_removes_the_sandbox() -> None:
     class Container:
         id = SANDBOX_ID
         status = "running"
-        labels = {MANAGED_LABEL: "true", LEASE_LABEL: str(expected_lease)}
+        labels = {
+            MANAGED_LABEL: "true",
+            LEASE_LABEL: str(expected_lease),
+            EPOCH_LABEL: "1",
+        }
         removed = False
 
         @staticmethod
@@ -330,6 +634,7 @@ def test_upload_stdin_failure_force_removes_the_sandbox() -> None:
         controller.upload(
             SANDBOX_ID,
             lease_id=expected_lease,
+            sandbox_epoch=1,
             files=[("/workspace/demo", b"content")],
         )
 
@@ -348,6 +653,7 @@ def test_oversized_single_file_and_batch_are_rejected_before_docker_access() -> 
     headers = {
         "Authorization": "Bearer test-secret-long-enough",
         "X-Sandbox-Lease-ID": str(uuid4()),
+        "X-Sandbox-Epoch": "1",
     }
 
     single = client.put(

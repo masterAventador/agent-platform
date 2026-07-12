@@ -36,6 +36,7 @@ class MCPToolExecutor:
         definition: ToolDefinition,
         arguments: Mapping[str, object],
         credentials: Mapping[str, str],
+        invocation_id: UUID | None = None,
     ) -> object:
         normalized_arguments = _normalize_arguments(arguments)
         try:
@@ -44,7 +45,11 @@ class MCPToolExecutor:
                 server_id=definition.server_id,
                 credentials=credentials,
             )
-            result = await client.call_tool(definition.name, normalized_arguments)
+            result = await client.call_tool(
+                definition.name,
+                normalized_arguments,
+                invocation_id=invocation_id,
+            )
         except Exception:
             pass
         else:

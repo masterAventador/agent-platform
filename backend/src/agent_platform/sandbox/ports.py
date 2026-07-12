@@ -7,7 +7,7 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
-from agent_platform.sandbox.entities import SandboxLease, SandboxScope
+from agent_platform.sandbox.entities import SandboxLease, SandboxLeaseStatus, SandboxScope
 
 
 class SandboxWorkspace(Protocol):
@@ -27,6 +27,7 @@ class SandboxAcquireRequest:
     lease_id: UUID
     scope: SandboxScope
     expires_at: datetime
+    sandbox_epoch: int
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class ProviderSandbox:
     # 具体适配器提供符合 Deep Agents 官方公开 BackendProtocol 的对象；
     # provider-neutral 核心不复制框架接口，也不导入私有 API。
     backend: object
+    sandbox_epoch: int
 
 
 @dataclass(frozen=True)
@@ -53,15 +55,31 @@ class SandboxProvider(Protocol):
         """按 request.lease_id 幂等创建或恢复供应商沙箱。"""
         ...
 
-    async def reconnect(self, *, sandbox_id: str, lease_id: UUID) -> ProviderSandbox: ...
+    async def reconnect(
+        self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int
+    ) -> ProviderSandbox: ...
 
-    async def delete(self, *, sandbox_id: str, lease_id: UUID) -> None: ...
+    async def delete(self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int) -> None: ...
+
+    async def discover(self, *, lease_id: UUID, sandbox_epoch: int) -> list[str]: ...
+
+    async def delete_by_lease(self, *, lease_id: UUID, sandbox_epoch: int) -> str | None: ...
+
+    async def disconnect(self, *, sandbox_id: str) -> None: ...
 
 
 class SandboxLeaseRepository(Protocol):
     async def add(self, lease: SandboxLease) -> None: ...
 
     async def update(self, lease: SandboxLease) -> None: ...
+
+    async def update_if_current(
+        self,
+        lease: SandboxLease,
+        *,
+        expected_status: SandboxLeaseStatus,
+        expected_epoch: int,
+    ) -> bool: ...
 
     async def get(self, *, tenant_id: UUID, lease_id: UUID) -> SandboxLease | None: ...
 

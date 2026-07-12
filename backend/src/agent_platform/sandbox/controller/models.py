@@ -11,10 +11,19 @@ class StrictModel(BaseModel):
 
 class CreateSandboxRequest(StrictModel):
     lease_id: UUID
+    sandbox_epoch: int = Field(ge=1)
 
 
 class SandboxResponse(StrictModel):
     sandbox_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SandboxDiscoveryResponse(StrictModel):
+    sandbox_ids: list[str] = Field(max_length=1)
+
+
+class SandboxDeletionResponse(StrictModel):
+    sandbox_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class ExecRequest(StrictModel):

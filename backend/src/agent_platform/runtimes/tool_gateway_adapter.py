@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 from uuid import UUID
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
+from pydantic import JsonValue, TypeAdapter
 
 from agent_platform.platform.tool_gateway import (
     PolicyContext,
@@ -31,6 +35,9 @@ class RegistryToolMetadata(Protocol):
     @property
     def input_schema(self) -> dict[str, object]: ...
 
+    @property
+    def risk_level(self) -> object: ...
+
 
 class ToolGatewayInvoker(Protocol):
     async def invoke(
@@ -48,6 +55,85 @@ class InvocationContext:
     run_id: UUID
     employee_id: UUID
     user_id: UUID
+
+
+class OneTimeToolApprovalStore:
+    """run 内一次性精确授权；不把 approval_granted 扩大到其他调用。"""
+
+    def __init__(self) -> None:
+        self._grants: dict[tuple[UUID, UUID, str, str], UUID] = {}
+
+    def grant(
+        self,
+        *,
+        invocation_id: UUID,
+        run_id: UUID,
+        tool_id: UUID,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> None:
+        self._grants[
+            (run_id, tool_id, tool_name, self._argument_digest(arguments))
+        ] = invocation_id
+
+    def consume(
+        self,
+        *,
+        run_id: UUID,
+        tool_id: UUID,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> UUID | None:
+        grant = (run_id, tool_id, tool_name, self._argument_digest(arguments))
+        if grant not in self._grants:
+            return None
+        return self._grants.pop(grant)
+
+    def revoke(
+        self,
+        *,
+        run_id: UUID,
+        tool_id: UUID,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> None:
+        self._grants.pop(
+            (run_id, tool_id, tool_name, self._argument_digest(arguments)),
+            None,
+        )
+
+    @staticmethod
+    def _argument_digest(arguments: dict[str, object]) -> str:
+        OneTimeToolApprovalStore._validate_json_shape(arguments)
+        canonical_arguments = TypeAdapter(dict[str, JsonValue]).validate_python(arguments)
+        canonical = json.dumps(
+            canonical_arguments,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _validate_json_shape(value: object) -> None:
+        if value is None or isinstance(value, bool | str | int):
+            return
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("approval arguments must contain finite JSON numbers")
+            return
+        if isinstance(value, list):
+            for item in value:
+                OneTimeToolApprovalStore._validate_json_shape(item)
+            return
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise TypeError("approval argument keys must be strings")
+            for item in value.values():
+                OneTimeToolApprovalStore._validate_json_shape(item)
+            return
+        raise TypeError("approval arguments must be canonical JSON")
 
 
 class ToolApprovalRequired(ToolException):
@@ -75,10 +161,12 @@ class ToolGatewayAdapter:
         gateway: ToolGatewayInvoker,
         invocation_context: InvocationContext,
         policy_context: PolicyContext,
+        approval_store: OneTimeToolApprovalStore | None = None,
     ) -> None:
         self._gateway = gateway
         self._invocation_context = invocation_context
         self._policy_context = policy_context
+        self._approval_store = approval_store
 
     def adapt(self, metadata: RegistryToolMetadata) -> BaseTool:
         invoke = self._build_invoker(metadata)
@@ -88,6 +176,10 @@ class ToolGatewayAdapter:
             description=metadata.description,
             args_schema=cast(dict[str, Any], metadata.input_schema),
             infer_schema=False,
+            metadata={
+                "agent_platform_tool_id": str(metadata.id),
+                "agent_platform_tool_risk": str(metadata.risk_level),
+            },
         )
 
     def _build_invoker(
@@ -99,6 +191,16 @@ class ToolGatewayAdapter:
             execution_failed = False
             outcome: ToolInvocationOutcome | None = None
             try:
+                invocation_id = (
+                    self._approval_store.consume(
+                        run_id=context.run_id,
+                        tool_id=metadata.id,
+                        tool_name=metadata.name,
+                        arguments=arguments,
+                    )
+                    if self._approval_store is not None
+                    else None
+                )
                 outcome = await self._gateway.invoke(
                     ToolInvocation(
                         tenant_id=context.tenant_id,
@@ -108,8 +210,15 @@ class ToolGatewayAdapter:
                         tool_id=metadata.id,
                         tool_name=metadata.name,
                         arguments=arguments,
+                        invocation_id=invocation_id,
                     ),
-                    self._policy_context,
+                    replace(
+                        self._policy_context,
+                        approval_granted=(
+                            self._policy_context.approval_granted
+                            or invocation_id is not None
+                        ),
+                    ),
                 )
             except ToolExecutionError:
                 execution_failed = True

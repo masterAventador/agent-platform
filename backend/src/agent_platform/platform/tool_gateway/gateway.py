@@ -94,6 +94,7 @@ class ToolGateway:
                 definition=definition,
                 arguments=invocation.arguments,
                 credentials=credentials,
+                invocation_id=invocation.invocation_id,
             )
         except Exception:
             execution_failed = True
@@ -145,6 +146,7 @@ def _audit_event(
         argument_summary=argument_summary,
         reason=reason,
         succeeded=succeeded,
+        invocation_id=invocation.invocation_id,
     )
 
 

@@ -6,7 +6,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from docker.errors import APIError
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from agent_platform.sandbox.controller.config import ControllerSettings
@@ -17,17 +17,22 @@ from agent_platform.sandbox.controller.models import (
     ExecResponse,
     FileResult,
     FilesResponse,
+    SandboxDeletionResponse,
+    SandboxDiscoveryResponse,
     SandboxResponse,
     UploadRequest,
 )
 from agent_platform.sandbox.controller.service import (
     DockerSandboxController,
+    SandboxDiscoveryAmbiguous,
     SandboxLeaseMismatch,
+    SandboxLeaseRetired,
     SandboxNotFound,
     decode_upload,
 )
 
 LeaseHeader = Annotated[UUID, Header(alias="X-Sandbox-Lease-ID")]
+SandboxEpochHeader = Annotated[int, Header(alias="X-Sandbox-Epoch", ge=1)]
 
 
 class RequestBodyTooLarge(Exception):
@@ -112,6 +117,14 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
     async def internal_failure(_request: Request, _error: RuntimeError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": "controller unavailable"})
 
+    @app.exception_handler(SandboxLeaseRetired)
+    async def retired(_request: Request, _error: SandboxLeaseRetired) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": "sandbox lease retired"})
+
+    @app.exception_handler(SandboxDiscoveryAmbiguous)
+    async def ambiguous(_request: Request, _error: SandboxDiscoveryAmbiguous) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": "sandbox discovery ambiguous"})
+
     def authorize(authorization: Annotated[str | None, Header()] = None) -> None:
         expected = f"Bearer {settings.bearer_secret}"
         if authorization is None or not compare_digest(authorization, expected):
@@ -131,12 +144,51 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
 
     @app.post("/v1/sandboxes", response_model=SandboxResponse, dependencies=protected)
     def create(request: CreateSandboxRequest) -> SandboxResponse:
-        result = controller.create(lease_id=request.lease_id)
+        result = controller.create(
+            lease_id=request.lease_id,
+            sandbox_epoch=request.sandbox_epoch,
+        )
         return SandboxResponse(sandbox_id=result.sandbox_id)
 
+    @app.get("/v1/sandboxes", response_model=SandboxDiscoveryResponse, dependencies=protected)
+    def discover(
+        lease_id: UUID,
+        sandbox_epoch: Annotated[int, Query(ge=1)],
+    ) -> SandboxDiscoveryResponse:
+        return SandboxDiscoveryResponse(
+            sandbox_ids=controller.find_by_lease(
+                lease_id=lease_id,
+                sandbox_epoch=sandbox_epoch,
+            )
+        )
+
+    @app.delete(
+        "/v1/sandboxes",
+        response_model=SandboxDeletionResponse,
+        dependencies=protected,
+    )
+    def delete_by_lease(
+        lease_id: UUID,
+        sandbox_epoch: Annotated[int, Query(ge=1)],
+    ) -> SandboxDeletionResponse:
+        return SandboxDeletionResponse(
+            sandbox_id=controller.delete_by_lease(
+                lease_id=lease_id,
+                sandbox_epoch=sandbox_epoch,
+            )
+        )
+
     @app.get("/v1/sandboxes/{sandbox_id}", response_model=SandboxResponse, dependencies=protected)
-    def reconnect(sandbox_id: str, lease_id: LeaseHeader) -> SandboxResponse:
-        result = controller.reconnect(sandbox_id, lease_id=lease_id)
+    def reconnect(
+        sandbox_id: str,
+        lease_id: LeaseHeader,
+        sandbox_epoch: SandboxEpochHeader,
+    ) -> SandboxResponse:
+        result = controller.reconnect(
+            sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        )
         return SandboxResponse(sandbox_id=result.sandbox_id)
 
     @app.post(
@@ -146,9 +198,14 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
         sandbox_id: str,
         request: ExecRequest,
         lease_id: LeaseHeader,
+        sandbox_epoch: SandboxEpochHeader,
     ) -> ExecResponse:
         result = controller.execute(
-            sandbox_id, lease_id=lease_id, command=request.command, timeout=request.timeout
+            sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+            command=request.command,
+            timeout=request.timeout,
         )
         return ExecResponse(**result.__dict__)
 
@@ -159,6 +216,7 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
         sandbox_id: str,
         request: UploadRequest,
         lease_id: LeaseHeader,
+        sandbox_epoch: SandboxEpochHeader,
     ) -> FilesResponse:
         encoded_bytes = sum(len(item.content_base64) for item in request.files)
         if encoded_bytes > ((settings.max_batch_bytes + 2) // 3) * 4:
@@ -167,7 +225,12 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
             (item.path, decode_upload(item.content_base64, max_bytes=settings.max_file_bytes))
             for item in request.files
         ]
-        paths = controller.upload(sandbox_id, lease_id=lease_id, files=files)
+        paths = controller.upload(
+            sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+            files=files,
+        )
         return FilesResponse(files=[FileResult(path=path) for path in paths])
 
     @app.post(
@@ -179,8 +242,14 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
         sandbox_id: str,
         request: DownloadRequest,
         lease_id: LeaseHeader,
+        sandbox_epoch: SandboxEpochHeader,
     ) -> FilesResponse:
-        results = controller.download(sandbox_id, lease_id=lease_id, paths=request.paths)
+        results = controller.download(
+            sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+            paths=request.paths,
+        )
         return FilesResponse(
             files=[
                 FileResult(
@@ -197,8 +266,16 @@ def create_controller_app(*, settings: ControllerSettings, docker_client: Any) -
     @app.delete(
         "/v1/sandboxes/{sandbox_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=protected
     )
-    def delete(sandbox_id: str, lease_id: LeaseHeader) -> Response:
-        controller.delete(sandbox_id, lease_id=lease_id)
+    def delete(
+        sandbox_id: str,
+        lease_id: LeaseHeader,
+        sandbox_epoch: SandboxEpochHeader,
+    ) -> Response:
+        controller.delete(
+            sandbox_id,
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return app

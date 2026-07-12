@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, Uuid, select
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, Uuid, select
+from sqlalchemy import update as sql_update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,6 +34,8 @@ class SandboxLeaseRecord(Base):
     last_error: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
+    sandbox_epoch: Mapped[int] = mapped_column(Integer, default=1)
 
     __table_args__ = (
         UniqueConstraint(
@@ -72,29 +76,61 @@ class SqlAlchemySandboxLeaseRepository:
         record.expires_at = lease.expires_at
         record.last_error = lease.last_error
         record.updated_at = lease.updated_at
+        record.epoch = lease.epoch
+        record.sandbox_epoch = lease.sandbox_epoch
         await self._session.flush()
+
+    async def update_if_current(
+        self,
+        lease: SandboxLease,
+        *,
+        expected_status: SandboxLeaseStatus,
+        expected_epoch: int,
+    ) -> bool:
+        result = await self._session.execute(
+            sql_update(SandboxLeaseRecord)
+            .where(
+                SandboxLeaseRecord.id == lease.id,
+                SandboxLeaseRecord.tenant_id == lease.tenant_id,
+                SandboxLeaseRecord.status == expected_status.value,
+                SandboxLeaseRecord.epoch == expected_epoch,
+            )
+            .values(
+                sandbox_id=lease.sandbox_id,
+                status=lease.status.value,
+                expires_at=lease.expires_at,
+                last_error=lease.last_error,
+                updated_at=lease.updated_at,
+                epoch=lease.epoch,
+                sandbox_epoch=lease.sandbox_epoch,
+            )
+        )
+        await self._session.flush()
+        return isinstance(result, CursorResult) and result.rowcount == 1
 
     async def get(self, *, tenant_id: UUID, lease_id: UUID) -> SandboxLease | None:
         result = await self._session.execute(
-            select(SandboxLeaseRecord).where(
+            select(SandboxLeaseRecord)
+            .where(
                 SandboxLeaseRecord.id == lease_id,
                 SandboxLeaseRecord.tenant_id == tenant_id,
-            ).with_for_update()
+            )
+            .with_for_update()
         )
         record = result.scalar_one_or_none()
         return self._to_entity(record) if record is not None else None
 
-    async def get_by_scope(
-        self, *, scope: SandboxScope, provider: str
-    ) -> SandboxLease | None:
+    async def get_by_scope(self, *, scope: SandboxScope, provider: str) -> SandboxLease | None:
         result = await self._session.execute(
-            select(SandboxLeaseRecord).where(
+            select(SandboxLeaseRecord)
+            .where(
                 SandboxLeaseRecord.tenant_id == scope.tenant_id,
                 SandboxLeaseRecord.user_id == scope.user_id,
                 SandboxLeaseRecord.run_id == scope.run_id,
                 SandboxLeaseRecord.thread_id == scope.thread_id,
                 SandboxLeaseRecord.provider == provider,
-            ).with_for_update()
+            )
+            .with_for_update()
         )
         record = result.scalar_one_or_none()
         return self._to_entity(record) if record is not None else None
@@ -134,6 +170,8 @@ class SqlAlchemySandboxLeaseRepository:
             last_error=lease.last_error,
             created_at=lease.created_at,
             updated_at=lease.updated_at,
+            epoch=lease.epoch,
+            sandbox_epoch=lease.sandbox_epoch,
         )
 
     @classmethod
@@ -151,6 +189,8 @@ class SqlAlchemySandboxLeaseRepository:
             last_error=record.last_error,
             created_at=cls._as_utc(record.created_at),
             updated_at=cls._as_utc(record.updated_at),
+            epoch=record.epoch,
+            sandbox_epoch=record.sandbox_epoch,
         )
 
     @staticmethod

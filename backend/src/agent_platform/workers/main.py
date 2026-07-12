@@ -4,19 +4,24 @@ import os
 import signal
 import socket
 import sys
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import UUID
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from minio import Minio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.checkpoints.postgres import postgres_checkpointer
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.repositories.runtime_ownership import (
+    RuntimeOwnershipBusy,
+)
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
@@ -32,7 +37,7 @@ from agent_platform.platform.tool_gateway import (
     ToolGateway,
 )
 from agent_platform.platform.tools.entities import McpServer
-from agent_platform.workers.run_worker import RuntimeResolver, RunWorker
+from agent_platform.workers.run_worker import RuntimeResolver, RunWorker, WorkerFenced
 from agent_platform.workers.runtime_adapters import (
     BuiltinRuntimeAdapters,
     RuntimeAdapterConfigurationError,
@@ -43,6 +48,7 @@ from agent_platform.workers.runtime_composition import (
     PlatformModelResolver,
     PlatformRuntimeSelector,
 )
+from agent_platform.workers.runtime_recovery import RuntimeRecoveryTransient
 
 
 class WorkerConfigurationError(Exception):
@@ -59,6 +65,10 @@ class WorkerLoop(Protocol):
     async def renew_active_runtimes(self) -> None: ...
 
     async def aclose(self) -> None: ...
+
+
+class RuntimeRecoveryWorker(Protocol):
+    async def recover_incomplete_runs(self) -> int: ...
 
 
 @dataclass(slots=True)
@@ -96,6 +106,9 @@ async def serve(
         while not stop_event.is_set():
             try:
                 await worker.run_once(block_ms=block_ms)
+            except WorkerFenced:
+                logger.error("worker_runtime_ownership_fenced")
+                stop_event.set()
             except Exception as error:
                 logger.error(
                     "worker_delivery_processing_failed",
@@ -135,6 +148,25 @@ async def _heartbeat_loop(
             return
 
 
+async def wait_for_runtime_recovery(
+    *,
+    worker: RuntimeRecoveryWorker,
+    stop_event: asyncio.Event,
+    retry_seconds: float,
+) -> int | None:
+    while not stop_event.is_set():
+        try:
+            return await worker.recover_incomplete_runs()
+        except (RuntimeOwnershipBusy, RuntimeRecoveryTransient) as error:
+            logger.warning(
+                "worker_runtime_recovery_waiting",
+                extra={"error_type": type(error).__name__},
+            )
+            with suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=retry_seconds)
+    return None
+
+
 async def run_worker_service(
     *,
     runtime_resolver: RuntimeResolver | None = None,
@@ -161,35 +193,55 @@ async def run_worker_service(
         stream_name=app_settings.run_queue_stream_name,
         group_name=app_settings.run_queue_group_name,
         pending_min_idle_ms=app_settings.queue_pending_min_idle_ms,
+        dead_letter_stream_name=app_settings.run_queue_dead_letter_stream_name,
+        max_delivery_attempts=app_settings.queue_max_delivery_attempts,
     )
     service_stop = stop_event or asyncio.Event()
     service_health = health or WorkerHealth()
     ready_file.unlink(missing_ok=True)
     _install_signal_handlers(service_stop)
+    checkpoint_stack = AsyncExitStack()
     try:
-        resolver = runtime_resolver or _build_runtime_resolver(
-            settings=app_settings,
-            session_factory=session_factory,
-            model_resolver=model_resolver,
-        )
+        if runtime_resolver is None:
+            checkpointer = await checkpoint_stack.enter_async_context(
+                postgres_checkpointer(_checkpoint_url(app_settings.database_url))
+            )
+            await checkpointer.setup()
+            resolver = _build_runtime_resolver(
+                settings=app_settings,
+                session_factory=session_factory,
+                model_resolver=model_resolver,
+                checkpointer=checkpointer,
+            )
+        else:
+            resolver = runtime_resolver
         await queue.setup()
-        ready_file.touch(mode=0o600)
         worker = RunWorker(
             session_factory=session_factory,
             queue=queue,
             runtime_resolver=resolver,
             consumer_name=consumer_name or _default_consumer_name(),
+            runtime_lease_duration=timedelta(seconds=app_settings.runtime_lease_seconds),
         )
+        recovered = await wait_for_runtime_recovery(
+            worker=worker,
+            stop_event=service_stop,
+            retry_seconds=min(1.0, app_settings.runtime_heartbeat_seconds),
+        )
+        if recovered is None:
+            return
+        ready_file.touch(mode=0o600)
         await serve(
             worker=worker,
             stop_event=service_stop,
             health=service_health,
             retry_backoff_seconds=app_settings.worker_retry_backoff_seconds,
-            heartbeat_interval_seconds=app_settings.sandbox_ttl_seconds / 3,
+            heartbeat_interval_seconds=app_settings.runtime_heartbeat_seconds,
         )
     finally:
         ready_file.unlink(missing_ok=True)
         service_health.ready = False
+        await checkpoint_stack.aclose()
         await redis.aclose()
         await engine.dispose()
 
@@ -259,6 +311,7 @@ def _build_runtime_resolver(
     settings: AppSettings,
     session_factory: async_sessionmaker[AsyncSession],
     model_resolver: PlatformModelResolver | None = None,
+    checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> RuntimeResolver:
     adapters = _load_runtime_adapters(settings, session_factory=session_factory)
     tool_reader = _SessionToolReader(session_factory)
@@ -284,11 +337,19 @@ def _build_runtime_resolver(
         gateway=gateway,
         runtime_selector=PlatformRuntimeSelector(
             workflow_factory=adapters.workflow_factory,
+            checkpointer=checkpointer,
         ),
         sandbox_ttl=timedelta(seconds=settings.sandbox_ttl_seconds),
         close_callback=adapters.aclose,
         model_resolver=model_resolver,
     )
+
+
+def _checkpoint_url(database_url: str) -> str:
+    prefix = "postgresql+asyncpg://"
+    if not database_url.startswith(prefix):
+        raise WorkerConfigurationError("PostgreSQL asyncpg database URL is required")
+    return "postgresql://" + database_url.removeprefix(prefix)
 
 
 def _load_runtime_adapters(

@@ -5,11 +5,12 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib.util import find_spec
-from typing import Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,12 +37,17 @@ from agent_platform.runtimes.deep_agent import (
 )
 from agent_platform.runtimes.tool_gateway_adapter import (
     InvocationContext,
+    OneTimeToolApprovalStore,
     ToolGatewayAdapter,
     ToolGatewayInvoker,
 )
 from agent_platform.sandbox.entities import SandboxScope
 from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.sandbox.ports import RunExecutionEnvironment
+from agent_platform.workers.runtime_recovery import (
+    RuntimeRecoveryTransient,
+    RuntimeRecoveryUnavailable,
+)
 
 RuntimeWorkMode = Literal["autonomous", "workflow", "hybrid"]
 ResolvedModel = str | BaseChatModel
@@ -58,6 +64,17 @@ class PermanentRuntimePreparationError(Exception):
     """无需重试的发布配置错误；code 可安全持久化。"""
 
     code = "runtime_preparation_failed"
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        self._cleanup: Callable[[], Awaitable[None]] | None = None
+
+    def defer_cleanup(self, cleanup: Callable[[], Awaitable[None]]) -> None:
+        self._cleanup = cleanup
+
+    async def cleanup_after_failure(self) -> None:
+        if self._cleanup is not None:
+            await self._cleanup()
 
 
 class UntrustedRuntimeDefinition(PermanentRuntimePreparationError):
@@ -192,15 +209,32 @@ def create_deep_agent_runtime(
     tools: Sequence[BaseTool],
     environment: RunExecutionEnvironment,
     model: ResolvedModel,
+    checkpointer: BaseCheckpointSaver[Any] | None,
+    approval_store: OneTimeToolApprovalStore | None,
 ) -> EmployeeRuntime:
     """用同一个 run environment 的官方 Backend 创建自主员工。"""
 
+    tool_ids_by_name = {
+        tool.name: UUID(str(tool.metadata["agent_platform_tool_id"]))
+        for tool in tools
+        if tool.metadata is not None and "agent_platform_tool_id" in tool.metadata
+    }
+    interrupt_on = {
+        tool.name: True
+        for tool in tools
+        if tool.metadata is not None
+        and tool.metadata.get("agent_platform_tool_risk") in {"external", "destructive"}
+    }
     return DeepAgentRuntime(
         agent_factory=DeepAgentFactory(
             model=model,
             tools=tools,
             backend=require_sandbox_backend(environment.backend),
-        )
+            checkpointer=checkpointer,
+        interrupt_on=cast(dict[str, bool | dict[str, object]], interrupt_on) or None,
+        ),
+        approval_store=approval_store,
+        tool_ids_by_name=tool_ids_by_name,
     )
 
 
@@ -211,9 +245,11 @@ class PlatformRuntimeSelector:
         self,
         *,
         workflow_factory: WorkflowRuntimeFactory,
-        autonomous_factory: AutonomousRuntimeFactory = create_deep_agent_runtime,
+        autonomous_factory: AutonomousRuntimeFactory | None = None,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
     ) -> None:
         self._autonomous_factory = autonomous_factory
+        self._checkpointer = checkpointer
         self._workflow_factory = workflow_factory
 
     def select(
@@ -223,9 +259,18 @@ class PlatformRuntimeSelector:
         tools: Sequence[BaseTool],
         environment: RunExecutionEnvironment,
         model: ResolvedModel,
+        approval_store: OneTimeToolApprovalStore | None = None,
     ) -> EmployeeRuntime:
         if capabilities.work_mode == "autonomous":
-            return self._autonomous_factory(tools, environment, model)
+            if self._autonomous_factory is not None:
+                return self._autonomous_factory(tools, environment, model)
+            return create_deep_agent_runtime(
+                tools,
+                environment,
+                model,
+                self._checkpointer,
+                approval_store,
+            )
         if capabilities.workflow_id is None or capabilities.workflow_version is None:
             raise UntrustedRuntimeDefinition("published workflow reference is required")
         return self._workflow_factory(
@@ -254,6 +299,16 @@ class PreparedRuntimeResult:
             lease_id=self.environment.lease.id,
             scope=self.scope,
         )
+        self._closed = True
+
+    async def detach(self) -> None:
+        """仅释放当前 Worker 的本地客户端，不删除可被新 owner 恢复的沙箱。"""
+
+        if self._closed:
+            return
+        close = getattr(self.environment.backend, "aclose", None)
+        if callable(close):
+            await close()
         self._closed = True
 
     async def renew(self) -> None:
@@ -309,6 +364,56 @@ class ComposedRuntimeResolver:
             scope=scope,
             ttl=self._sandbox_ttl,
         )
+        return await self._compose(
+            run=run,
+            definition=definition,
+            capabilities=capabilities,
+            model=model,
+            scope=scope,
+            environment=environment,
+            delete_on_error=True,
+        )
+
+    async def recover(
+        self,
+        run: Run,
+        definition: dict[str, object],
+    ) -> PreparedRuntimeResult:
+        if "skill_paths" in definition:
+            raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
+        capabilities = PublishedRuntimeCapabilities.from_definition(definition)
+        model = self._model_resolver.resolve(capabilities.model)
+        scope = SandboxScope(
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            user_id=run.created_by,
+            thread_id=run.thread_id,
+        )
+        environment = await self._sandbox_manager.reconnect_active(
+            scope=scope,
+            ttl=self._sandbox_ttl,
+        )
+        return await self._compose(
+            run=run,
+            definition=definition,
+            capabilities=capabilities,
+            model=model,
+            scope=scope,
+            environment=environment,
+            delete_on_error=False,
+        )
+
+    async def _compose(
+        self,
+        *,
+        run: Run,
+        definition: dict[str, object],
+        capabilities: PublishedRuntimeCapabilities,
+        model: ResolvedModel,
+        scope: SandboxScope,
+        environment: RunExecutionEnvironment,
+        delete_on_error: bool,
+    ) -> PreparedRuntimeResult:
         try:
             async with self._session_factory() as session:
                 try:
@@ -349,6 +454,7 @@ class ComposedRuntimeResolver:
                 policy_context=PolicyContext(
                     allowed_tool_ids=frozenset(capabilities.tool_ids),
                 ),
+                approval_store=(approval_store := OneTimeToolApprovalStore()),
             )
             tools = [gateway_adapter.adapt(metadata) for metadata in tool_metadata]
             runtime = self._runtime_selector.select(
@@ -356,19 +462,33 @@ class ComposedRuntimeResolver:
                 tools=tools,
                 environment=environment,
                 model=model,
+                approval_store=approval_store,
             )
-        except Exception:
-            try:
+        except PermanentRuntimePreparationError as error:
+            async def cleanup() -> None:
                 await self._sandbox_manager.delete(
                     lease_id=environment.lease.id,
                     scope=scope,
                 )
-            except Exception:
-                logger.error(
-                    "runtime_preparation_cleanup_failed",
-                    extra={"run_id": str(run.id)},
-                )
+
+            if not delete_on_error:
+                raise RuntimeRecoveryUnavailable(cleanup=cleanup) from None
+            error.defer_cleanup(cleanup)
             raise
+        except Exception:
+            close = getattr(environment.backend, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.error(
+                        "runtime_recovery_detach_failed",
+                        extra={"run_id": str(run.id)},
+                    )
+            if not delete_on_error:
+                raise RuntimeRecoveryTransient from None
+            raise
+
         return PreparedRuntimeResult(
             runtime=runtime,
             employee_definition=extend_runtime_definition(

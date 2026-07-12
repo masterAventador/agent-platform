@@ -201,7 +201,7 @@ async def control_run(
             owner_required=False,
         )
         runs = SqlAlchemyRunRepository(database_session)
-        run = await runs.get(tenant_id=access.tenant.id, run_id=run_id)
+        run = await runs.get_for_update(tenant_id=access.tenant.id, run_id=run_id)
         if run is None:
             raise _not_found()
 
@@ -231,7 +231,7 @@ async def control_run(
                 sequence=await events.next_sequence(run_id=run.id),
                 event_type=(
                     EventType.RUN_CANCELLED
-                    if payload.action == "cancel"
+                    if payload.action in {"cancel", "reject"}
                     else EventType.RUN_PROGRESS
                 ),
                 payload={"action": payload.action, **command_payload},

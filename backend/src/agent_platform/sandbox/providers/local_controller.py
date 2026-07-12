@@ -21,6 +21,7 @@ class LocalControllerBackend(BaseSandbox):
         *,
         sandbox_id: str,
         lease_id: UUID,
+        sandbox_epoch: int,
         base_url: str,
         bearer_secret: str,
         transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
@@ -28,9 +29,11 @@ class LocalControllerBackend(BaseSandbox):
     ) -> None:
         self._sandbox_id = sandbox_id
         self._lease_id = lease_id
+        self._sandbox_epoch = sandbox_epoch
         headers = {
             "Authorization": f"Bearer {bearer_secret}",
             "X-Sandbox-Lease-ID": str(lease_id),
+            "X-Sandbox-Epoch": str(sandbox_epoch),
         }
         sync_transport = transport if isinstance(transport, httpx.BaseTransport) else None
         async_transport = transport if isinstance(transport, httpx.AsyncBaseTransport) else None
@@ -186,20 +189,90 @@ class LocalControllerSandboxProvider:
 
     async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
         async with self._async_client() as client:
-            response = await client.post("/v1/sandboxes", json={"lease_id": str(request.lease_id)})
+            response = await client.post(
+                "/v1/sandboxes",
+                json={
+                    "lease_id": str(request.lease_id),
+                    "sandbox_epoch": request.sandbox_epoch,
+                },
+            )
             response.raise_for_status()
-            return self._sandbox(response.json()["sandbox_id"], lease_id=request.lease_id)
+            return self._sandbox(
+                response.json()["sandbox_id"],
+                lease_id=request.lease_id,
+                sandbox_epoch=request.sandbox_epoch,
+            )
 
-    async def reconnect(self, *, sandbox_id: str, lease_id: UUID) -> ProviderSandbox:
-        async with self._async_client(lease_id=lease_id) as client:
+    async def reconnect(
+        self,
+        *,
+        sandbox_id: str,
+        lease_id: UUID,
+        sandbox_epoch: int,
+    ) -> ProviderSandbox:
+        async with self._async_client(
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        ) as client:
             response = await client.get(f"/v1/sandboxes/{sandbox_id}")
             response.raise_for_status()
-            return self._sandbox(response.json()["sandbox_id"], lease_id=lease_id)
+            return self._sandbox(
+                response.json()["sandbox_id"],
+                lease_id=lease_id,
+                sandbox_epoch=sandbox_epoch,
+            )
 
-    async def delete(self, *, sandbox_id: str, lease_id: UUID) -> None:
-        async with self._async_client(lease_id=lease_id) as client:
+    async def delete(self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int) -> None:
+        async with self._async_client(
+            lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
+        ) as client:
             response = await client.delete(f"/v1/sandboxes/{sandbox_id}")
             response.raise_for_status()
+        backend = self._backends.pop(sandbox_id, None)
+        if backend is not None:
+            await backend.aclose()
+
+    async def discover(self, *, lease_id: UUID, sandbox_epoch: int) -> list[str]:
+        async with self._async_client() as client:
+            response = await client.get(
+                "/v1/sandboxes",
+                params={
+                    "lease_id": str(lease_id),
+                    "sandbox_epoch": sandbox_epoch,
+                },
+            )
+            response.raise_for_status()
+        sandbox_ids = response.json()["sandbox_ids"]
+        if not isinstance(sandbox_ids, list) or len(sandbox_ids) > 1:
+            raise ValueError("controller returned ambiguous sandbox discovery")
+        for sandbox_id in sandbox_ids:
+            if not isinstance(sandbox_id, str) or _SANDBOX_ID.fullmatch(sandbox_id) is None:
+                raise ValueError("controller returned an invalid sandbox id")
+        return sandbox_ids
+
+    async def delete_by_lease(self, *, lease_id: UUID, sandbox_epoch: int) -> str | None:
+        async with self._async_client() as client:
+            response = await client.delete(
+                "/v1/sandboxes",
+                params={
+                    "lease_id": str(lease_id),
+                    "sandbox_epoch": sandbox_epoch,
+                },
+            )
+            response.raise_for_status()
+        sandbox_id = response.json()["sandbox_id"]
+        if sandbox_id is not None and (
+            not isinstance(sandbox_id, str) or _SANDBOX_ID.fullmatch(sandbox_id) is None
+        ):
+            raise ValueError("controller returned an invalid sandbox id")
+        if sandbox_id is not None:
+            backend = self._backends.pop(sandbox_id, None)
+            if backend is not None:
+                await backend.aclose()
+        return sandbox_id
+
+    async def disconnect(self, *, sandbox_id: str) -> None:
         backend = self._backends.pop(sandbox_id, None)
         if backend is not None:
             await backend.aclose()
@@ -216,7 +289,13 @@ class LocalControllerSandboxProvider:
         if failures:
             raise RuntimeError("local controller backend cleanup failed")
 
-    def _sandbox(self, sandbox_id: str, *, lease_id: UUID) -> ProviderSandbox:
+    def _sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        lease_id: UUID,
+        sandbox_epoch: int,
+    ) -> ProviderSandbox:
         if _SANDBOX_ID.fullmatch(sandbox_id) is None:
             raise ValueError("controller returned an invalid sandbox id")
         previous = self._backends.pop(sandbox_id, None)
@@ -225,6 +304,7 @@ class LocalControllerSandboxProvider:
         backend = LocalControllerBackend(
             sandbox_id=sandbox_id,
             lease_id=lease_id,
+            sandbox_epoch=sandbox_epoch,
             base_url=self._base_url,
             bearer_secret=self._secret,
             transport=self._transport,
@@ -235,15 +315,23 @@ class LocalControllerSandboxProvider:
             sandbox_id=sandbox_id,
             workspace=LocalControllerWorkspace(backend),
             backend=backend,
+            sandbox_epoch=sandbox_epoch,
         )
 
-    def _async_client(self, *, lease_id: UUID | None = None) -> httpx.AsyncClient:
+    def _async_client(
+        self,
+        *,
+        lease_id: UUID | None = None,
+        sandbox_epoch: int | None = None,
+    ) -> httpx.AsyncClient:
         transport = (
             self._transport if isinstance(self._transport, httpx.AsyncBaseTransport) else None
         )
         headers = {"Authorization": f"Bearer {self._secret}"}
         if lease_id is not None:
             headers["X-Sandbox-Lease-ID"] = str(lease_id)
+        if sandbox_epoch is not None:
+            headers["X-Sandbox-Epoch"] = str(sandbox_epoch)
         return httpx.AsyncClient(
             base_url=self._base_url,
             headers=headers,

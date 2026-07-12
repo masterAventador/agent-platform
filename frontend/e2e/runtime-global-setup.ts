@@ -21,7 +21,8 @@ async function waitForRuntimeProcesses(): Promise<void> {
 
 export default async function runtimeGlobalSetup() {
   const schemaVersion = queryRuntimeDatabase('select version_num from alembic_version')
-  if (schemaVersion !== '20260713_0010') {
+  if (!process.env.PLAYWRIGHT_RUNTIME_EXPECTED_SCHEMA_VERSION
+      || schemaVersion !== process.env.PLAYWRIGHT_RUNTIME_EXPECTED_SCHEMA_VERSION) {
     throw new Error(`Runtime E2E infrastructure is not prepared: ${schemaVersion}`)
   }
   const fixtureCounts = queryRuntimeDatabase(

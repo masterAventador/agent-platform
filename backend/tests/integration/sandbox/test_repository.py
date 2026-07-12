@@ -135,6 +135,7 @@ async def test_repository_lists_all_expired_non_terminal_leases_with_or_without_
         run_id=run.id,
         thread_id=run.thread_id,
     )
+
     def lease_for(label: str) -> SandboxLease:
         return SandboxLease.create(
             scope=SandboxScope(
@@ -153,9 +154,9 @@ async def test_repository_lists_all_expired_non_terminal_leases_with_or_without_
         lease_for("active-with-id").activate("box-active", now=now),
         lease_for("deleting-with-id").activate("box-deleting", now=now).begin_delete(now=now),
         lease_for("error-no-id").mark_error("acquire_failed", now=now),
-        lease_for("error-with-id").activate("box-error", now=now).mark_error(
-            "delete_failed", now=now
-        ),
+        lease_for("error-with-id")
+        .activate("box-error", now=now)
+        .mark_error("delete_failed", now=now),
     ]
     terminal = [
         lease_for("deleted").mark_deleted(now=now),

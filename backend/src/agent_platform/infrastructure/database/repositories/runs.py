@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -10,7 +13,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    and_,
     func,
+    or_,
     select,
 )
 from sqlalchemy.exc import IntegrityError
@@ -127,12 +132,25 @@ class SqlAlchemyRunRepository:
         await self._session.flush()
 
     async def get(self, *, tenant_id: UUID, run_id: UUID) -> Run | None:
-        result = await self._session.execute(
-            select(RunRecord).where(
-                RunRecord.id == run_id,
-                RunRecord.tenant_id == tenant_id,
-            )
+        return await self._get(tenant_id=tenant_id, run_id=run_id, for_update=False)
+
+    async def get_for_update(self, *, tenant_id: UUID, run_id: UUID) -> Run | None:
+        return await self._get(tenant_id=tenant_id, run_id=run_id, for_update=True)
+
+    async def _get(
+        self,
+        *,
+        tenant_id: UUID,
+        run_id: UUID,
+        for_update: bool,
+    ) -> Run | None:
+        query = select(RunRecord).where(
+            RunRecord.id == run_id,
+            RunRecord.tenant_id == tenant_id,
         )
+        if for_update:
+            query = query.with_for_update()
+        result = await self._session.execute(query)
         record = result.scalar_one_or_none()
         return self._to_entity(record) if record is not None else None
 
@@ -155,6 +173,37 @@ class SqlAlchemyRunRepository:
             .where(RunRecord.tenant_id == tenant_id)
             .order_by(RunRecord.created_at.desc())
             .limit(limit)
+        )
+        return [self._to_entity(record) for record in result.scalars()]
+
+    async def list_recovery_candidates(
+        self,
+        *,
+        limit: int = 100,
+        after_updated_at: datetime | None = None,
+        after_run_id: UUID | None = None,
+    ) -> Sequence[Run]:
+        query = select(RunRecord).where(
+            RunRecord.status.in_(
+                [
+                    RunStatus.RUNNING.value,
+                    RunStatus.WAITING_FOR_INPUT.value,
+                    RunStatus.WAITING_FOR_APPROVAL.value,
+                ]
+            )
+        )
+        if after_updated_at is not None and after_run_id is not None:
+            query = query.where(
+                or_(
+                    RunRecord.updated_at > after_updated_at,
+                    and_(
+                        RunRecord.updated_at == after_updated_at,
+                        RunRecord.id > after_run_id,
+                    ),
+                )
+            )
+        result = await self._session.execute(
+            query.order_by(RunRecord.updated_at, RunRecord.id).limit(limit)
         )
         return [self._to_entity(record) for record in result.scalars()]
 
@@ -260,6 +309,10 @@ class SqlAlchemyRunCommandRepository:
         )
         await self._session.flush()
 
+    async def get(self, command_id: UUID) -> RunCommand | None:
+        record = await self._session.get(RunCommandRecord, command_id)
+        return self._to_entity(record) if record is not None else None
+
     async def pending(self, *, limit: int = 100) -> list[RunCommand]:
         result = await self._session.execute(self.pending_query(limit=limit))
         return [self._to_entity(record) for record in result.scalars()]
@@ -268,7 +321,10 @@ class SqlAlchemyRunCommandRepository:
     def pending_query(*, limit: int) -> Select[tuple[RunCommandRecord]]:
         return (
             select(RunCommandRecord)
-            .where(RunCommandRecord.dispatched_at.is_(None))
+            .where(
+                RunCommandRecord.dispatched_at.is_(None),
+                RunCommandRecord.processed_at.is_(None),
+            )
             .order_by(RunCommandRecord.created_at)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -301,6 +357,20 @@ class SqlAlchemyRunCommandRepository:
             raise LookupError(command_id)
         record.processed_at = datetime.now(UTC)
         await self._session.flush()
+
+    async def unprocessed_approval_commands(self, *, run_id: UUID) -> list[RunCommand]:
+        result = await self._session.execute(
+            select(RunCommandRecord)
+            .where(
+                RunCommandRecord.run_id == run_id,
+                RunCommandRecord.processed_at.is_(None),
+                RunCommandRecord.action.in_(
+                    [RunCommandAction.APPROVE.value, RunCommandAction.REJECT.value]
+                ),
+            )
+            .with_for_update()
+        )
+        return [self._to_entity(record) for record in result.scalars()]
 
     @staticmethod
     def _to_entity(record: RunCommandRecord) -> RunCommand:
