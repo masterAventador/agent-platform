@@ -24,6 +24,30 @@
 - 第一阶段必须支持本地邮箱注册和邮箱密码登录，邮箱暂不验证归属；同时保留 OIDC / 企业 SSO 扩展能力，不得把认证体系锁死为仅支持 OIDC；
 - 使用 OpenTelemetry 建立统一可观测性，平台事件协议不得直接暴露 LangGraph 或 Deep Agents 的内部事件格式。
 
+### Deep Agents / LangGraph 零侵入规范（强制）
+
+- 禁止直接修改 Deep Agents、LangGraph 及其依赖包的源代码；
+- 禁止维护包含上游源码修改的私有 Fork，不得把修改 `site-packages`、安装后替换文件或本地补丁作为项目正常运行条件；
+- 禁止 Monkey Patch 框架方法、导入私有模块或以下划线开头的内部 API、复制框架内部实现后再修改；
+- 所有平台定制必须通过公开扩展点完成，包括 Tool、Skill、Middleware、Backend、Sandbox Backend、Checkpointer、Store、State、Node、Subgraph、Interrupt 和事件监听；
+- 平台业务只能依赖自研 `EmployeeRuntime` 协议，Deep Agents 与 LangGraph 的具体调用必须集中在 `backend/src/agent_platform/runtimes/` 适配层；
+- 不得向平台 API、前端或业务模块泄露 Deep Agents / LangGraph 的原始 State、内部事件和私有数据结构；
+- 遇到上游缺陷时，依次采用公开扩展点绕开、锁定已知可用版本、外围兼容适配、提交上游 Issue/PR，并在上游发布后正常升级；
+- 只有用户明确批准的紧急临时补丁才允许短期存在，且必须有隔离封装、回归测试、移除条件和上游跟踪记录，禁止演变为长期私有分支；
+- 依赖版本通过 `pyproject.toml` 声明并由锁文件固定，Deep Agents、LangGraph 及相关核心依赖必须在独立升级变更中更新，禁止顺带升级后未经验证直接合并；
+- 框架升级必须执行以下兼容性测试门禁，任何一项失败都不得合并：
+  - `EmployeeRuntime` 的 `start`、`stream`、`send_message`、`approve`、`reject`、`resume`、`cancel`、`get_state`、`get_history` 和 `get_artifacts` 契约；
+  - 自主型、流程型和混合型数字员工的代表性端到端场景；
+  - Skill 发现、描述匹配、渐进式读取、版本覆盖、附属文件访问和脚本同步执行；
+  - Sandbox Backend 的创建、按任务/线程隔离、复用、文件读写、命令执行、超时、产物回收和销毁；
+  - LangGraph Checkpoint、Store、持久化、进程重启恢复、Interrupt、人工审批、拒绝、继续和取消；
+  - Deep Agents / LangGraph 原始事件到平台统一事件的映射、顺序、序号、去重、版本和终态；
+  - Tool Gateway / MCP 的参数校验、租户权限、人工审批、超时、错误转换和审计记录；
+  - 短期状态、长期记忆和文件空间在企业、用户、员工、任务和线程之间的隔离；
+  - 子智能体的创建、权限继承/覆盖、上下文隔离、结果回传和失败传播；
+  - API、SSE 和前端只能看到平台协议，不能因升级泄露新的框架内部字段；
+- 升级前后必须使用同一组固定输入和期望结果运行回归测试，记录行为、事件、状态恢复和产物差异；升级造成的行为变化必须先完成适配、迁移说明和回滚方案。
+
 ### 前端架构
 
 - 使用 React + TypeScript + Vite，组件体系采用 Ant Design 与 Ant Design X；
@@ -101,3 +125,14 @@ platform/
 ### 后端边界
 
 Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python Agent 后端。Web、Tauri 和后续 App 统一通过 HTTPS、SSE 或 WebSocket 访问云端 FastAPI 平台。只有明确提出离线执行需求并完成安全与升级设计后，才能引入本地 Sidecar。
+
+## 任务提交与 E2E 累积规范（强制）
+
+- 当前项目采用带 `[Tn]` 可见编号的任务计划；从本规则建立后，每个任务完成并通过该任务相关测试、类型检查和静态检查后，必须立即创建独立 Git 提交并推送，禁止把多个已完成任务长期堆在工作区；
+- 单个任务提交只能包含该任务及其必要基础改动，不得夹带后续任务、临时调试代码或无关文件；
+- 任务仍处于 RED、实现中或验证失败状态时不得提交为完成；修复并进入 GREEN 后才允许提交；
+- 所有核心用户流程必须使用 Playwright 编写正式 E2E 测试，测试脚本统一保存在 `frontend/e2e/` 并纳入 Git；
+- 已建立的 Playwright 用例必须长期保留并持续累积为完整回归测试集，禁止因为当前任务通过或已有新用例而删除旧用例；
+- 产品行为变化时应同步更新受影响的旧 E2E 用例，并新增覆盖新流程的用例；只有对应功能被正式删除且确认无其他价值时，才允许删除相关测试；
+- 每个任务至少运行该任务相关的 Playwright 用例；阶段检查点和本机部署验证必须运行完整 Playwright 测试集；
+- `agent-browser` 仍只作为 AI 临时操作浏览器的手脚，不能替代或计入 Playwright E2E 测试集。
