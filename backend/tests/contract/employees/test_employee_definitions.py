@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.models import load_database_models
 
 
 class AllowAllRateLimiter:
@@ -18,6 +19,7 @@ class AllowAllRateLimiter:
 @pytest_asyncio.fixture
 async def employee_clients() -> AsyncIterator[tuple[AsyncClient, AsyncClient]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app = create_app(
         settings=AppSettings(auth_cookie_secure=False),

@@ -39,6 +39,14 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(employee_versions)").fetchall()
         }
+        run_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(run_events)").fetchall()
+        }
     assert columns == {"id", "name", "slug", "created_at"}
     assert user_columns == {
         "id",
@@ -58,6 +66,8 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert membership_columns == {"id", "tenant_id", "user_id", "role", "created_at"}
     assert {"id", "tenant_id", "name", "runtime_type", "status"} <= employee_columns
     assert {"id", "employee_id", "tenant_id", "version", "definition"} <= version_columns
+    assert {"id", "tenant_id", "employee_id", "thread_id", "status"} <= run_columns
+    assert {"event_id", "run_id", "sequence", "event_type", "payload"} <= event_columns
 
     command.downgrade(config, "base")
 
@@ -67,6 +77,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "WHERE type = 'table' AND name IN ("
             "'tenants', 'users', 'auth_sessions', 'tenant_memberships', "
             "'employees', 'employee_versions'"
+            ", 'runs', 'run_events'"
             ")"
         ).fetchall()
     assert platform_tables == []

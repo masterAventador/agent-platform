@@ -7,18 +7,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from agent_platform.infrastructure.database.base import Base
-from agent_platform.infrastructure.database.repositories.auth import (
-    AuthSessionRecord,
-    UserRecord,
-)
-from agent_platform.infrastructure.database.repositories.employees import (
-    EmployeeRecord,
-    EmployeeVersionRecord,
-)
-from agent_platform.infrastructure.database.repositories.tenants import (
-    TenantMembershipRecord,
-    TenantRecord,
-)
+from agent_platform.infrastructure.database.models import load_database_models
 
 config = context.config
 
@@ -28,11 +17,8 @@ if database_url := os.getenv("AGENT_PLATFORM_DATABASE_URL"):
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+load_database_models()
 target_metadata = Base.metadata
-_tenant_record = TenantRecord
-_auth_records = (UserRecord, AuthSessionRecord)
-_tenant_records = (TenantMembershipRecord,)
-_employee_records = (EmployeeRecord, EmployeeVersionRecord)
 
 
 def run_migrations_offline() -> None:

@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "EventType": {
+      "enum": [
+        "run.started",
+        "run.progress",
+        "message.output",
+        "plan.updated",
+        "skill.loaded",
+        "tool.started",
+        "tool.completed",
+        "subagent.started",
+        "subagent.completed",
+        "approval.required",
+        "artifact.created",
+        "run.completed",
+        "run.failed",
+        "run.cancelled"
+      ],
+      "title": "EventType",
+      "type": "string"
+    },
+    "JsonValue": {}
+  },
+  "additionalProperties": false,
+  "properties": {
+    "employee_id": {
+      "format": "uuid",
+      "title": "Employee Id",
+      "type": "string"
+    },
+    "event_id": {
+      "format": "uuid",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Event Version",
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Payload",
+      "type": "object"
+    },
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "sequence": {
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "tenant_id": {
+      "format": "uuid",
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/EventType"
+    }
+  },
+  "required": [
+    "event_id",
+    "tenant_id",
+    "employee_id",
+    "run_id",
+    "sequence",
+    "type",
+    "occurred_at",
+    "payload"
+  ],
+  "title": "PlatformEvent",
+  "type": "object"
+}

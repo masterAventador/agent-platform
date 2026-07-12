@@ -5,6 +5,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.tenants import (
     SqlAlchemyTenantRepository,
 )
@@ -15,6 +16,7 @@ from agent_platform.platform.tenants.errors import TenantSlugAlreadyExists
 @pytest_asyncio.fixture
 async def tenant_repository() -> AsyncIterator[SqlAlchemyTenantRepository]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)

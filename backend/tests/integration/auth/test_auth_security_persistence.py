@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     SqlAlchemyAuthSessionRepository,
@@ -33,6 +34,7 @@ class AllowAllRateLimiter:
 @pytest.mark.asyncio
 async def test_password_and_session_secrets_are_not_stored_in_plaintext() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -67,6 +69,7 @@ async def test_password_and_session_secrets_are_not_stored_in_plaintext() -> Non
 @pytest.mark.asyncio
 async def test_database_enforces_case_insensitive_email_uniqueness() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
