@@ -89,3 +89,20 @@ async def test_create_and_read_queued_run_for_published_employee(run_client: Asy
     )
     assert events_response.status_code == 200
     assert events_response.json() == []
+
+    cancel_response = await run_client.post(
+        f"/api/v1/runs/{run['id']}/control",
+        headers=headers,
+        json={"action": "cancel"},
+    )
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancelled"
+
+    stream_response = await run_client.get(
+        f"/api/v1/runs/{run['id']}/stream",
+        headers=headers,
+    )
+    assert stream_response.status_code == 200
+    assert stream_response.headers["content-type"].startswith("text/event-stream")
+    assert "event: run.cancelled" in stream_response.text
+    assert '"action": "cancel"' in stream_response.text

@@ -15,37 +15,27 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     command.upgrade(config, "head")
 
     with sqlite3.connect(database_path) as connection:
-        columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(tenants)").fetchall()
-        }
-        user_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(users)").fetchall()
-        }
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(tenants)").fetchall()}
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
         session_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
         }
         membership_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(tenant_memberships)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(tenant_memberships)").fetchall()
         }
         employee_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(employees)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(employees)").fetchall()
         }
         version_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(employee_versions)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(employee_versions)").fetchall()
         }
-        run_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(runs)").fetchall()
-        }
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
         event_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(run_events)").fetchall()
+        }
+        command_columns = {
             row[1]
-            for row in connection.execute("PRAGMA table_info(run_events)").fetchall()
+            for row in connection.execute("PRAGMA table_info(run_commands)").fetchall()
         }
     assert columns == {"id", "name", "slug", "created_at"}
     assert user_columns == {
@@ -68,6 +58,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert {"id", "employee_id", "tenant_id", "version", "definition"} <= version_columns
     assert {"id", "tenant_id", "employee_id", "thread_id", "status"} <= run_columns
     assert {"event_id", "run_id", "sequence", "event_type", "payload"} <= event_columns
+    assert {"id", "run_id", "action", "dispatched_at", "processed_at"} <= command_columns
 
     command.downgrade(config, "base")
 
@@ -77,7 +68,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "WHERE type = 'table' AND name IN ("
             "'tenants', 'users', 'auth_sessions', 'tenant_memberships', "
             "'employees', 'employee_versions'"
-            ", 'runs', 'run_events'"
+            ", 'runs', 'run_events', 'run_commands'"
             ")"
         ).fetchall()
     assert platform_tables == []

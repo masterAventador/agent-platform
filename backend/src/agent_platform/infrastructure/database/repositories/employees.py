@@ -75,9 +75,7 @@ class EmployeeVersionRecord(Base):
     published_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (
-        Index("uq_employee_versions_number", employee_id, version, unique=True),
-    )
+    __table_args__ = (Index("uq_employee_versions_number", employee_id, version, unique=True),)
 
 
 class SqlAlchemyEmployeeRepository:
@@ -241,3 +239,26 @@ class SqlAlchemyEmployeeVersionRepository:
             )
             for record in result.scalars()
         ]
+
+    async def get(
+        self, *, tenant_id: UUID, employee_id: UUID, version: int
+    ) -> EmployeeVersion | None:
+        result = await self._session.execute(
+            select(EmployeeVersionRecord).where(
+                EmployeeVersionRecord.tenant_id == tenant_id,
+                EmployeeVersionRecord.employee_id == employee_id,
+                EmployeeVersionRecord.version == version,
+            )
+        )
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+        return EmployeeVersion(
+            id=record.id,
+            employee_id=record.employee_id,
+            tenant_id=record.tenant_id,
+            version=record.version,
+            definition=record.definition,
+            published_by=record.published_by,
+            published_at=SqlAlchemyEmployeeRepository._as_utc(record.published_at),
+        )
