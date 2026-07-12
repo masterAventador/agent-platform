@@ -13,6 +13,7 @@ class RuntimeStartRequest(BaseModel):
 
     run_id: UUID
     tenant_id: UUID
+    user_id: UUID
     employee_id: UUID
     thread_id: str
     employee_definition: dict[str, JsonValue]
@@ -67,3 +68,31 @@ class EmployeeRuntime(Protocol):
     async def get_history(self, run_id: UUID) -> list[PlatformEvent]: ...
 
     async def get_artifacts(self, run_id: UUID) -> list[ArtifactReference]: ...
+
+
+class RunWorkspace(Protocol):
+    async def write_file(self, *, path: str, content: bytes) -> None: ...
+
+
+class RunWorkspaceFactory(Protocol):
+    """为可信运行身份创建隔离工作区，具体沙箱由基础设施适配器提供。"""
+
+    async def create(
+        self,
+        *,
+        run_id: UUID,
+        tenant_id: UUID,
+        user_id: UUID,
+        employee_id: UUID,
+        thread_id: str,
+    ) -> RunWorkspace: ...
+
+
+class PreparedRuntime(Protocol):
+    """一次 run 已物化 Skill、包装 Tool 并选定执行内核后的结果。"""
+
+    @property
+    def runtime(self) -> EmployeeRuntime: ...
+
+    @property
+    def employee_definition(self) -> dict[str, JsonValue]: ...

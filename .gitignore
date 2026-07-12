@@ -5,6 +5,7 @@
 .env
 .env.*
 !.env.example
+!infra/compose/.env.platform.example
 
 .local/
 

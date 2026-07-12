@@ -55,6 +55,7 @@ def test_official_deep_agent_factory_passes_skill_paths_to_public_parameter() ->
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),
+        user_id=uuid4(),
         employee_id=uuid4(),
         thread_id="skill-enabled-deep-agent",
         employee_definition={
@@ -77,6 +78,7 @@ async def test_official_deep_agent_factory_runs_with_injected_model() -> None:
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),
+        user_id=uuid4(),
         employee_id=uuid4(),
         thread_id="official-deep-agent",
         employee_definition={"system_prompt": "返回测试结果"},

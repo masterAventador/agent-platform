@@ -1,0 +1,99 @@
+name: agent-platform-app
+
+x-backend-build: &backend-build
+  context: ../../backend
+  dockerfile: Dockerfile
+
+x-backend-environment: &backend-environment
+  AGENT_PLATFORM_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agent_platform}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-agent_platform}
+  AGENT_PLATFORM_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+  AGENT_PLATFORM_MINIO_ENDPOINT: minio:9000
+  AGENT_PLATFORM_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-agent_platform}
+  AGENT_PLATFORM_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+  AGENT_PLATFORM_MINIO_SECURE: "false"
+  AGENT_PLATFORM_RAGFLOW_URL: ${RAGFLOW_URL:-http://host.docker.internal:19380}
+  AGENT_PLATFORM_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+  AGENT_PLATFORM_OTEL_ENABLED: ${OTEL_ENABLED:-false}
+  AGENT_PLATFORM_OTEL_OTLP_ENDPOINT: ${OTEL_OTLP_ENDPOINT:-http://host.docker.internal:4317}
+
+x-host-gateway: &host-gateway
+  - host.docker.internal:host-gateway
+
+services:
+  migrate:
+    build: *backend-build
+    image: agent-platform-backend:local
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-environment
+    extra_hosts: *host-gateway
+    networks: [core]
+    restart: "no"
+
+  api:
+    build: *backend-build
+    image: agent-platform-backend:local
+    environment:
+      <<: *backend-environment
+      AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-api
+    extra_hosts: *host-gateway
+    networks: [default, core]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${PLATFORM_API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: "no"
+
+  worker:
+    profiles: ["worker"]
+    build: *backend-build
+    image: agent-platform-backend:local
+    command: ["python", "-m", "agent_platform.workers.main"]
+    environment:
+      <<: *backend-environment
+      AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-worker
+      AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY: ${AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY:-}
+      AGENT_PLATFORM_WORKER_REPLICAS: "1"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    extra_hosts: *host-gateway
+    networks: [core]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    image: agent-platform-frontend:local
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PLATFORM_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+networks:
+  core:
+    external: true
+    name: agent-platform_default

@@ -60,6 +60,7 @@ async def test_runtime_protocol_covers_platform_operations() -> None:
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),
+        user_id=uuid4(),
         employee_id=uuid4(),
         thread_id="thread-1",
         employee_definition={"name": "研究助理"},

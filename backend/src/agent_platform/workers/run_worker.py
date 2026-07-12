@@ -14,11 +14,23 @@ from agent_platform.infrastructure.database.repositories.runs import (
 )
 from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue, RunQueueDelivery
 from agent_platform.platform.runs.entities import Run, RunStatus
-from agent_platform.runtimes.base import EmployeeRuntime, RuntimeStartRequest
+from agent_platform.runtimes.base import (
+    EmployeeRuntime,
+    PreparedRuntime,
+    RuntimeStartRequest,
+)
 
 
 class RuntimeResolver(Protocol):
-    def resolve(self, run: Run, definition: dict[str, object]) -> EmployeeRuntime: ...
+    async def resolve(
+        self,
+        run: Run,
+        definition: dict[str, object],
+    ) -> PreparedRuntime: ...
+
+
+class RuntimeNotPrepared(Exception):
+    """控制命令没有命中当前 Worker 中已启动的 run runtime。"""
 
 
 class RunWorker:
@@ -34,6 +46,7 @@ class RunWorker:
         self._queue = queue
         self._runtime_resolver = runtime_resolver
         self._consumer_name = consumer_name
+        self._prepared_runtimes: dict[UUID, PreparedRuntime] = {}
 
     async def run_once(self, *, block_ms: int = 5_000) -> bool:
         delivery = await self._queue.dequeue(consumer_name=self._consumer_name, block_ms=block_ms)
@@ -62,22 +75,26 @@ class RunWorker:
             if version is None:
                 raise LookupError((run.employee_id, run.employee_version))
 
-        runtime = self._runtime_resolver.resolve(run, version.definition)
         if message.action == "start":
+            prepared = await self._runtime_resolver.resolve(run, version.definition)
+            self._prepared_runtimes[run.id] = prepared
+            runtime = prepared.runtime
             await self._mark_running(run)
             state = await runtime.start(
                 RuntimeStartRequest(
                     run_id=run.id,
                     tenant_id=run.tenant_id,
+                    user_id=run.created_by,
                     employee_id=run.employee_id,
                     thread_id=run.thread_id,
                     employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
-                        version.definition
+                        prepared.employee_definition
                     ),
                     input_data=run.input_data,
                 )
             )
         else:
+            runtime = self._required_runtime(run.id)
             await self._invoke_control(runtime, delivery)
             state = await runtime.get_state(run.id)
 
@@ -115,6 +132,12 @@ class RunWorker:
                 raise LookupError(run.id)
             await repository.update(current.transition_to(RunStatus.RUNNING))
             await session.commit()
+
+    def _required_runtime(self, run_id: UUID) -> EmployeeRuntime:
+        try:
+            return self._prepared_runtimes[run_id].runtime
+        except KeyError as error:
+            raise RuntimeNotPrepared(run_id) from error
 
     @staticmethod
     async def _invoke_control(runtime: EmployeeRuntime, delivery: RunQueueDelivery) -> None:

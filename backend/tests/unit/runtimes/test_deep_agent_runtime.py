@@ -29,6 +29,7 @@ async def test_deep_agent_runtime_maps_result_to_platform_contract() -> None:
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),
+        user_id=uuid4(),
         employee_id=uuid4(),
         thread_id="thread-deep-agent",
         employee_definition={"system_prompt": "你是研究助理"},

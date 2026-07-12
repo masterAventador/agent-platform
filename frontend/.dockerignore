@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+coverage/
+dist/
+e2e/
+node_modules/
+playwright-report/
+src-tauri/
+test-results/

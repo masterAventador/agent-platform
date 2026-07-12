@@ -45,6 +45,7 @@ async def test_langgraph_runtime_executes_checkpointed_fixed_workflow() -> None:
     request = RuntimeStartRequest(
         run_id=uuid4(),
         tenant_id=uuid4(),
+        user_id=uuid4(),
         employee_id=uuid4(),
         thread_id="workflow-thread",
         employee_definition={"name": "固定研究流程"},
