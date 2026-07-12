@@ -48,6 +48,17 @@
   - API、SSE 和前端只能看到平台协议，不能因升级泄露新的框架内部字段；
 - 升级前后必须使用同一组固定输入和期望结果运行回归测试，记录行为、事件、状态恢复和产物差异；升级造成的行为变化必须先完成适配、迁移说明和回滚方案。
 
+### RAGFlow 零侵入与独立服务规范（强制）
+
+- 禁止直接修改 RAGFlow 源代码、官方镜像内部文件或其 MySQL、Valkey、Elasticsearch/OpenSearch、MinIO 等依赖组件源码；
+- 禁止维护包含 RAGFlow 上游源码修改的私有 Fork，不得把安装后替换文件、修改容器内部代码或本地补丁作为平台正常运行条件；
+- 平台只能通过自研 `Knowledge Service` 使用 RAGFlow 官方稳定 API、配置项和公开扩展点，不得让业务模块直接依赖 RAGFlow 客户端细节；
+- 禁止平台直连、读写或复用 RAGFlow 内部的 MySQL、Valkey、Elasticsearch/OpenSearch、MinIO；RAGFlow 必须使用独立网络、存储卷、凭据和端口映射部署；
+- 接入时选择当时最新稳定 Release，但必须在仓库中锁定确切版本号和配套镜像版本，禁止使用 `latest`、`nightly` 等漂移标签作为正式基线；
+- 遇到 RAGFlow 缺陷时，依次采用官方 API/配置绕开、锁定可用版本、Knowledge Service 外围兼容、提交上游 Issue/PR，并在上游发布后正常升级；
+- RAGFlow 升级必须验证知识库创建、文件上传、解析状态、切片、检索、重排、元数据过滤、引用溯源、权限隔离、更新、删除和失败恢复；任何兼容测试失败都不得合并升级；
+- 只有用户明确批准的紧急临时补丁才允许短期存在，且必须隔离在 Knowledge Service 适配层，具备回归测试、移除条件、回滚方案和上游跟踪记录，禁止形成长期私有分支。
+
 ### 前端架构
 
 - 使用 React + TypeScript + Vite，组件体系采用 Ant Design 与 Ant Design X；
