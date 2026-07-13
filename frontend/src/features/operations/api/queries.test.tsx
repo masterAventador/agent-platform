@@ -3,12 +3,12 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import type { PropsWithChildren } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { useActiveWorkspaceId } from '../../employees/api/queries'
+import { useActiveWorkspaceId } from '../../workspaces/store'
 import { listRunDeadLetters, replayRunDeadLetter } from './dead-letters'
 import { runDeadLetterKeys, useReplayRunDeadLetter, useRunDeadLetters } from './queries'
 
 
-vi.mock('../../employees/api/queries', () => ({ useActiveWorkspaceId: vi.fn() }))
+vi.mock('../../workspaces/store', () => ({ useActiveWorkspaceId: vi.fn() }))
 vi.mock('./dead-letters', () => ({
   listRunDeadLetters: vi.fn(),
   replayRunDeadLetter: vi.fn(),

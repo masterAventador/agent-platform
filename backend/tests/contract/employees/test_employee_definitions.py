@@ -1,14 +1,39 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.employees import (
+    EmployeeVersionRecord,
+    SqlAlchemyEmployeeRepository,
+    SqlAlchemyEmployeeVersionRepository,
+)
+from agent_platform.infrastructure.database.repositories.runs import (
+    RunCommandRecord,
+    RunRecord,
+)
+from agent_platform.infrastructure.database.repositories.tenants import (
+    SqlAlchemyTenantRepository,
+    TenantMembershipRecord,
+)
+from agent_platform.platform.employees.entities import (
+    Employee,
+    EmployeeDraft,
+    EmployeeStatus,
+    EmployeeVisibility,
+    RuntimeType,
+)
+from agent_platform.platform.tenants.entities import Tenant
 
 
 class AllowAllRateLimiter:
@@ -39,6 +64,30 @@ async def employee_clients() -> AsyncIterator[tuple[AsyncClient, AsyncClient]]:
     await engine.dispose()
 
 
+@pytest_asyncio.fixture
+async def employee_api() -> AsyncIterator[
+    tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient]
+]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    app = create_app(
+        settings=AppSettings(auth_cookie_secure=False),
+        session_factory=session_factory,
+        auth_rate_limiter=AllowAllRateLimiter(),
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        yield app, session_factory, client
+
+    await engine.dispose()
+
+
 async def register_and_login(client: AsyncClient, email: str) -> dict[str, object]:
     credentials = {"email": email, "password": "correct horse battery staple"}
     assert (await client.post("/api/v1/auth/register", json=credentials)).status_code == 201
@@ -46,6 +95,54 @@ async def register_and_login(client: AsyncClient, email: str) -> dict[str, objec
     response = await client.get("/api/v1/auth/me")
     assert response.status_code == 200
     return response.json()
+
+
+def employee_definition(
+    *,
+    name: str = "配置真实员工",
+    work_mode: str = "autonomous",
+    conversation: bool = True,
+    scheduled_tasks: bool = False,
+    file_upload: bool = False,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "role_description": "验证当前可运行配置",
+        "work_mode": work_mode,
+        "system_prompt": "仅使用当前可运行能力。",
+        "model": {"provider": "openai", "name": "gpt-5"},
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "capabilities": {
+            "conversation": conversation,
+            "scheduled_tasks": scheduled_tasks,
+            "file_upload": file_upload,
+        },
+    }
+
+
+def legacy_draft(*, name: str, work_mode: RuntimeType = RuntimeType.WORKFLOW) -> EmployeeDraft:
+    return EmployeeDraft(
+        name=name,
+        avatar_url=None,
+        role_description="历史配置",
+        visibility=EmployeeVisibility.TENANT,
+        runtime_type=work_mode,
+        system_prompt="历史配置只允许读取。",
+        model_settings={"provider": "openai", "name": "gpt-5"},
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        capabilities={
+            "conversation": True,
+            "scheduled_tasks": True,
+            "file_upload": True,
+        },
+        skill_ids=[],
+        tool_ids=[],
+        knowledge_base_ids=[],
+        approval_policy={},
+        release_strategy={"mode": "all"},
+    )
 
 
 @pytest.mark.asyncio
@@ -73,7 +170,7 @@ async def test_create_update_publish_and_list_employee_versions(
             "capabilities": {
                 "conversation": True,
                 "scheduled_tasks": False,
-                "file_upload": True,
+                "file_upload": False,
             },
             "skill_ids": [],
             "tool_ids": [],
@@ -156,7 +253,7 @@ async def test_employee_is_not_visible_across_tenants(
         json={
             "name": "租户一员工",
             "role_description": "仅属于租户一",
-            "work_mode": "workflow",
+            "work_mode": "autonomous",
             "system_prompt": "按固定步骤执行。",
             "model": {"provider": "openai", "name": "gpt-5"},
             "input_schema": {"type": "object"},
@@ -182,3 +279,238 @@ async def test_employee_is_not_visible_across_tenants(
     )
     assert outsider_list.status_code == 200
     assert outsider_list.json() == []
+
+
+@pytest.mark.parametrize(
+    ("work_mode", "scheduled_tasks", "file_upload"),
+    [
+        ("workflow", False, False),
+        ("hybrid", False, False),
+        ("autonomous", True, False),
+        ("autonomous", False, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_create_rejects_configuration_not_currently_runnable(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+    work_mode: str,
+    scheduled_tasks: bool,
+    file_upload: bool,
+) -> None:
+    owner, _ = employee_clients
+    current_user = await register_and_login(owner, "employee-write-contract@example.com")
+    tenant_id = current_user["workspaces"][0]["id"]
+
+    response = await owner.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": tenant_id},
+        json=employee_definition(
+            work_mode=work_mode,
+            scheduled_tasks=scheduled_tasks,
+            file_upload=file_upload,
+        ),
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("work_mode", "scheduled_tasks", "file_upload"),
+    [
+        ("workflow", False, False),
+        ("hybrid", False, False),
+        ("autonomous", True, False),
+        ("autonomous", False, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_update_rejects_configuration_not_currently_runnable(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+    work_mode: str,
+    scheduled_tasks: bool,
+    file_upload: bool,
+) -> None:
+    owner, _ = employee_clients
+    current_user = await register_and_login(owner, "employee-update-contract@example.com")
+    tenant_id = current_user["workspaces"][0]["id"]
+    created = await owner.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": tenant_id},
+        json=employee_definition(),
+    )
+    assert created.status_code == 201
+
+    response = await owner.put(
+        f"/api/v1/employees/{created.json()['id']}",
+        headers={"X-Tenant-ID": tenant_id},
+        json=employee_definition(
+            work_mode=work_mode,
+            scheduled_tasks=scheduled_tasks,
+            file_upload=file_upload,
+        ),
+    )
+
+    assert response.status_code == 422
+
+
+def test_openapi_exposes_current_employee_write_contract(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    app, _, _ = employee_api
+    schema = app.openapi()
+    definition = schema["components"]["schemas"]["EmployeeDefinitionRequest"]
+    capabilities_ref = definition["properties"]["capabilities"]["$ref"]
+    capabilities = schema["components"]["schemas"][capabilities_ref.rsplit("/", 1)[-1]]
+
+    assert definition["properties"]["work_mode"]["const"] == "autonomous"
+    assert capabilities["properties"]["scheduled_tasks"]["const"] is False
+    assert capabilities["properties"]["file_upload"]["const"] is False
+    assert capabilities["properties"]["conversation"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_legacy_draft_is_readable_but_publish_fails_before_version_creation(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    _, session_factory, client = employee_api
+    current_user = await register_and_login(client, "legacy-draft@example.com")
+    tenant_id = UUID(current_user["workspaces"][0]["id"])
+    user_id = UUID(current_user["id"])
+    employee = Employee.create(
+        tenant_id=tenant_id,
+        created_by=user_id,
+        draft=legacy_draft(name="历史流程员工"),
+    )
+    async with session_factory() as session:
+        await SqlAlchemyEmployeeRepository(session).add(employee)
+        await session.commit()
+
+    response = await client.get(
+        f"/api/v1/employees/{employee.id}",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert response.status_code == 200
+    assert response.json()["definition"]["work_mode"] == "workflow"
+    assert response.json()["definition"]["capabilities"]["file_upload"] is True
+
+    publish = await client.post(
+        f"/api/v1/employees/{employee.id}/publish",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert publish.status_code == 409
+    assert publish.json()["detail"]["code"] == "employee_configuration_unavailable"
+    async with session_factory() as session:
+        persisted = await SqlAlchemyEmployeeRepository(session).get(
+            tenant_id=tenant_id,
+            employee_id=employee.id,
+        )
+        assert persisted is not None and persisted.status is EmployeeStatus.DRAFT
+        version_count = (
+            await session.execute(
+                select(func.count()).select_from(EmployeeVersionRecord).where(
+                    EmployeeVersionRecord.employee_id == employee.id
+                )
+            )
+        ).scalar_one()
+        assert version_count == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_published_employee_cannot_create_run_or_command(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    _, session_factory, client = employee_api
+    current_user = await register_and_login(client, "legacy-published@example.com")
+    tenant_id = UUID(current_user["workspaces"][0]["id"])
+    user_id = UUID(current_user["id"])
+    draft = Employee.create(
+        tenant_id=tenant_id,
+        created_by=user_id,
+        draft=legacy_draft(name="历史混合员工", work_mode=RuntimeType.HYBRID),
+    )
+    published, version = draft.publish(published_by=user_id)
+    async with session_factory() as session:
+        await SqlAlchemyEmployeeRepository(session).add(published)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await session.commit()
+
+    readable = await client.get(
+        f"/api/v1/employees/{published.id}",
+        headers={"X-Tenant-ID": str(tenant_id)},
+    )
+    assert readable.status_code == 200
+    assert readable.json()["definition"]["work_mode"] == "hybrid"
+    assert readable.json()["definition"]["capabilities"]["scheduled_tasks"] is True
+
+    response = await client.post(
+        f"/api/v1/employees/{published.id}/runs",
+        headers={"X-Tenant-ID": str(tenant_id)},
+        json={"input": {"task": "must not start"}},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "employee_configuration_unavailable"
+    async with session_factory() as session:
+        run_count = (
+            await session.execute(
+                select(func.count()).select_from(RunRecord).where(
+                    RunRecord.employee_id == published.id
+                )
+            )
+        ).scalar_one()
+        command_count = (
+            await session.execute(select(func.count()).select_from(RunCommandRecord))
+        ).scalar_one()
+        assert run_count == command_count == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_workspaces_require_exact_tenant_header(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    _, session_factory, client = employee_api
+    current_user = await register_and_login(client, "multi-workspace-employee@example.com")
+    user_id = UUID(current_user["id"])
+    original_tenant_id = UUID(current_user["workspaces"][0]["id"])
+    second = Tenant.create(name="第二工作区", slug=f"second-{uuid4().hex}")
+    foreign = Tenant.create(name="无权工作区", slug=f"foreign-{uuid4().hex}")
+    async with session_factory() as session:
+        tenants = SqlAlchemyTenantRepository(session)
+        await tenants.add(second)
+        await tenants.add(foreign)
+        session.add(
+            TenantMembershipRecord(
+                id=uuid4(),
+                tenant_id=second.id,
+                user_id=user_id,
+                role="owner",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    missing_header = await client.post("/api/v1/employees", json=employee_definition())
+    assert missing_header.status_code == 400
+    assert missing_header.json()["detail"]["code"] == "tenant_required"
+    foreign_header = await client.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": str(foreign.id)},
+        json=employee_definition(),
+    )
+    assert foreign_header.status_code == 404
+    created = await client.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": str(second.id)},
+        json=employee_definition(),
+    )
+    assert created.status_code == 201
+    assert created.json()["tenant_id"] == str(second.id)
+    original_list = await client.get(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": str(original_tenant_id)},
+    )
+    second_list = await client.get(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": str(second.id)},
+    )
+    assert original_list.json() == []
+    assert [item["id"] for item in second_list.json()] == [created.json()["id"]]

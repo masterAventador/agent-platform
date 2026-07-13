@@ -1,10 +1,13 @@
-import { Button, Flex, Layout, Result, Space, Typography } from 'antd'
+import { useQueryClient } from '@tanstack/react-query'
+import { Button, Flex, Layout, Result, Select, Space, Typography } from 'antd'
 import { lazy, Suspense } from 'react'
 import { Link, Route, Routes, useNavigate } from 'react-router-dom'
 
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
+import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
 import { BackendStatus } from '../features/system/components/BackendStatus'
+import { useWorkspaceSelection } from '../features/workspaces/store'
 import './app.css'
 
 const { Content, Sider } = Layout
@@ -91,14 +94,63 @@ export function App() {
 
 function PlatformShell() {
   const currentUser = useCurrentUser()
+
+  if (currentUser.data === undefined) return <RouteLoading />
+
+  return <AuthenticatedPlatformShell user={currentUser.data} />
+}
+
+function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const logout = useLogout()
   const navigate = useNavigate()
-  const activeWorkspaceRole = currentUser.data?.workspaces[0]?.role
-  const canManageDeadLetters = activeWorkspaceRole === 'owner' || activeWorkspaceRole === 'admin'
+  const queryClient = useQueryClient()
+  const { activeWorkspace, isReconciled, select } = useWorkspaceSelection(user)
 
   const signOut = async () => {
     await logout.mutateAsync()
     navigate('/login', { replace: true })
+  }
+
+  if (!isReconciled) return <RouteLoading />
+
+  if (activeWorkspace === undefined) {
+    return (
+      <Layout className="app-shell">
+        <Content className="app-empty-workspace">
+          <Result
+            status="info"
+            title="暂无可用工作区"
+            subTitle="你的账号当前未加入任何工作区，请联系管理员后重试。"
+            extra={(
+              <Button loading={logout.isPending} onClick={signOut}>
+                退出登录
+              </Button>
+            )}
+          />
+        </Content>
+      </Layout>
+    )
+  }
+
+  const canManageDeadLetters = activeWorkspace.role === 'owner'
+    || activeWorkspace.role === 'admin'
+  const canManageWorkspace = activeWorkspace.role === 'owner'
+
+  const switchWorkspace = async (workspaceId: string) => {
+    if (workspaceId === activeWorkspace.id) return
+
+    const previousWorkspaceId = activeWorkspace.id
+    const belongsToPreviousWorkspace = (queryKey: readonly unknown[]) => (
+      queryKey.includes(previousWorkspaceId)
+    )
+
+    await queryClient.cancelQueries({
+      predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
+    })
+    queryClient.removeQueries({
+      predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
+    })
+    if (select(workspaceId)) navigate('/', { replace: true })
   }
 
   return (
@@ -122,25 +174,58 @@ function PlatformShell() {
         </nav>
       </Sider>
       <Content className="app-content">
-        <Flex className="app-topbar" align="center" justify="flex-end" gap={16}>
-          <Typography.Text type="secondary">{currentUser.data?.email}</Typography.Text>
-          <Button loading={logout.isPending} onClick={signOut}>
-            退出登录
-          </Button>
+        <Flex className="app-topbar" align="center" justify="space-between" gap={16}>
+          <Select
+            aria-label="当前工作区"
+            className="app-workspace-select"
+            value={activeWorkspace.id}
+            options={user.workspaces.map((workspace) => ({
+              value: workspace.id,
+              label: workspace.name,
+            }))}
+            onChange={(workspaceId) => void switchWorkspace(workspaceId)}
+          />
+          <Flex align="center" gap={16}>
+            <Typography.Text type="secondary">{user.email}</Typography.Text>
+            <Button loading={logout.isPending} onClick={signOut}>
+              退出登录
+            </Button>
+          </Flex>
         </Flex>
         <Routes>
           <Route path="/" element={<Dashboard />} />
-          <Route path="/employees" element={<EmployeesPage />} />
-          <Route path="/employees/new" element={<EmployeeEditorPage />} />
-          <Route path="/employees/:employeeId" element={<EmployeeDetailPage />} />
-          <Route path="/employees/:employeeId/edit" element={<EmployeeEditorPage />} />
+          <Route
+            path="/employees"
+            element={<EmployeesPage canManageWorkspace={canManageWorkspace} />}
+          />
+          <Route
+            path="/employees/new"
+            element={canManageWorkspace ? <EmployeeEditorPage /> : <EmployeeWriteAccessDenied />}
+          />
+          <Route
+            path="/employees/:employeeId"
+            element={<EmployeeDetailPage canManageWorkspace={canManageWorkspace} />}
+          />
+          <Route
+            path="/employees/:employeeId/edit"
+            element={canManageWorkspace ? <EmployeeEditorPage /> : <EmployeeWriteAccessDenied />}
+          />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:runId" element={<RunDetailPage />} />
           <Route path="/knowledge-bases" element={<KnowledgeBasesPage />} />
           <Route path="/knowledge-bases/:knowledgeBaseId" element={<KnowledgeBaseDetailPage />} />
-          <Route path="/skills" element={<SkillsPage />} />
-          <Route path="/skills/:skillId" element={<SkillDetailPage />} />
-          <Route path="/tools" element={<ToolsPage />} />
+          <Route
+            path="/skills"
+            element={<SkillsPage canManageWorkspace={canManageWorkspace} />}
+          />
+          <Route
+            path="/skills/:skillId"
+            element={<SkillDetailPage canManageWorkspace={canManageWorkspace} />}
+          />
+          <Route
+            path="/tools"
+            element={<ToolsPage canManageWorkspace={canManageWorkspace} />}
+          />
           <Route
             path="/operations/dead-letters"
             element={canManageDeadLetters ? <DeadLettersPage /> : <DeadLetterAccessDenied />}
@@ -157,6 +242,16 @@ function DeadLetterAccessDenied() {
       status="403"
       title="无权访问死信管理"
       subTitle="仅工作区所有者和管理员可以查看和重放死信任务。"
+    />
+  )
+}
+
+function EmployeeWriteAccessDenied() {
+  return (
+    <Result
+      status="403"
+      title="无权编辑数字员工"
+      subTitle="仅工作区所有者可以创建或编辑数字员工。"
     />
   )
 }

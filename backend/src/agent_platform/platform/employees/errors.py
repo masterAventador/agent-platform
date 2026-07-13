@@ -12,3 +12,7 @@ class EmployeeSkillNotBindable(Exception):
 
 class EmployeeToolNotBindable(Exception):
     """数字员工只能绑定当前租户中已启用 Server 的已启用 Tool。"""
+
+
+class EmployeeConfigurationUnavailable(Exception):
+    """数字员工配置包含当前平台尚不可运行的能力。"""

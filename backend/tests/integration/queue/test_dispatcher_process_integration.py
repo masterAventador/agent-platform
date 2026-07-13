@@ -53,7 +53,7 @@ async def test_api_outbox_is_dispatched_to_real_redis(
     definition = {
         "name": "Dispatcher Integration Employee",
         "role_description": "验证 outbox 到 Redis 的可靠投递边界",
-        "work_mode": "workflow",
+        "work_mode": "autonomous",
         "system_prompt": "执行任务。",
         "model": {"provider": "openai", "name": "gpt-5"},
         "input_schema": {"type": "object"},

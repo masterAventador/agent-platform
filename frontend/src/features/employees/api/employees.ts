@@ -1,4 +1,5 @@
 import { apiClient } from '../../../api/client'
+import { EmployeeConfigurationUnavailableError } from './errors'
 
 
 export type WorkMode = 'autonomous' | 'workflow' | 'hybrid'
@@ -8,6 +9,12 @@ export interface EmployeeCapabilities {
   conversation: boolean
   scheduled_tasks: boolean
   file_upload: boolean
+}
+
+export interface EmployeeWriteCapabilities {
+  conversation: boolean
+  scheduled_tasks: false
+  file_upload: false
 }
 
 export interface EmployeeDefinition {
@@ -28,6 +35,11 @@ export interface EmployeeDefinition {
   release_strategy: Record<string, unknown>
 }
 
+export type EmployeeWriteDefinition = Omit<EmployeeDefinition, 'work_mode' | 'capabilities'> & {
+  work_mode: 'autonomous'
+  capabilities: EmployeeWriteCapabilities
+}
+
 export interface Employee {
   id: string
   tenant_id: string
@@ -39,6 +51,18 @@ export interface Employee {
 
 function tenantHeaders(tenantId: string) {
   return { 'X-Tenant-ID': tenantId }
+}
+
+export function isEmployeeConfigurationAvailable(definition: EmployeeDefinition): boolean {
+  return definition.work_mode === 'autonomous'
+    && !definition.capabilities.scheduled_tasks
+    && !definition.capabilities.file_upload
+}
+
+function assertEmployeeConfigurationAvailable(definition: EmployeeDefinition): void {
+  if (!isEmployeeConfigurationAvailable(definition)) {
+    throw new EmployeeConfigurationUnavailableError()
+  }
 }
 
 export async function listEmployees(tenantId: string): Promise<Employee[]> {
@@ -57,8 +81,9 @@ export async function getEmployee(tenantId: string, employeeId: string): Promise
 
 export async function createEmployee(
   tenantId: string,
-  definition: EmployeeDefinition,
+  definition: EmployeeWriteDefinition,
 ): Promise<Employee> {
+  assertEmployeeConfigurationAvailable(definition)
   const response = await apiClient.post<Employee>('/employees', definition, {
     headers: tenantHeaders(tenantId),
   })
@@ -68,8 +93,9 @@ export async function createEmployee(
 export async function updateEmployee(
   tenantId: string,
   employeeId: string,
-  definition: EmployeeDefinition,
+  definition: EmployeeWriteDefinition,
 ): Promise<Employee> {
+  assertEmployeeConfigurationAvailable(definition)
   const response = await apiClient.put<Employee>(`/employees/${employeeId}`, definition, {
     headers: tenantHeaders(tenantId),
   })

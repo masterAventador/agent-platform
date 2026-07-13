@@ -1,17 +1,11 @@
 import { apiClient } from '../../../api/client'
+import type { Workspace } from '../../workspaces/types'
 
 export interface CurrentUser {
   id: string
   email: string
   email_verified: boolean
   workspaces: Workspace[]
-}
-
-export interface Workspace {
-  id: string
-  name: string
-  slug: string
-  role: 'owner' | 'admin' | 'member'
 }
 
 export interface Credentials {

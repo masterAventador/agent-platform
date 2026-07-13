@@ -10,7 +10,7 @@ const statusLabels = {
   published: { color: 'success', text: '已发布' },
 } as const
 
-export function EmployeesPage() {
+export function EmployeesPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
   const employees = useEmployees()
   const navigate = useNavigate()
 
@@ -23,9 +23,11 @@ export function EmployeesPage() {
             创建、配置并发布企业可复用的 AI 数字员工
           </Typography.Text>
         </div>
-        <Button type="primary" onClick={() => navigate('/employees/new')}>
-          创建数字员工
-        </Button>
+        {canManageWorkspace && (
+          <Button type="primary" onClick={() => navigate('/employees/new')}>
+            创建数字员工
+          </Button>
+        )}
       </Flex>
 
       {employees.isPending ? (

@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from agent_platform.platform.employees.entities import Employee, EmployeeDraft, EmployeeVersion
+from agent_platform.platform.employees.entities import (
+    Employee,
+    EmployeeDraft,
+    EmployeeVersion,
+    is_runnable_employee_definition,
+)
 from agent_platform.platform.employees.errors import (
+    EmployeeConfigurationUnavailable,
     EmployeeNotFound,
     EmployeeSkillNotBindable,
     EmployeeToolNotBindable,
@@ -65,6 +71,8 @@ class EmployeeService:
         published_by: UUID,
     ) -> Employee:
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
+        if not is_runnable_employee_definition(employee.draft.snapshot()):
+            raise EmployeeConfigurationUnavailable
         await self._ensure_skills_bindable(
             tenant_id=tenant_id,
             skill_ids=employee.draft.skill_ids,

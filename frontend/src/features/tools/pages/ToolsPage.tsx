@@ -59,7 +59,7 @@ const riskColors: Record<ToolRiskLevel, string> = {
   destructive: 'red',
 }
 
-export function ToolsPage() {
+export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
   const servers = useMcpServers()
   const tools = useTools()
   const createServer = useCreateMcpServer()
@@ -150,7 +150,7 @@ export function ToolsPage() {
         <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '已禁用'}</Tag>
       ),
     },
-    {
+    ...(canManageWorkspace ? [{
       title: '操作',
       key: 'action',
       render: (_: unknown, server: McpServer) => (
@@ -161,7 +161,7 @@ export function ToolsPage() {
           {server.enabled ? '禁用' : '启用'}
         </Button>
       ),
-    },
+    }] : []),
   ]
 
   const toolColumns = [
@@ -187,7 +187,7 @@ export function ToolsPage() {
         <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '已禁用'}</Tag>
       ),
     },
-    {
+    ...(canManageWorkspace ? [{
       title: '操作',
       key: 'action',
       render: (_: unknown, tool: Tool) => (
@@ -198,7 +198,7 @@ export function ToolsPage() {
           {tool.enabled ? '禁用' : '启用'}
         </Button>
       ),
-    },
+    }] : []),
   ]
 
   return (
@@ -208,10 +208,12 @@ export function ToolsPage() {
           <Typography.Title level={2}>工具与 MCP</Typography.Title>
           <Typography.Text type="secondary">管理企业 MCP Server 和数字员工可调用的 Tool</Typography.Text>
         </div>
-        <Space>
-          <Button type="primary" onClick={() => setServerOpen(true)}>注册 MCP Server</Button>
-          <Button disabled={!servers.data?.length} onClick={() => setToolOpen(true)}>登记 Tool</Button>
-        </Space>
+        {canManageWorkspace && (
+          <Space>
+            <Button type="primary" onClick={() => setServerOpen(true)}>注册 MCP Server</Button>
+            <Button disabled={!servers.data?.length} onClick={() => setToolOpen(true)}>登记 Tool</Button>
+          </Space>
+        )}
       </Flex>
 
       <Card className="tool-registry-card" title="MCP Servers">

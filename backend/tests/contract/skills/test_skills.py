@@ -183,7 +183,7 @@ async def test_employee_can_only_bind_published_tenant_skills(skill_client) -> N
         "capabilities": {
             "conversation": True,
             "scheduled_tasks": False,
-            "file_upload": True,
+            "file_upload": False,
         },
         "skill_ids": [skill_id],
     }

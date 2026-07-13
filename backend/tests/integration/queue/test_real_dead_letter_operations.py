@@ -81,7 +81,7 @@ async def test_real_postgres_dead_letter_service_and_api(postgres_url: str) -> N
                 json={
                     "name": "真实死信恢复员工",
                     "role_description": "验证 PostgreSQL 死信恢复",
-                    "work_mode": "workflow",
+                    "work_mode": "autonomous",
                     "system_prompt": "恢复任务。",
                     "model": {"provider": "openai", "name": "gpt-5"},
                     "input_schema": {"type": "object"},

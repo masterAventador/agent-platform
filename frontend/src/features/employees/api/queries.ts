@@ -1,24 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { useCurrentUser } from '../../auth/api/queries'
+import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createEmployee,
   getEmployee,
   listEmployees,
   publishEmployee,
   updateEmployee,
-  type EmployeeDefinition,
+  type EmployeeWriteDefinition,
 } from './employees'
 
 
-const employeeKeys = {
+export const employeeKeys = {
   all: (tenantId: string) => ['employees', tenantId] as const,
   detail: (tenantId: string, employeeId: string) =>
     ['employees', tenantId, employeeId] as const,
-}
-
-export function useActiveWorkspaceId(): string | undefined {
-  return useCurrentUser().data?.workspaces[0]?.id
 }
 
 export function useEmployees() {
@@ -43,7 +39,7 @@ export function useCreateEmployee() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (definition: EmployeeDefinition) => createEmployee(tenantId!, definition),
+    mutationFn: (definition: EmployeeWriteDefinition) => createEmployee(tenantId!, definition),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: employeeKeys.all(tenantId!) })
     },
@@ -54,7 +50,7 @@ export function useUpdateEmployee(employeeId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (definition: EmployeeDefinition) =>
+    mutationFn: (definition: EmployeeWriteDefinition) =>
       updateEmployee(tenantId!, employeeId, definition),
     onSuccess: async (employee) => {
       queryClient.setQueryData(employeeKeys.detail(tenantId!, employeeId), employee)

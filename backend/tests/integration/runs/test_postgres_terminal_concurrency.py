@@ -152,7 +152,7 @@ async def _create_active_run(
             json={
                 "name": f"终态并发员工-{uuid4().hex[:8]}",
                 "role_description": "验证终态并发串行化",
-                "work_mode": "workflow",
+                "work_mode": "autonomous",
                 "system_prompt": "按固定流程执行。",
                 "model": {"provider": "openai", "name": "gpt-5"},
                 "input_schema": {"type": "object"},

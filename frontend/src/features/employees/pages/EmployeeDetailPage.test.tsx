@@ -1,0 +1,174 @@
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { Employee } from '../api/employees'
+import { useEmployee, usePublishEmployee } from '../api/queries'
+import { useCreateRun } from '../../runs/api/queries'
+import { EmployeeDetailPage } from './EmployeeDetailPage'
+
+
+vi.mock('../api/queries', () => ({
+  useEmployee: vi.fn(),
+  usePublishEmployee: vi.fn(),
+}))
+
+vi.mock('../../runs/api/queries', () => ({
+  useCreateRun: vi.fn(),
+}))
+
+const employee: Employee = {
+  id: 'employee-1',
+  tenant_id: 'tenant-1',
+  name: '研究专员',
+  status: 'draft',
+  published_version: null,
+  definition: {
+    name: '研究专员',
+    avatar_url: null,
+    role_description: '负责研究任务',
+    visibility: 'tenant',
+    work_mode: 'autonomous',
+    system_prompt: '完成用户交付的研究任务',
+    model: { provider: 'openai', name: 'gpt-5' },
+    input_schema: { type: 'object' },
+    output_schema: { type: 'object' },
+    capabilities: { conversation: true, scheduled_tasks: false, file_upload: false },
+    skill_ids: [],
+    tool_ids: [],
+    knowledge_base_ids: [],
+    approval_policy: {},
+    release_strategy: { mode: 'all' },
+  },
+}
+
+function renderPage(canManageWorkspace = true) {
+  return render(
+    <MemoryRouter initialEntries={['/employees/employee-1']}>
+      <Routes>
+        <Route
+          path="/employees/:employeeId"
+          element={<EmployeeDetailPage canManageWorkspace={canManageWorkspace} />}
+        />
+        <Route path="/employees/:employeeId/edit" element={<div>editor</div>} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+describe('EmployeeDetailPage legacy configuration guard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(useEmployee).mockReturnValue({ data: employee, isPending: false } as never)
+    vi.mocked(usePublishEmployee).mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+      isError: false,
+      error: null,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false,
+      isError: false,
+      error: null,
+      mutateAsync: vi.fn(),
+      reset: vi.fn(),
+    } as never)
+  })
+
+  it('does not silently publish a legacy configuration', () => {
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        definition: { ...employee.definition, work_mode: 'hybrid' },
+      },
+      isPending: false,
+    } as never)
+    renderPage()
+
+    expect(screen.getByText(/当前员工包含尚未开放的配置/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '发布员工' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '编辑并修正' })).toBeInTheDocument()
+  })
+
+  it('shows an actionable message when the backend rejects publishing', () => {
+    vi.mocked(usePublishEmployee).mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+      isError: true,
+      error: {
+        isAxiosError: true,
+        response: {
+          data: { detail: { code: 'employee_configuration_unavailable' } },
+        },
+      },
+    } as never)
+    renderPage()
+
+    expect(screen.getByText(/切换为自主执行并关闭未接通能力后重试/)).toBeInTheDocument()
+  })
+
+  it('legacy published employee cannot start a run and has a repair entry', () => {
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: { ...employee.definition, work_mode: 'workflow' },
+      },
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.queryByRole('button', { name: '发起任务' })).not.toBeInTheDocument()
+    expect(screen.getByText(/已发布版本包含尚未开放的配置，当前不能发起任务/))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑并修正' })).toBeInTheDocument()
+  })
+
+  it('member keeps run/read access but cannot edit or publish', () => {
+    vi.mocked(useEmployee).mockReturnValue({
+      data: { ...employee, status: 'published', published_version: 1 },
+      isPending: false,
+    } as never)
+
+    renderPage(false)
+
+    expect(screen.getByRole('button', { name: '发起任务' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '发布员工' })).not.toBeInTheDocument()
+    expect(screen.getByText('完成用户交付的研究任务')).toBeInTheDocument()
+  })
+
+  it('catches createRun 409 and renders an actionable error in the modal', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockRejectedValue({
+      isAxiosError: true,
+      response: { data: { detail: { code: 'employee_configuration_unavailable' } } },
+    })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: { ...employee, status: 'published', published_version: 1 },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false,
+      isError: true,
+      error: {
+        isAxiosError: true,
+        response: { data: { detail: { code: 'employee_configuration_unavailable' } } },
+      },
+      mutateAsync,
+      reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    expect(screen.getByText(/切换为自主执行并关闭未接通能力后重试/)).toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: '任务内容' }), '执行任务')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ message: '执行任务' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+})

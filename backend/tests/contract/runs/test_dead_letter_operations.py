@@ -69,7 +69,7 @@ async def _create_original_run(client: AsyncClient, tenant_id: str) -> dict[str,
             json={
                 "name": "死信恢复员工",
                 "role_description": "验证死信重放契约",
-                "work_mode": "workflow",
+                "work_mode": "autonomous",
                 "system_prompt": "恢复任务。",
                 "model": {"provider": "openai", "name": "gpt-5"},
                 "input_schema": {"type": "object"},

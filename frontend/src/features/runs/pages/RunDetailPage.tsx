@@ -3,7 +3,7 @@ import { Button, Card, Descriptions, Empty, Flex, Space, Spin, Tag, Typography }
 import { useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 
-import { useActiveWorkspaceId } from '../../employees/api/queries'
+import { useActiveWorkspaceId } from '../../workspaces/store'
 import { runKeys, useControlRun, useRun, useRunEvents } from '../api/queries'
 import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
 import './runs.css'
@@ -22,17 +22,21 @@ export function RunDetailPage() {
   const control = useControlRun(runId ?? '')
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
+  const runStatus = run.data?.status
 
   useEffect(() => {
-    if (!runId || !tenantId || !run.data || terminalStatuses.has(run.data.status)) return
-    const source = new EventSource(`/api/v1/runs/${runId}/stream`, { withCredentials: true })
+    if (!runId || !tenantId || !runStatus || terminalStatuses.has(runStatus)) return
+    const search = new URLSearchParams({ tenant_id: tenantId })
+    const source = new EventSource(`/api/v1/runs/${runId}/stream?${search}`, {
+      withCredentials: true,
+    })
     const refresh = () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.detail(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.events(tenantId, runId) })
     }
     streamEvents.forEach((type) => source.addEventListener(type, refresh))
     return () => source.close()
-  }, [queryClient, run.data, runId, tenantId])
+  }, [queryClient, runId, runStatus, tenantId])
 
   if (run.isPending || !run.data) {
     return <Flex className="run-loading" justify="center"><Spin /></Flex>

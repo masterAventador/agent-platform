@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { useActiveWorkspaceId } from '../../employees/api/queries'
+import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createKnowledgeBase,
   listDocuments,

@@ -6,7 +6,7 @@ import { getApiErrorMessage } from '../../auth/api/errors'
 import { useCreateSkill, useSkills } from '../api/queries'
 import './skills.css'
 
-export function SkillsPage() {
+export function SkillsPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
   const skills = useSkills()
   const create = useCreateSkill()
   const navigate = useNavigate()
@@ -32,7 +32,9 @@ export function SkillsPage() {
           <Typography.Title level={2}>Skill 中心</Typography.Title>
           <Typography.Text type="secondary">管理企业 Skill、版本和发布状态</Typography.Text>
         </div>
-        <Button type="primary" onClick={() => setOpen(true)}>上传 Skill</Button>
+        {canManageWorkspace && (
+          <Button type="primary" onClick={() => setOpen(true)}>上传 Skill</Button>
+        )}
       </Flex>
       {skills.data?.length ? (
         <div className="skill-grid">

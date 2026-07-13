@@ -52,7 +52,7 @@ async def test_run_and_incremental_events_on_postgres(
     definition = {
         "name": "Real Run Employee",
         "role_description": "验证真实任务与事件",
-        "work_mode": "workflow",
+        "work_mode": "autonomous",
         "system_prompt": "执行任务。",
         "model": {"provider": "openai", "name": "gpt-5"},
         "input_schema": {"type": "object"},

@@ -38,6 +38,17 @@
   margin-bottom: 24px;
 }
 
+.app-workspace-select {
+  min-width: 220px;
+}
+
+.app-empty-workspace {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #f5f7fa;
+}
+
 .app-route-loading {
   min-height: 100vh;
   background: #f5f7fa;

@@ -1,9 +1,11 @@
-import { Button, Card, Descriptions, Flex, Input, Modal, Space, Spin, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Descriptions, Flex, Input, Modal, Space, Spin, Tag, Typography } from 'antd'
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
-import { useEmployee, usePublishEmployee } from '../api/queries'
 import { useCreateRun } from '../../runs/api/queries'
+import { isEmployeeConfigurationAvailable } from '../api/employees'
+import { getEmployeeApiErrorMessage } from '../api/errors'
+import { useEmployee, usePublishEmployee } from '../api/queries'
 import './employees.css'
 
 
@@ -13,7 +15,7 @@ const modeLabels = {
   hybrid: '混合协作',
 } as const
 
-export function EmployeeDetailPage() {
+export function EmployeeDetailPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
   const { employeeId } = useParams()
   const employee = useEmployee(employeeId)
   const publish = usePublishEmployee(employeeId ?? '')
@@ -28,6 +30,7 @@ export function EmployeeDetailPage() {
 
   const data = employee.data
   const published = data.status === 'published'
+  const configurationAvailable = isEmployeeConfigurationAvailable(data.definition)
 
   return (
     <section>
@@ -40,13 +43,49 @@ export function EmployeeDetailPage() {
           <Typography.Text type="secondary">{data.definition.role_description}</Typography.Text>
         </div>
         <Space>
-          {published && <Button onClick={() => setRunModalOpen(true)}>发起任务</Button>}
-          <Button onClick={() => navigate(`/employees/${data.id}/edit`)}>编辑</Button>
-          <Button type="primary" loading={publish.isPending} onClick={() => publish.mutate()}>
-            发布员工
-          </Button>
+          {published && configurationAvailable && (
+            <Button onClick={() => setRunModalOpen(true)}>发起任务</Button>
+          )}
+          {canManageWorkspace && (
+            <>
+              <Button onClick={() => navigate(`/employees/${data.id}/edit`)}>编辑</Button>
+              <Button
+                type="primary"
+                loading={publish.isPending}
+                disabled={!configurationAvailable}
+                onClick={() => publish.mutate()}
+              >
+                发布员工
+              </Button>
+            </>
+          )}
         </Space>
       </Flex>
+
+      {!configurationAvailable && (
+        <Alert
+          className="employee-detail-card"
+          type="warning"
+          showIcon
+          title={published
+            ? '已发布版本包含尚未开放的配置，当前不能发起任务'
+            : '当前员工包含尚未开放的配置，不能直接发布'}
+          description={canManageWorkspace
+            ? '请进入编辑器，显式切换为自主执行并关闭未接通能力。'
+            : '请联系工作区所有者，将配置修正为自主执行并关闭未接通能力。'}
+          action={canManageWorkspace ? (
+            <Button onClick={() => navigate(`/employees/${data.id}/edit`)}>编辑并修正</Button>
+          ) : undefined}
+        />
+      )}
+      {canManageWorkspace && publish.isError && (
+        <Alert
+          className="employee-detail-card"
+          type="error"
+          showIcon
+          title={getEmployeeApiErrorMessage(publish.error, '发布失败，请稍后重试')}
+        />
+      )}
 
       <Card className="employee-detail-card" title="员工配置">
         <Descriptions column={2}>
@@ -72,13 +111,30 @@ export function EmployeeDetailPage() {
         okText="确认发起"
         cancelText="取消"
         okButtonProps={{ disabled: !task.trim(), loading: createRun.isPending }}
-        onCancel={() => setRunModalOpen(false)}
-        onOk={async () => {
-          const run = await createRun.mutateAsync({ message: task.trim() })
+        onCancel={() => {
           setRunModalOpen(false)
-          navigate(`/runs/${run.id}`)
+          setTask('')
+          createRun.reset()
+        }}
+        onOk={async () => {
+          try {
+            const run = await createRun.mutateAsync({ message: task.trim() })
+            setRunModalOpen(false)
+            setTask('')
+            navigate(`/runs/${run.id}`)
+          } catch {
+            // Mutation 错误在弹窗内统一渲染，避免 Modal onOk 泄漏 rejection。
+          }
         }}
       >
+        {createRun.isError && (
+          <Alert
+            className="employee-form-error"
+            type="error"
+            showIcon
+            title={getEmployeeApiErrorMessage(createRun.error, '任务发起失败，请稍后重试')}
+          />
+        )}
         <Typography.Paragraph type="secondary">
           输入希望数字员工完成的任务，本次执行将固定使用已发布版本。
         </Typography.Paragraph>

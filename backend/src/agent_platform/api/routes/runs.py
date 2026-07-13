@@ -11,13 +11,17 @@ from pydantic import BaseModel, JsonValue
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
+    SqlAlchemyEmployeeVersionRepository,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
 )
-from agent_platform.platform.employees.entities import EmployeeStatus
+from agent_platform.platform.employees.entities import (
+    EmployeeStatus,
+    is_runnable_employee_definition,
+)
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.errors import InvalidRunTransition
@@ -25,6 +29,7 @@ from agent_platform.platform.runs.events import EventType, PlatformEvent
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
+StreamTenantQuery = Annotated[UUID | None, Query(alias="tenant_id")]
 
 
 class CreateRunRequest(BaseModel):
@@ -98,6 +103,20 @@ async def create_run(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "employee_not_published", "message": "数字员工尚未发布"},
+            )
+
+        version = await SqlAlchemyEmployeeVersionRepository(database_session).get(
+            tenant_id=access.tenant.id,
+            employee_id=employee.id,
+            version=employee.published_version,
+        )
+        if version is None or not is_runnable_employee_definition(version.definition):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "employee_configuration_unavailable",
+                    "message": "数字员工配置当前不可运行",
+                },
             )
 
         run = Run.create(
@@ -277,16 +296,30 @@ def _apply_control_request(run: Run, payload: ControlRunRequest) -> Run:
 async def stream_run_events(
     run_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
+    tenant_header: TenantHeader = None,
+    stream_tenant_id: StreamTenantQuery = None,
     after_sequence: Annotated[int, Query(ge=0)] = 0,
 ) -> StreamingResponse:
+    selected_tenant_id = stream_tenant_id or tenant_header
     async with request.app.state.session_factory() as database_session:
         _, access = await resolve_workspace(
             request=request,
             database_session=database_session,
-            tenant_id=tenant_id,
+            tenant_id=selected_tenant_id,
             owner_required=False,
         )
+        if (
+            tenant_header is not None
+            and stream_tenant_id is not None
+            and tenant_header != stream_tenant_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "tenant_context_conflict",
+                    "message": "租户请求上下文不一致",
+                },
+            )
         run = await SqlAlchemyRunRepository(database_session).get(
             tenant_id=access.tenant.id, run_id=run_id
         )

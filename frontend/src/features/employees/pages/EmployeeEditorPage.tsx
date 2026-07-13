@@ -2,10 +2,10 @@ import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Typography }
 import { useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
-import { getApiErrorMessage } from '../../auth/api/errors'
 import { usePublishedSkills } from '../../skills/api/queries'
 import { useAvailableTools } from '../../tools/api/queries'
-import type { EmployeeDefinition, WorkMode } from '../api/employees'
+import type { EmployeeWriteDefinition, WorkMode } from '../api/employees'
+import { getEmployeeApiErrorMessage } from '../api/errors'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
 import './employees.css'
 
@@ -48,6 +48,14 @@ export function EmployeeEditorPage() {
   const tools = useAvailableTools()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
+  const selectedWorkMode = Form.useWatch('workMode', form) ?? 'autonomous'
+  const legacyDefinition = editingEmployee.data?.definition
+  const hasLegacyWorkMode = legacyDefinition?.work_mode !== undefined
+    && legacyDefinition.work_mode !== 'autonomous'
+  const hasLegacyUnavailableCapability = Boolean(
+    legacyDefinition?.capabilities.file_upload
+    || legacyDefinition?.capabilities.scheduled_tasks,
+  )
 
   useEffect(() => {
     const employee = editingEmployee.data
@@ -60,29 +68,36 @@ export function EmployeeEditorPage() {
       modelProvider: employee.definition.model.provider,
       modelName: employee.definition.model.name,
       conversation: employee.definition.capabilities.conversation,
-      fileUpload: employee.definition.capabilities.file_upload,
-      scheduledTasks: employee.definition.capabilities.scheduled_tasks,
+      fileUpload: false,
+      scheduledTasks: false,
       skillIds: employee.definition.skill_ids,
       toolIds: employee.definition.tool_ids,
     })
   }, [editingEmployee.data, form])
 
   const submit = async (values: EmployeeFormValues) => {
+    if (values.workMode !== 'autonomous') {
+      form.setFields([{
+        name: 'workMode',
+        errors: ['当前只支持自主执行，请先显式切换工作模式'],
+      }])
+      return
+    }
     const existing = editingEmployee.data?.definition
-    const definition: EmployeeDefinition = {
+    const definition: EmployeeWriteDefinition = {
       name: values.name,
       avatar_url: existing?.avatar_url,
       role_description: values.roleDescription,
       visibility: existing?.visibility ?? 'tenant',
-      work_mode: values.workMode,
+      work_mode: 'autonomous',
       system_prompt: values.systemPrompt,
       model: { provider: values.modelProvider, name: values.modelName },
       input_schema: existing?.input_schema ?? { type: 'object' },
       output_schema: existing?.output_schema ?? { type: 'object' },
       capabilities: {
         conversation: values.conversation,
-        scheduled_tasks: values.scheduledTasks,
-        file_upload: values.fileUpload,
+        scheduled_tasks: false,
+        file_upload: false,
       },
       skill_ids: values.skillIds,
       tool_ids: values.toolIds,
@@ -111,7 +126,30 @@ export function EmployeeEditorPage() {
             className="employee-form-error"
             type="error"
             showIcon
-            title={getApiErrorMessage(mutation.error, '保存失败，请稍后重试')}
+            title={getEmployeeApiErrorMessage(mutation.error, '保存失败，请稍后重试')}
+          />
+        )}
+        {hasLegacyWorkMode && selectedWorkMode !== 'autonomous' && (
+          <Alert
+            className="employee-form-error"
+            type="warning"
+            showIcon
+            title="历史配置使用了尚未开放的工作模式"
+            description="该模式当前不能真实执行，也不能继续保存或发布。请显式切换为自主执行。"
+            action={(
+              <Button onClick={() => form.setFieldValue('workMode', 'autonomous')}>
+                切换为自主执行
+              </Button>
+            )}
+          />
+        )}
+        {hasLegacyUnavailableCapability && (
+          <Alert
+            className="employee-form-error"
+            type="warning"
+            showIcon
+            title="历史配置声明了尚未接通的能力"
+            description="文件上传或定时任务当前并未真实接通。本次保存会将这些声明修正为关闭。"
           />
         )}
         <Form<EmployeeFormValues>
@@ -129,13 +167,17 @@ export function EmployeeEditorPage() {
           </Form.Item>
           <Form.Item label="工作模式" name="workMode" rules={[{ required: true }]}>
             <Select
+              virtual={false}
               options={[
                 { value: 'autonomous', label: '自主执行' },
-                { value: 'workflow', label: '固定流程' },
-                { value: 'hybrid', label: '混合协作' },
+                { value: 'workflow', label: '固定流程（尚未开放）', disabled: true },
+                { value: 'hybrid', label: '混合协作（尚未开放）', disabled: true },
               ]}
             />
           </Form.Item>
+          <Typography.Paragraph type="secondary">
+            当前仅自主执行模式已接入真实运行时；固定流程与混合协作尚未开放。
+          </Typography.Paragraph>
           <Form.Item label="系统指令" name="systemPrompt" rules={[{ required: true }]}>
             <Input.TextArea rows={6} />
           </Form.Item>
@@ -153,12 +195,15 @@ export function EmployeeEditorPage() {
                 <Checkbox>支持对话</Checkbox>
               </Form.Item>
               <Form.Item name="fileUpload" valuePropName="checked" noStyle>
-                <Checkbox>支持文件上传</Checkbox>
+                <Checkbox disabled>支持文件上传（尚未接通）</Checkbox>
               </Form.Item>
               <Form.Item name="scheduledTasks" valuePropName="checked" noStyle>
-                <Checkbox>支持定时任务</Checkbox>
+                <Checkbox disabled>支持定时任务（尚未接通）</Checkbox>
               </Form.Item>
             </Space>
+            <Typography.Paragraph type="secondary">
+              文件上传与定时任务尚未接通，保存时始终保持关闭；对话能力可正常配置。
+            </Typography.Paragraph>
           </Form.Item>
           <Form.Item label="Skills" name="skillIds">
             <Select
@@ -186,7 +231,12 @@ export function EmployeeEditorPage() {
             />
           </Form.Item>
           <Space>
-            <Button type="primary" htmlType="submit" loading={mutation.isPending}>
+            <Button
+              type="primary"
+              htmlType="submit"
+              loading={mutation.isPending}
+              disabled={selectedWorkMode !== 'autonomous'}
+            >
               保存草稿
             </Button>
             <Button onClick={() => navigate(employeeId ? `/employees/${employeeId}` : '/employees')}>

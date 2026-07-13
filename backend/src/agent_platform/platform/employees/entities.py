@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -64,6 +65,17 @@ class EmployeeDraft:
             "approval_policy": self.approval_policy,
             "release_strategy": self.release_strategy,
         }
+
+
+def is_runnable_employee_definition(definition: Mapping[str, object]) -> bool:
+    capabilities = definition.get("capabilities")
+    return (
+        definition.get("work_mode") == RuntimeType.AUTONOMOUS.value
+        and isinstance(capabilities, Mapping)
+        and isinstance(capabilities.get("conversation"), bool)
+        and capabilities.get("scheduled_tasks") is False
+        and capabilities.get("file_upload") is False
+    )
 
 
 @dataclass(frozen=True, slots=True)

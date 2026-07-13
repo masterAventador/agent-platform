@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -20,6 +20,7 @@ from agent_platform.platform.employees.entities import (
     RuntimeType,
 )
 from agent_platform.platform.employees.errors import (
+    EmployeeConfigurationUnavailable,
     EmployeeNameAlreadyExists,
     EmployeeNotFound,
     EmployeeSkillNotBindable,
@@ -43,28 +44,37 @@ class ModelSettings(BaseModel):
 
 class EmployeeCapabilities(BaseModel):
     conversation: bool = True
+    scheduled_tasks: Literal[False] = False
+    file_upload: Literal[False] = False
+
+
+class EmployeeCapabilitiesResponse(BaseModel):
+    conversation: bool = True
     scheduled_tasks: bool = False
     file_upload: bool = False
 
 
-class EmployeeDefinitionRequest(BaseModel):
+class EmployeeDefinitionBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     name: Annotated[str, Field(min_length=1, max_length=200)]
     avatar_url: AnyHttpUrl | None = None
     role_description: Annotated[str, Field(min_length=1, max_length=2000)]
     visibility: EmployeeVisibility = EmployeeVisibility.TENANT
-    work_mode: RuntimeType
     system_prompt: Annotated[str, Field(min_length=1, max_length=20_000)]
     model: ModelSettings
     input_schema: dict[str, object]
     output_schema: dict[str, object]
-    capabilities: EmployeeCapabilities
     skill_ids: list[UUID] = Field(default_factory=list)
     tool_ids: list[UUID] = Field(default_factory=list)
     knowledge_base_ids: list[UUID] = Field(default_factory=list)
     approval_policy: dict[str, object] = Field(default_factory=dict)
     release_strategy: dict[str, object] = Field(default_factory=_default_release_strategy)
+
+
+class EmployeeDefinitionRequest(EmployeeDefinitionBase):
+    work_mode: Literal[RuntimeType.AUTONOMOUS]
+    capabilities: EmployeeCapabilities
 
     def to_draft(self) -> EmployeeDraft:
         return EmployeeDraft(
@@ -85,8 +95,14 @@ class EmployeeDefinitionRequest(BaseModel):
             release_strategy=self.release_strategy,
         )
 
+
+
+class EmployeeDefinitionResponse(EmployeeDefinitionBase):
+    work_mode: RuntimeType
+    capabilities: EmployeeCapabilitiesResponse
+
     @classmethod
-    def from_draft(cls, draft: EmployeeDraft) -> "EmployeeDefinitionRequest":
+    def from_draft(cls, draft: EmployeeDraft) -> "EmployeeDefinitionResponse":
         return cls.model_validate(draft.snapshot())
 
 
@@ -96,7 +112,7 @@ class EmployeeResponse(BaseModel):
     name: str
     status: str
     published_version: int | None
-    definition: EmployeeDefinitionRequest
+    definition: EmployeeDefinitionResponse
 
     @classmethod
     def from_entity(cls, employee: Employee) -> "EmployeeResponse":
@@ -106,7 +122,7 @@ class EmployeeResponse(BaseModel):
             name=employee.draft.name,
             status=employee.status.value,
             published_version=employee.published_version,
-            definition=EmployeeDefinitionRequest.from_draft(employee.draft),
+            definition=EmployeeDefinitionResponse.from_draft(employee.draft),
         )
 
 
@@ -153,6 +169,14 @@ def _raise_employee_error(error: Exception) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "tool_not_bindable", "message": "只能绑定本企业已启用的 Tool"},
+        ) from error
+    if isinstance(error, EmployeeConfigurationUnavailable):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "employee_configuration_unavailable",
+                "message": "数字员工配置当前不可运行",
+            },
         ) from error
     raise error
 
@@ -282,7 +306,12 @@ async def publish_employee(
                 published_by=user.id,
             )
             await database_session.commit()
-        except (EmployeeNotFound, EmployeeSkillNotBindable, EmployeeToolNotBindable) as error:
+        except (
+            EmployeeNotFound,
+            EmployeeConfigurationUnavailable,
+            EmployeeSkillNotBindable,
+            EmployeeToolNotBindable,
+        ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
     return EmployeeResponse.from_entity(employee)
