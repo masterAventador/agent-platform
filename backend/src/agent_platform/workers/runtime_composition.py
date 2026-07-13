@@ -14,13 +14,17 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.runs import (
+    SqlAlchemyRunCommandRepository,
+    SqlAlchemyRunRepository,
+)
 from agent_platform.infrastructure.database.repositories.skills import (
     SqlAlchemySkillRepository,
 )
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
-from agent_platform.platform.runs.entities import Run
+from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
 from agent_platform.platform.skills.materializer import (
     SkillBundleDigestMismatch,
@@ -35,19 +39,20 @@ from agent_platform.runtimes.deep_agent import (
     DeepAgentRuntime,
     require_sandbox_backend,
 )
+from agent_platform.runtimes.recovery import (
+    RuntimeRecoveryTransient,
+    RuntimeRecoveryUnavailable,
+)
 from agent_platform.runtimes.tool_gateway_adapter import (
     InvocationContext,
     OneTimeToolApprovalStore,
+    ToolExecutionBlocked,
     ToolGatewayAdapter,
     ToolGatewayInvoker,
 )
 from agent_platform.sandbox.entities import SandboxScope
 from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.sandbox.ports import RunExecutionEnvironment
-from agent_platform.workers.runtime_recovery import (
-    RuntimeRecoveryTransient,
-    RuntimeRecoveryUnavailable,
-)
 
 RuntimeWorkMode = Literal["autonomous", "workflow", "hybrid"]
 ResolvedModel = str | BaseChatModel
@@ -58,6 +63,39 @@ MODEL_PROVIDER_MODULES = {
     "openai": "langchain_openai",
 }
 logger = logging.getLogger(__name__)
+
+
+class DatabaseToolExecutionGuard:
+    """工具调用前的尽力检查；它不构成与外部副作用线性化的执行声明。"""
+
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        run_id: UUID,
+        tenant_id: UUID,
+    ) -> None:
+        self._session_factory = session_factory
+        self._run_id = run_id
+        self._tenant_id = tenant_id
+
+    async def assert_allowed(self) -> None:
+        async with self._session_factory() as session:
+            run = await SqlAlchemyRunRepository(session).get(
+                tenant_id=self._tenant_id,
+                run_id=self._run_id,
+            )
+            cancellation_commands = await SqlAlchemyRunCommandRepository(
+                session
+            ).unprocessed_cancel_commands(run_id=self._run_id)
+        if run is None or run.status in {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            raise ToolExecutionBlocked("run_execution_not_allowed")
+        if cancellation_commands:
+            raise ToolExecutionBlocked("run_cancellation_requested")
 
 
 class PermanentRuntimePreparationError(Exception):
@@ -231,7 +269,7 @@ def create_deep_agent_runtime(
             tools=tools,
             backend=require_sandbox_backend(environment.backend),
             checkpointer=checkpointer,
-        interrupt_on=cast(dict[str, bool | dict[str, object]], interrupt_on) or None,
+            interrupt_on=cast(dict[str, bool | dict[str, object]], interrupt_on) or None,
         ),
         approval_store=approval_store,
         tool_ids_by_name=tool_ids_by_name,
@@ -455,6 +493,11 @@ class ComposedRuntimeResolver:
                     allowed_tool_ids=frozenset(capabilities.tool_ids),
                 ),
                 approval_store=(approval_store := OneTimeToolApprovalStore()),
+                execution_guard=DatabaseToolExecutionGuard(
+                    session_factory=self._session_factory,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                ),
             )
             tools = [gateway_adapter.adapt(metadata) for metadata in tool_metadata]
             runtime = self._runtime_selector.select(
@@ -465,6 +508,7 @@ class ComposedRuntimeResolver:
                 approval_store=approval_store,
             )
         except PermanentRuntimePreparationError as error:
+
             async def cleanup() -> None:
                 await self._sandbox_manager.delete(
                     lease_id=environment.lease.id,

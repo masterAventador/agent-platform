@@ -372,6 +372,18 @@ class SqlAlchemyRunCommandRepository:
         )
         return [self._to_entity(record) for record in result.scalars()]
 
+    async def unprocessed_cancel_commands(self, *, run_id: UUID) -> list[RunCommand]:
+        result = await self._session.execute(
+            select(RunCommandRecord)
+            .where(
+                RunCommandRecord.run_id == run_id,
+                RunCommandRecord.processed_at.is_(None),
+                RunCommandRecord.action == RunCommandAction.CANCEL.value,
+            )
+            .order_by(RunCommandRecord.created_at)
+        )
+        return [self._to_entity(record) for record in result.scalars()]
+
     @staticmethod
     def _to_entity(record: RunCommandRecord) -> RunCommand:
         return RunCommand(

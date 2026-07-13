@@ -6,7 +6,7 @@ import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from pydantic import JsonValue, TypeAdapter
@@ -47,6 +47,10 @@ class ToolGatewayInvoker(Protocol):
     ) -> ToolInvocationOutcome: ...
 
 
+class ToolExecutionGuard(Protocol):
+    async def assert_allowed(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class InvocationContext:
     """由平台绑定、不可由模型工具参数覆盖的调用主体。"""
@@ -72,9 +76,7 @@ class OneTimeToolApprovalStore:
         tool_name: str,
         arguments: dict[str, object],
     ) -> None:
-        self._grants[
-            (run_id, tool_id, tool_name, self._argument_digest(arguments))
-        ] = invocation_id
+        self._grants[(run_id, tool_id, tool_name, self._argument_digest(arguments))] = invocation_id
 
     def consume(
         self,
@@ -152,6 +154,10 @@ class ToolApprovalRequired(ToolException):
         super().__init__(f"tool_approval_required:{reason}")
 
 
+class ToolExecutionBlocked(ToolException):
+    """平台状态已禁止该 run 开始新的外部工具副作用。"""
+
+
 class ToolGatewayAdapter:
     """把 Registry 工具包装为仅经 Tool Gateway 执行的 LangChain 工具。"""
 
@@ -162,11 +168,13 @@ class ToolGatewayAdapter:
         invocation_context: InvocationContext,
         policy_context: PolicyContext,
         approval_store: OneTimeToolApprovalStore | None = None,
+        execution_guard: ToolExecutionGuard | None = None,
     ) -> None:
         self._gateway = gateway
         self._invocation_context = invocation_context
         self._policy_context = policy_context
         self._approval_store = approval_store
+        self._execution_guard = execution_guard
 
     def adapt(self, metadata: RegistryToolMetadata) -> BaseTool:
         invoke = self._build_invoker(metadata)
@@ -191,7 +199,9 @@ class ToolGatewayAdapter:
             execution_failed = False
             outcome: ToolInvocationOutcome | None = None
             try:
-                invocation_id = (
+                if self._execution_guard is not None:
+                    await self._execution_guard.assert_allowed()
+                approval_invocation_id = (
                     self._approval_store.consume(
                         run_id=context.run_id,
                         tool_id=metadata.id,
@@ -201,6 +211,7 @@ class ToolGatewayAdapter:
                     if self._approval_store is not None
                     else None
                 )
+                invocation_id = approval_invocation_id or uuid4()
                 outcome = await self._gateway.invoke(
                     ToolInvocation(
                         tenant_id=context.tenant_id,
@@ -216,7 +227,7 @@ class ToolGatewayAdapter:
                         self._policy_context,
                         approval_granted=(
                             self._policy_context.approval_granted
-                            or invocation_id is not None
+                            or approval_invocation_id is not None
                         ),
                     ),
                 )

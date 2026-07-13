@@ -25,12 +25,18 @@ cleanup() {
     dropdb --force --if-exists -U agent_platform "${DATABASE_NAME}" \
     >/dev/null 2>&1 || true
   rm -f /tmp/agent-platform-runtime-e2e-dispatcher-ready \
-    /tmp/agent-platform-runtime-e2e-worker-ready
+    /tmp/agent-platform-runtime-e2e-worker-ready \
+    /tmp/agent-platform-runtime-e2e-slow-model-started \
+    /tmp/agent-platform-runtime-e2e-slow-model-stopped \
+    /tmp/agent-platform-runtime-e2e-slow-model-side-effect
 }
 trap cleanup EXIT INT TERM
 
 rm -f /tmp/agent-platform-runtime-e2e-dispatcher-ready \
-  /tmp/agent-platform-runtime-e2e-worker-ready
+  /tmp/agent-platform-runtime-e2e-worker-ready \
+  /tmp/agent-platform-runtime-e2e-slow-model-started \
+  /tmp/agent-platform-runtime-e2e-slow-model-stopped \
+  /tmp/agent-platform-runtime-e2e-slow-model-side-effect
 
 export DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
 if [[ "${DOCKER_HOST}" != unix://* ]]; then

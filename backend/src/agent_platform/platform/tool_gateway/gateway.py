@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
-from .errors import ToolExecutionError
+from .errors import ToolExecutionError, ToolInvocationClaimRejected
 from .models import (
     ArgumentSummary,
     AuditEventType,
@@ -75,14 +75,20 @@ class ToolGateway:
             )
             return ToolInvocationOutcome(decision=policy.decision, reason=policy.reason)
 
-        await self._audit_sink.emit(
-            _audit_event(
-                event_type=AuditEventType.STARTED,
-                invocation=invocation,
-                definition=definition,
-                argument_summary=summary,
+        try:
+            await self._audit_sink.emit(
+                _audit_event(
+                    event_type=AuditEventType.STARTED,
+                    invocation=invocation,
+                    definition=definition,
+                    argument_summary=summary,
+                )
             )
-        )
+        except ToolInvocationClaimRejected:
+            return ToolInvocationOutcome(
+                decision=PolicyDecision.DENY,
+                reason="run_execution_not_allowed",
+            )
         execution_failed = False
         result: object | None = None
         try:

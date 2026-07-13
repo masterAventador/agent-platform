@@ -13,7 +13,13 @@ from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.runs import (
+    SqlAlchemyRunEventRepository,
+    SqlAlchemyRunRepository,
+)
 from agent_platform.infrastructure.database.repositories.tenants import TenantMembershipRecord
+from agent_platform.platform.runs.entities import RunStatus
+from agent_platform.platform.runs.events import EventType, PlatformEvent
 
 
 class AllowAllRateLimiter:
@@ -75,7 +81,7 @@ async def _register_and_login(client: AsyncClient, email: str) -> dict[str, Any]
     return response.json()
 
 
-async def _create_cancelled_run(client: AsyncClient, tenant_id: str) -> dict[str, Any]:
+async def _create_cancel_requested_run(client: AsyncClient, tenant_id: str) -> dict[str, Any]:
     headers = {"X-Tenant-ID": tenant_id}
     employee = (
         await client.post(
@@ -113,7 +119,7 @@ async def _create_cancelled_run(client: AsyncClient, tenant_id: str) -> dict[str
             headers=headers,
             json={"action": "cancel"},
         )
-    ).status_code == 200
+    ).status_code == 202
     return run
 
 
@@ -179,16 +185,16 @@ async def test_create_and_read_queued_run_for_published_employee(run_client: Asy
         headers=headers,
         json={"action": "cancel"},
     )
-    assert cancel_response.status_code == 200
-    assert cancel_response.json()["status"] == "cancelled"
+    assert cancel_response.status_code == 202
+    assert cancel_response.json()["status"] == "queued"
 
-    stream_response = await run_client.get(
-        f"/api/v1/runs/{run['id']}/stream?tenant_id={headers['X-Tenant-ID']}",
+    events_response = await run_client.get(
+        f"/api/v1/runs/{run['id']}/events?after_sequence=0",
+        headers=headers,
     )
-    assert stream_response.status_code == 200
-    assert stream_response.headers["content-type"].startswith("text/event-stream")
-    assert "event: run.cancelled" in stream_response.text
-    assert '"action": "cancel"' in stream_response.text
+    assert events_response.status_code == 200
+    assert [event["type"] for event in events_response.json()] == ["run.progress"]
+    assert events_response.json()[0]["payload"]["action"] == "cancel_requested"
 
 
 @pytest.mark.asyncio
@@ -202,9 +208,28 @@ async def test_stream_tenant_query_is_membership_scoped_and_unambiguous(
     second_user = await _register_and_login(second_owner, "stream-second@example.com")
     owner_tenant_id = owner_user["workspaces"][0]["id"]
     second_tenant_id = second_user["workspaces"][0]["id"]
-    run = await _create_cancelled_run(owner, owner_tenant_id)
+    run = await _create_cancel_requested_run(owner, owner_tenant_id)
 
     async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        persisted_run = await runs.get(
+            tenant_id=UUID(owner_tenant_id),
+            run_id=UUID(run["id"]),
+        )
+        assert persisted_run is not None
+        cancelled = persisted_run.transition_to(RunStatus.CANCELLED)
+        await runs.update(cancelled)
+        events = SqlAlchemyRunEventRepository(session)
+        await events.append(
+            PlatformEvent.create(
+                tenant_id=cancelled.tenant_id,
+                employee_id=cancelled.employee_id,
+                run_id=cancelled.id,
+                sequence=await events.next_sequence(run_id=cancelled.id),
+                event_type=EventType.RUN_CANCELLED,
+                payload={"status": "cancelled"},
+            )
+        )
         session.add(
             TenantMembershipRecord(
                 id=uuid4(),
@@ -216,9 +241,7 @@ async def test_stream_tenant_query_is_membership_scoped_and_unambiguous(
         )
         await session.commit()
 
-    cross_tenant = await owner.get(
-        f"/api/v1/runs/{run['id']}/stream?tenant_id={second_tenant_id}"
-    )
+    cross_tenant = await owner.get(f"/api/v1/runs/{run['id']}/stream?tenant_id={second_tenant_id}")
     assert cross_tenant.status_code == 404
     assert cross_tenant.json()["detail"]["code"] == "resource_not_found"
 

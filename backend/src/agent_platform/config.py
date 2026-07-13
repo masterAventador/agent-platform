@@ -22,6 +22,8 @@ class AppSettings(BaseSettings):
     worker_retry_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
     runtime_lease_seconds: int = Field(default=30, ge=3, le=300)
     runtime_heartbeat_seconds: float = Field(default=10.0, ge=1, le=100)
+    runtime_cancel_poll_initial_seconds: float = Field(default=0.25, ge=0.01, le=5)
+    runtime_cancel_poll_max_seconds: float = Field(default=2.0, ge=0.01, le=10)
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"
@@ -54,4 +56,6 @@ class AppSettings(BaseSettings):
     def validate_runtime_heartbeat(self) -> "AppSettings":
         if self.runtime_heartbeat_seconds >= self.runtime_lease_seconds:
             raise ValueError("runtime heartbeat must be shorter than runtime lease")
+        if self.runtime_cancel_poll_initial_seconds > self.runtime_cancel_poll_max_seconds:
+            raise ValueError("runtime cancel poll initial delay must not exceed maximum")
         return self

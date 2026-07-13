@@ -25,7 +25,7 @@ export function formatRunEvent(
   type: string,
   payload: Record<string, unknown>,
 ): RunEventPresentation {
-  if (payload.action === 'cancel') {
+  if (payload.action === 'cancel' || payload.action === 'cancel_requested') {
     return { label: '请求取消任务', content: null }
   }
   const labels: Record<string, string> = {

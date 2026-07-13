@@ -37,6 +37,7 @@ from agent_platform.platform.tool_gateway import (
     ToolGateway,
 )
 from agent_platform.platform.tools.entities import McpServer
+from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.workers.run_worker import RuntimeResolver, RunWorker, WorkerFenced
 from agent_platform.workers.runtime_adapters import (
     BuiltinRuntimeAdapters,
@@ -48,7 +49,6 @@ from agent_platform.workers.runtime_composition import (
     PlatformModelResolver,
     PlatformRuntimeSelector,
 )
-from agent_platform.workers.runtime_recovery import RuntimeRecoveryTransient
 
 
 class WorkerConfigurationError(Exception):
@@ -222,6 +222,8 @@ async def run_worker_service(
             runtime_resolver=resolver,
             consumer_name=consumer_name or _default_consumer_name(),
             runtime_lease_duration=timedelta(seconds=app_settings.runtime_lease_seconds),
+            cancellation_poll_initial_seconds=(app_settings.runtime_cancel_poll_initial_seconds),
+            cancellation_poll_max_seconds=app_settings.runtime_cancel_poll_max_seconds,
         )
         recovered = await wait_for_runtime_recovery(
             worker=worker,

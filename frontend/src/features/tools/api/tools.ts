@@ -1,4 +1,5 @@
 import { apiClient } from '../../../api/client'
+import { tenantRequestConfig } from '../../../api/tenant'
 
 
 export type McpTransport = 'streamable_http' | 'stdio'
@@ -46,13 +47,9 @@ export interface ToolCreate {
   enabled: boolean
 }
 
-function tenantHeaders(tenantId: string) {
-  return { 'X-Tenant-ID': tenantId }
-}
-
 export async function listMcpServers(tenantId: string): Promise<McpServer[]> {
   return (await apiClient.get<McpServer[]>('/mcp-servers', {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })).data
 }
 
@@ -61,7 +58,7 @@ export async function createMcpServer(
   payload: McpServerCreate,
 ): Promise<McpServer> {
   return (await apiClient.post<McpServer>('/mcp-servers', payload, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })).data
 }
 
@@ -71,20 +68,20 @@ export async function setMcpServerEnabled(
   enabled: boolean,
 ): Promise<McpServer> {
   return (await apiClient.patch<McpServer>(`/mcp-servers/${serverId}`, { enabled }, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })).data
 }
 
 export async function listTools(tenantId: string, serverId?: string): Promise<Tool[]> {
   return (await apiClient.get<Tool[]>('/tools', {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
     params: serverId ? { server_id: serverId } : undefined,
   })).data
 }
 
 export async function createTool(tenantId: string, payload: ToolCreate): Promise<Tool> {
   return (await apiClient.post<Tool>('/tools', payload, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })).data
 }
 
@@ -94,6 +91,6 @@ export async function setToolEnabled(
   enabled: boolean,
 ): Promise<Tool> {
   return (await apiClient.patch<Tool>(`/tools/${toolId}`, { enabled }, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })).data
 }

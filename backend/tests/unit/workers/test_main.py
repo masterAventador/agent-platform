@@ -7,6 +7,7 @@ from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.repositories.runtime_ownership import (
     RuntimeOwnershipBusy,
 )
+from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.workers import main as worker_main_module
 from agent_platform.workers.main import (
     WorkerConfigurationError,
@@ -17,7 +18,6 @@ from agent_platform.workers.main import (
     wait_for_runtime_recovery,
 )
 from agent_platform.workers.run_worker import WorkerFenced
-from agent_platform.workers.runtime_recovery import RuntimeRecoveryTransient
 
 
 class RecordingWorker:
@@ -264,6 +264,11 @@ async def test_service_rejects_multiple_replicas_until_runtime_registry_is_durab
         {"runtime_lease_seconds": 0},
         {"runtime_heartbeat_seconds": 30, "runtime_lease_seconds": 30},
         {"runtime_heartbeat_seconds": 31, "runtime_lease_seconds": 30},
+        {"runtime_cancel_poll_initial_seconds": 0},
+        {
+            "runtime_cancel_poll_initial_seconds": 2,
+            "runtime_cancel_poll_max_seconds": 1,
+        },
     ],
 )
 def test_worker_retry_settings_fail_fast_outside_safe_bounds(
@@ -280,6 +285,8 @@ def test_worker_retry_settings_have_bounded_dlq_defaults() -> None:
     assert settings.run_queue_dead_letter_stream_name == "agent-platform:runs:dlq"
     assert settings.runtime_lease_seconds == 30
     assert settings.runtime_heartbeat_seconds == 10
+    assert settings.runtime_cancel_poll_initial_seconds == 0.25
+    assert settings.runtime_cancel_poll_max_seconds == 2
 
 
 def test_cli_missing_adapter_exits_two_with_sanitized_stderr(monkeypatch, capsys) -> None:

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createKnowledgeBase,
@@ -28,6 +29,7 @@ export function useCreateKnowledgeBase() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'create'),
     mutationFn: (values: { name: string; description: string }) =>
       createKnowledgeBase(tenantId!, values),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: keys.all(tenantId!) }),
@@ -48,6 +50,7 @@ export function useUploadKnowledgeDocument(id: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'upload', id),
     mutationFn: (file: File) => uploadDocument(tenantId!, id, file),
     onSuccess: async () =>
       queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
@@ -56,5 +59,8 @@ export function useUploadKnowledgeDocument(id: string) {
 
 export function useKnowledgeSearch(id: string) {
   const tenantId = useActiveWorkspaceId()
-  return useMutation({ mutationFn: (question: string) => retrieve(tenantId!, id, question) })
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'retrieve', id),
+    mutationFn: (question: string) => retrieve(tenantId!, id, question),
+  })
 }

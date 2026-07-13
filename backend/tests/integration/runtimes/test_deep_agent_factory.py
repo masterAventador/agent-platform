@@ -24,13 +24,13 @@ from agent_platform.platform.tool_gateway import (
 from agent_platform.platform.tools.entities import ToolRiskLevel
 from agent_platform.runtimes.base import RuntimeStartRequest
 from agent_platform.runtimes.deep_agent import DeepAgentFactory, DeepAgentRuntime
+from agent_platform.runtimes.recovery import RuntimeControlMismatch
 from agent_platform.runtimes.tool_gateway_adapter import (
     InvocationContext,
     OneTimeToolApprovalStore,
     ToolApprovalRequired,
     ToolGatewayAdapter,
 )
-from agent_platform.workers.runtime_recovery import RuntimeControlMismatch
 
 
 class ToolBindingFakeChatModel(GenericFakeChatModel):
@@ -309,13 +309,9 @@ async def test_deep_agent_runtime_rotates_approval_id_for_consecutive_interrupts
     )
 
     await runtime.start(request)
-    first_id = UUID(
-        str((await runtime.get_history(request.run_id))[-1].payload["approval_id"])
-    )
+    first_id = UUID(str((await runtime.get_history(request.run_id))[-1].payload["approval_id"]))
     await runtime.approve(request.run_id, first_id)
-    second_id = UUID(
-        str((await runtime.get_history(request.run_id))[-1].payload["approval_id"])
-    )
+    second_id = UUID(str((await runtime.get_history(request.run_id))[-1].payload["approval_id"]))
 
     assert second_id != first_id
     assert (await runtime.get_state(request.run_id)).status.value == "waiting_for_approval"
@@ -366,9 +362,7 @@ async def test_deep_agent_runtime_rejects_matching_interrupt_without_executing_t
     )
 
     await runtime.start(request)
-    approval_id = UUID(
-        str((await runtime.get_history(request.run_id))[-1].payload["approval_id"])
-    )
+    approval_id = UUID(str((await runtime.get_history(request.run_id))[-1].payload["approval_id"]))
     await runtime.reject(request.run_id, approval_id, "operator rejected")
 
     assert (await runtime.get_state(request.run_id)).status.value == "cancelled"
@@ -430,9 +424,7 @@ async def test_real_deep_agent_approval_is_consumed_once_by_exact_gateway_invoca
     )
 
     await runtime.start(request)
-    approval_id = UUID(
-        str((await runtime.get_history(run_id))[-1].payload["approval_id"])
-    )
+    approval_id = UUID(str((await runtime.get_history(run_id))[-1].payload["approval_id"]))
     await runtime.approve(run_id, approval_id)
 
     assert (await runtime.get_state(run_id)).status.value == "completed"

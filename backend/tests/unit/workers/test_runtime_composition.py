@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.platform.runs.entities import Run
+from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.sandbox.entities import SandboxLease, SandboxScope
 from agent_platform.sandbox.ports import RunExecutionEnvironment
 from agent_platform.workers import runtime_composition as runtime_composition_module
@@ -24,7 +25,6 @@ from agent_platform.workers.runtime_composition import (
     UntrustedRuntimeDefinition,
     extend_runtime_definition,
 )
-from agent_platform.workers.runtime_recovery import RuntimeRecoveryTransient
 
 
 class EmptyStorage:

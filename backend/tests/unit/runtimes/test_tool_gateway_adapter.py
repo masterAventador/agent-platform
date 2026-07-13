@@ -19,6 +19,7 @@ from agent_platform.runtimes.tool_gateway_adapter import (
     InvocationContext,
     OneTimeToolApprovalStore,
     ToolApprovalRequired,
+    ToolExecutionBlocked,
     ToolGatewayAdapter,
 )
 
@@ -45,6 +46,11 @@ class FailingGateway:
     ) -> ToolInvocationOutcome:
         del invocation, context
         raise ToolExecutionError("safe gateway failure")
+
+
+class BlockingExecutionGuard:
+    async def assert_allowed(self) -> None:
+        raise ToolExecutionBlocked("run_cancellation_requested")
 
 
 def registry_tool() -> Tool:
@@ -103,20 +109,20 @@ async def test_adapts_registry_metadata_and_binds_trusted_context() -> None:
     assert tool.description == metadata.description
     assert tool.args_schema == metadata.input_schema
     assert await tool.ainvoke({"customer_id": 42}) == {"customer": "Ada"}
-    assert gateway.calls == [
-        (
-            ToolInvocation(
-                tenant_id=trusted.tenant_id,
-                run_id=trusted.run_id,
-                employee_id=trusted.employee_id,
-                user_id=trusted.user_id,
-                tool_id=metadata.id,
-                tool_name=metadata.name,
-                arguments={"customer_id": 42},
-            ),
-            policy,
-        )
-    ]
+    assert len(gateway.calls) == 1
+    captured_invocation, captured_policy = gateway.calls[0]
+    assert captured_policy == policy
+    assert captured_invocation == ToolInvocation(
+        tenant_id=trusted.tenant_id,
+        run_id=trusted.run_id,
+        employee_id=trusted.employee_id,
+        user_id=trusted.user_id,
+        tool_id=metadata.id,
+        tool_name=metadata.name,
+        arguments={"customer_id": 42},
+        invocation_id=captured_invocation.invocation_id,
+    )
+    assert captured_invocation.invocation_id is not None
 
 
 @pytest.mark.asyncio
@@ -210,6 +216,25 @@ async def test_gateway_execution_error_is_sanitized_for_the_model() -> None:
 
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_guard_blocks_gateway_before_external_side_effect() -> None:
+    metadata = registry_tool()
+    gateway = RecordingGateway(
+        ToolInvocationOutcome(decision=PolicyDecision.ALLOW, result={"unsafe": True})
+    )
+    tool = ToolGatewayAdapter(
+        gateway=gateway,
+        invocation_context=invocation_context(tenant_id=metadata.tenant_id),
+        policy_context=PolicyContext(allowed_tool_ids=frozenset({metadata.id})),
+        execution_guard=BlockingExecutionGuard(),
+    ).adapt(metadata)
+
+    with pytest.raises(ToolExecutionBlocked, match="run_cancellation_requested"):
+        await tool.ainvoke({"customer_id": 42})
+
+    assert gateway.calls == []
 
 
 @pytest.mark.asyncio

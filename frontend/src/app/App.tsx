@@ -1,8 +1,9 @@
-import { useQueryClient } from '@tanstack/react-query'
-import { Button, Flex, Layout, Result, Select, Space, Typography } from 'antd'
-import { lazy, Suspense } from 'react'
+import { useIsMutating, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Flex, Layout, Result, Select, Space, Typography } from 'antd'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Link, Route, Routes, useNavigate } from 'react-router-dom'
 
+import { isTenantMutationFor } from '../api/tenant'
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
@@ -105,6 +106,17 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { activeWorkspace, isReconciled, select } = useWorkspaceSelection(user)
+  const [workspaceSwitchWarning, setWorkspaceSwitchWarning] = useState<string>()
+  const [isWorkspaceSwitching, setIsWorkspaceSwitching] = useState(false)
+  const workspaceSwitchInFlight = useRef(false)
+  const pendingActiveWorkspaceMutations = useIsMutating({
+    predicate: (mutation) => activeWorkspace !== undefined
+      && isTenantMutationFor(mutation.options.mutationKey, activeWorkspace.id),
+  })
+
+  useEffect(() => {
+    if (pendingActiveWorkspaceMutations === 0) setWorkspaceSwitchWarning(undefined)
+  }, [pendingActiveWorkspaceMutations])
 
   const signOut = async () => {
     await logout.mutateAsync()
@@ -137,20 +149,48 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const canManageWorkspace = activeWorkspace.role === 'owner'
 
   const switchWorkspace = async (workspaceId: string) => {
-    if (workspaceId === activeWorkspace.id) return
+    if (workspaceId === activeWorkspace.id || workspaceSwitchInFlight.current) return
+
+    workspaceSwitchInFlight.current = true
+    setIsWorkspaceSwitching(true)
 
     const previousWorkspaceId = activeWorkspace.id
-    const belongsToPreviousWorkspace = (queryKey: readonly unknown[]) => (
-      queryKey.includes(previousWorkspaceId)
-    )
+    const hasPendingMutation = () => queryClient.isMutating({
+      predicate: (mutation) => isTenantMutationFor(
+        mutation.options.mutationKey,
+        previousWorkspaceId,
+      ),
+    }) > 0
 
-    await queryClient.cancelQueries({
-      predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
-    })
-    queryClient.removeQueries({
-      predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
-    })
-    if (select(workspaceId)) navigate('/', { replace: true })
+    try {
+      if (hasPendingMutation()) {
+        setWorkspaceSwitchWarning('当前工作区仍有操作正在提交，请等待完成后再切换。')
+        return
+      }
+
+      const belongsToPreviousWorkspace = (queryKey: readonly unknown[]) => (
+        queryKey.includes(previousWorkspaceId)
+      )
+
+      await queryClient.cancelQueries({
+        predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
+      })
+      if (hasPendingMutation()) {
+        setWorkspaceSwitchWarning('当前工作区仍有操作正在提交，请等待完成后再切换。')
+        return
+      }
+
+      queryClient.removeQueries({
+        predicate: (query) => belongsToPreviousWorkspace(query.queryKey),
+      })
+      if (select(workspaceId)) {
+        setWorkspaceSwitchWarning(undefined)
+        navigate('/', { replace: true })
+      }
+    } finally {
+      workspaceSwitchInFlight.current = false
+      setIsWorkspaceSwitching(false)
+    }
   }
 
   return (
@@ -178,6 +218,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
           <Select
             aria-label="当前工作区"
             className="app-workspace-select"
+            disabled={isWorkspaceSwitching}
             value={activeWorkspace.id}
             options={user.workspaces.map((workspace) => ({
               value: workspace.id,
@@ -192,6 +233,9 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             </Button>
           </Flex>
         </Flex>
+        {workspaceSwitchWarning && (
+          <Alert type="warning" showIcon title={workspaceSwitchWarning} />
+        )}
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route

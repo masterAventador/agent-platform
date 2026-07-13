@@ -35,7 +35,7 @@ class RuntimeRecoveryTransient(RuntimeError):
 
 
 class ToolExecutionUncertain(RuntimeRecoveryUnavailable):
-    """工具已开始但checkpoint未证明完成，禁止自动重放副作用。"""
+    """工具已开始但 checkpoint 未证明完成，禁止自动重放副作用。"""
 
     code = "tool_execution_uncertain"
 

@@ -10,6 +10,9 @@ from agent_platform.platform.knowledge.models import (
 
 
 class KnowledgeProvider(Protocol):
+    @property
+    def provider_name(self) -> str: ...
+
     async def create_dataset(
         self, *, name: str, description: str = "", chunk_method: str = "naive"
     ) -> KnowledgeDataset: ...

@@ -16,6 +16,8 @@ from agent_platform.platform.tool_gateway import (
     ToolExecutionError,
     ToolGateway,
     ToolInvocation,
+    ToolInvocationClaimRejected,
+    ToolInvocationOutcome,
     ToolRisk,
 )
 
@@ -31,14 +33,18 @@ class RecordingAuditSink:
         self.events.append(event)
 
 
+class ClaimRejectingAuditSink:
+    async def emit(self, event: Any) -> None:
+        assert event.event_type is AuditEventType.STARTED
+        raise ToolInvocationClaimRejected
+
+
 @dataclass
 class RecordingCredentialResolver:
     credentials: Mapping[str, str] = field(default_factory=dict)
     calls: list[tuple[UUID, Sequence[str]]] = field(default_factory=list)
 
-    async def resolve(
-        self, *, tenant_id: UUID, references: Sequence[str]
-    ) -> Mapping[str, str]:
+    async def resolve(self, *, tenant_id: UUID, references: Sequence[str]) -> Mapping[str, str]:
         self.calls.append((tenant_id, references))
         return self.credentials
 
@@ -206,9 +212,7 @@ async def test_allowed_invocation_forwards_idempotency_out_of_band() -> None:
     executor = IdempotencyRecordingExecutor()
     gateway = ToolGateway(
         executor=executor,
-        definition_resolver=RecordingDefinitionResolver(
-            definition(tenant_id=request.tenant_id)
-        ),
+        definition_resolver=RecordingDefinitionResolver(definition(tenant_id=request.tenant_id)),
         credential_resolver=RecordingCredentialResolver(),
         audit_sink=RecordingAuditSink(),
     )
@@ -239,9 +243,7 @@ async def test_allowed_invocation_forwards_idempotency_out_of_band() -> None:
         ),
         (
             "server disabled",
-            lambda request: definition(
-                tenant_id=request.tenant_id, server_enabled=False
-            ),
+            lambda request: definition(tenant_id=request.tenant_id, server_enabled=False),
             context(),
             "server_disabled",
         ),
@@ -333,9 +335,7 @@ async def test_dangerous_tools_require_approval_before_credentials_or_execution(
 @pytest.mark.asyncio
 async def test_approved_dangerous_tool_is_executed() -> None:
     request = invocation(tool_name="crm.delete")
-    tool = definition(
-        tenant_id=request.tenant_id, name="crm.delete", risk=ToolRisk.DESTRUCTIVE
-    )
+    tool = definition(tenant_id=request.tenant_id, name="crm.delete", risk=ToolRisk.DESTRUCTIVE)
     executor = RecordingExecutor()
     audit = RecordingAuditSink()
     gateway = ToolGateway(
@@ -352,14 +352,32 @@ async def test_approved_dangerous_tool_is_executed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejected_started_claim_never_reaches_external_executor() -> None:
+    request = invocation()
+    executor = RecordingExecutor()
+    gateway = ToolGateway(
+        executor=executor,
+        definition_resolver=RecordingDefinitionResolver(definition(tenant_id=request.tenant_id)),
+        credential_resolver=RecordingCredentialResolver(),
+        audit_sink=ClaimRejectingAuditSink(),
+    )
+
+    outcome = await gateway.invoke(request, context())
+
+    assert outcome == ToolInvocationOutcome(
+        decision=PolicyDecision.DENY,
+        reason="run_execution_not_allowed",
+    )
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
 async def test_executor_secret_is_not_exposed_by_error_or_audit_event() -> None:
     request = invocation()
     audit = RecordingAuditSink()
     gateway = ToolGateway(
         executor=SecretLeakingExecutor(),
-        definition_resolver=RecordingDefinitionResolver(
-            definition(tenant_id=request.tenant_id)
-        ),
+        definition_resolver=RecordingDefinitionResolver(definition(tenant_id=request.tenant_id)),
         credential_resolver=RecordingCredentialResolver(
             credentials={"token": "credential-must-remain-secret"}
         ),

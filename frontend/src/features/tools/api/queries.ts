@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createMcpServer,
@@ -53,6 +54,7 @@ export function useCreateMcpServer() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'mcp-servers', 'create'),
     mutationFn: (payload: McpServerCreate) => createMcpServer(tenantId!, payload),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: toolKeys.servers(tenantId!) }),
   })
@@ -62,6 +64,7 @@ export function useSetMcpServerEnabled() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'mcp-servers', 'set-enabled'),
     mutationFn: ({ serverId, enabled }: { serverId: string; enabled: boolean }) =>
       setMcpServerEnabled(tenantId!, serverId, enabled),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: toolKeys.servers(tenantId!) }),
@@ -72,6 +75,7 @@ export function useCreateTool() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'tools', 'create'),
     mutationFn: (payload: ToolCreate) => createTool(tenantId!, payload),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: toolKeys.tools(tenantId!) }),
   })
@@ -81,6 +85,7 @@ export function useSetToolEnabled() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'tools', 'set-enabled'),
     mutationFn: ({ toolId, enabled }: { toolId: string; enabled: boolean }) =>
       setToolEnabled(tenantId!, toolId, enabled),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: toolKeys.tools(tenantId!) }),

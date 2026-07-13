@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   addSkillVersion,
@@ -64,6 +65,7 @@ export function useCreateSkill() {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'skills', 'create'),
     mutationFn: (file: File) => createSkill(tenantId!, file),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: skillKeys.all(tenantId!) }),
   })
@@ -73,6 +75,7 @@ export function useAddSkillVersion(skillId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'skills', 'add-version', skillId),
     mutationFn: (file: File) => addSkillVersion(tenantId!, skillId, file),
     onSuccess: async () => {
       await Promise.all([
@@ -88,6 +91,7 @@ export function usePublishSkillVersion(skillId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'skills', 'publish-version', skillId),
     mutationFn: (version: number) => publishSkillVersion(tenantId!, skillId, version),
     onSuccess: async (skill) => {
       queryClient.setQueryData(skillKeys.detail(tenantId!, skillId), skill)

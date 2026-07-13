@@ -1,5 +1,7 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -23,11 +25,11 @@ from agent_platform.runtimes.base import (
     RuntimeStartRequest,
     RuntimeState,
 )
-from agent_platform.runtimes.tool_gateway_adapter import OneTimeToolApprovalStore
-from agent_platform.workers.runtime_recovery import (
+from agent_platform.runtimes.recovery import (
     RuntimeControlMismatch,
     RuntimeRecoveryUnavailable,
 )
+from agent_platform.runtimes.tool_gateway_adapter import OneTimeToolApprovalStore
 
 
 class RuntimeRunNotFound(Exception):
@@ -36,6 +38,10 @@ class RuntimeRunNotFound(Exception):
 
 class RuntimeOperationNotSupported(Exception):
     """当前自主员工没有可处理的对应操作。"""
+
+
+class _RuntimeExecutionCancelled(Exception):
+    """Internal signal translating a platform cancellation into runtime state."""
 
 
 class InvalidDeepAgentBackend(TypeError):
@@ -134,8 +140,13 @@ class DeepAgentRuntime:
         self._approval_store = approval_store
         self._tool_ids_by_name = dict(tool_ids_by_name or {})
         self._pending_approvals: dict[UUID, PendingToolApproval] = {}
+        self._active_tasks: dict[UUID, asyncio.Task[Mapping[str, object]]] = {}
+        self._cancel_requested: set[UUID] = set()
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+        existing = self._active_tasks.get(request.run_id)
+        if existing is not None and not existing.done():
+            raise RuntimeOperationNotSupported
         self._requests[request.run_id] = request
         self._history[request.run_id] = []
         self._append_event(
@@ -148,6 +159,8 @@ class DeepAgentRuntime:
             graph = self._agent_factory(request)
             self._graphs[request.run_id] = graph
             result = await self._invoke_result(graph, request, request.input_data)
+            if request.run_id in self._cancel_requested:
+                return self._mark_cancelled(request)
             approval = None
             if result.get("__interrupt__"):
                 snapshot = await graph.aget_state(self._config(request))
@@ -170,6 +183,8 @@ class DeepAgentRuntime:
                 self._states[request.run_id] = state
                 return state
             output = self._output(result)
+        except _RuntimeExecutionCancelled:
+            return self._mark_cancelled(request)
         except Exception as error:
             self._append_event(
                 request,
@@ -287,10 +302,33 @@ class DeepAgentRuntime:
                     }
                 ]
             }
-        return await graph.ainvoke(
-            graph_input,
-            self._config(request),
+        existing = self._active_tasks.get(request.run_id)
+        if existing is not None and not existing.done():
+            raise RuntimeOperationNotSupported
+        task = asyncio.create_task(
+            graph.ainvoke(
+                graph_input,
+                self._config(request),
+            )
         )
+        self._active_tasks[request.run_id] = task
+        try:
+            result = await task
+            if request.run_id in self._cancel_requested:
+                raise _RuntimeExecutionCancelled
+            return result
+        except asyncio.CancelledError:
+            if request.run_id in self._cancel_requested:
+                raise _RuntimeExecutionCancelled from None
+            raise
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            if self._active_tasks.get(request.run_id) is task:
+                self._active_tasks.pop(request.run_id, None)
+            self._cancel_requested.discard(request.run_id)
 
     @staticmethod
     def _output(result: Mapping[str, object]) -> str:
@@ -324,11 +362,15 @@ class DeepAgentRuntime:
 
     async def send_message(self, run_id: UUID, message: str) -> None:
         request = self._required_request(run_id)
-        output = await self._invoke(
-            self._graphs[run_id],
-            request,
-            {"message": message},
-        )
+        try:
+            output = await self._invoke(
+                self._graphs[run_id],
+                request,
+                {"message": message},
+            )
+        except _RuntimeExecutionCancelled:
+            self._mark_cancelled(request)
+            return
         self._append_event(request, EventType.MESSAGE_OUTPUT, {"content": output})
         self._states[run_id] = RuntimeState(
             run_id=run_id,
@@ -354,11 +396,15 @@ class DeepAgentRuntime:
             )
         request = self._required_request(run_id)
         try:
-            result = await self._invoke_result(
-                self._graphs[run_id],
-                request,
-                Command(resume={"decisions": [{"type": "approve"}]}),
-            )
+            try:
+                result = await self._invoke_result(
+                    self._graphs[run_id],
+                    request,
+                    Command(resume={"decisions": [{"type": "approve"}]}),
+                )
+            except _RuntimeExecutionCancelled:
+                self._mark_cancelled(request)
+                return
         finally:
             if self._approval_store is not None:
                 self._approval_store.revoke(
@@ -407,21 +453,25 @@ class DeepAgentRuntime:
         if expected is None or expected.approval_id != approval_id:
             raise RuntimeControlMismatch
         request = self._required_request(run_id)
-        await self._invoke_result(
-            self._graphs[run_id],
-            request,
-            Command(
-                resume={
-                    "decisions": [
-                        {
-                            "type": "reject",
-                            "message": reason or "operator rejected",
-                        }
-                    ]
-                },
-                update={PLATFORM_TERMINAL_STATUS_KEY: "cancelled"},
-            ),
-        )
+        try:
+            await self._invoke_result(
+                self._graphs[run_id],
+                request,
+                Command(
+                    resume={
+                        "decisions": [
+                            {
+                                "type": "reject",
+                                "message": reason or "operator rejected",
+                            }
+                        ]
+                    },
+                    update={PLATFORM_TERMINAL_STATUS_KEY: "cancelled"},
+                ),
+            )
+        except _RuntimeExecutionCancelled:
+            self._mark_cancelled(request)
+            return
         self._pending_approvals.pop(run_id, None)
         self._append_event(request, EventType.RUN_CANCELLED, {"status": "cancelled"})
         self._states[run_id] = RuntimeState(
@@ -436,12 +486,33 @@ class DeepAgentRuntime:
 
     async def cancel(self, run_id: UUID) -> None:
         request = self._required_request(run_id)
-        self._append_event(request, EventType.RUN_CANCELLED, {"status": "cancelled"})
-        self._states[run_id] = RuntimeState(
-            run_id=run_id,
+        self._cancel_requested.add(run_id)
+        task = self._active_tasks.get(run_id)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        self._mark_cancelled(request)
+        if task is None:
+            self._cancel_requested.discard(run_id)
+
+    def _mark_cancelled(self, request: RuntimeStartRequest) -> RuntimeState:
+        history = self._required_history(request.run_id)
+        if not any(event.type is EventType.RUN_CANCELLED for event in history):
+            self._append_event(
+                request,
+                EventType.RUN_CANCELLED,
+                {"status": "cancelled"},
+            )
+        self._pending_approvals.pop(request.run_id, None)
+        state = RuntimeState(
+            run_id=request.run_id,
             status=RunStatus.CANCELLED,
             data={},
         )
+        self._states[request.run_id] = state
+        return state
 
     async def get_state(self, run_id: UUID) -> RuntimeState:
         try:

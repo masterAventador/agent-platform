@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -90,5 +90,37 @@ describe('RunDetailPage tenant-scoped event stream', () => {
 
     view.unmount()
     expect(EventSourceStub.instances[1]?.close).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    {
+      name: 'control response',
+      control: {
+        mutate: vi.fn(),
+        isPending: false,
+        isSuccess: true,
+        variables: { action: 'cancel' },
+      },
+      events: [],
+    },
+    {
+      name: 'persisted event',
+      control: { mutate: vi.fn(), isPending: false, isSuccess: false },
+      events: [{
+        event_id: 'event-1',
+        type: 'run.progress',
+        sequence: 2,
+        payload: { action: 'cancel_requested' },
+      }],
+    },
+  ])('shows a non-terminal cancellation intent from $name', ({ control, events }) => {
+    vi.mocked(useControlRun).mockReturnValue(control as never)
+    vi.mocked(useRunEvents).mockReturnValue({ data: events, isPending: false } as never)
+
+    renderPage()
+
+    expect(screen.getByRole('button', { name: '取消处理中' })).toBeDisabled()
+    expect(screen.getByText('执行中', { exact: true })).toBeInTheDocument()
+    expect(screen.queryByText('已取消', { exact: true })).not.toBeInTheDocument()
   })
 })

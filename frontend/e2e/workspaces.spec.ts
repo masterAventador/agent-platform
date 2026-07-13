@@ -70,3 +70,62 @@ test('owner 创建员工时只能选择已接通的真实配置', async ({ page 
   await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).toBeDisabled()
   await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).not.toBeChecked()
 })
+
+test('工作区写请求进行中阻止切换，结算后允许重试', async ({ page }) => {
+  const email = await registerAndLogin(page)
+  const fixture = prepareWorkspaceFixture(email)
+  await page.reload()
+
+  let releaseWriteRequest = () => {}
+  let markWriteRequestStarted = () => {}
+  const writeRequestStarted = new Promise<void>((resolve) => {
+    markWriteRequestStarted = resolve
+  })
+  const writeRequestRelease = new Promise<void>((resolve) => {
+    releaseWriteRequest = resolve
+  })
+  let delayedWrite = false
+  await page.route(`**/api/v1/employees/${fixture.owner_employee_id}`, async (route) => {
+    if (route.request().method() !== 'PUT' || delayedWrite) {
+      await route.continue()
+      return
+    }
+    delayedWrite = true
+    markWriteRequestStarted()
+    await writeRequestRelease
+    await route.continue()
+  })
+
+  try {
+    await page.goto(`/employees/${fixture.owner_employee_id}/edit`)
+    await expect(page.getByRole('textbox', { name: '员工名称' }))
+      .toHaveValue(fixture.owner_employee_name)
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    await writeRequestStarted
+
+    await selectWorkspace(page, fixture.member_workspace_name)
+    await expect(page.getByText(
+      '当前工作区仍有操作正在提交，请等待完成后再切换。',
+      { exact: true },
+    )).toBeVisible()
+    await expect(page.getByLabel('当前工作区').locator('..')).toContainText(
+      fixture.owner_workspace_name,
+    )
+    await expect(page).toHaveURL(new RegExp(`/employees/${fixture.owner_employee_id}/edit$`))
+
+    releaseWriteRequest()
+    await expect(page).toHaveURL(new RegExp(`/employees/${fixture.owner_employee_id}$`))
+
+    await selectWorkspace(page, fixture.member_workspace_name)
+    await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible()
+    await expect(page.getByLabel('当前工作区').locator('..')).toContainText(
+      fixture.member_workspace_name,
+    )
+    await expect(page.getByText(
+      '当前工作区仍有操作正在提交，请等待完成后再切换。',
+      { exact: true },
+    )).toHaveCount(0)
+  } finally {
+    releaseWriteRequest()
+  }
+})

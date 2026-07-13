@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -12,6 +13,13 @@ from agent_platform.infrastructure.database.repositories.audit import (
     ToolAuditPersistenceError,
     ToolAuditRecord,
 )
+from agent_platform.infrastructure.database.repositories.runs import (
+    SqlAlchemyRunCommandRepository,
+    SqlAlchemyRunRepository,
+)
+from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
+from agent_platform.platform.runs.entities import Run
+from agent_platform.platform.tool_gateway.errors import ToolInvocationClaimRejected
 from agent_platform.platform.tool_gateway.models import (
     ArgumentSummary,
     AuditEventType,
@@ -92,6 +100,48 @@ async def test_each_emit_commits_without_an_external_session_commit() -> None:
     async with session_factory() as session:
         records = (await session.execute(select(ToolAuditRecord))).scalars().all()
     assert len(records) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_started_audit_atomically_rejects_a_preceding_cancel_intent() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    async with session_factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyRunCommandRepository(session).add(cancel)
+        await session.commit()
+    started = replace(
+        _event(),
+        event_type=AuditEventType.STARTED,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        employee_id=run.employee_id,
+        user_id=run.created_by,
+        invocation_id=uuid4(),
+    )
+
+    with pytest.raises(ToolInvocationClaimRejected):
+        await SqlAlchemyToolAuditSink(session_factory).emit(started)
+
+    async with session_factory() as session:
+        records = (await session.execute(select(ToolAuditRecord))).scalars().all()
+    assert records == []
     await engine.dispose()
 
 

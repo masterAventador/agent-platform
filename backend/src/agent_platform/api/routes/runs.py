@@ -24,7 +24,6 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
-from agent_platform.platform.runs.errors import InvalidRunTransition
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
@@ -205,7 +204,11 @@ async def list_run_events(
         )
 
 
-@router.post("/runs/{run_id}/control", response_model=RunResponse)
+@router.post(
+    "/runs/{run_id}/control",
+    response_model=RunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def control_run(
     run_id: UUID,
     payload: ControlRunRequest,
@@ -232,6 +235,11 @@ async def control_run(
         if payload.reason is not None:
             command_payload["reason"] = payload.reason
         commands = SqlAlchemyRunCommandRepository(database_session)
+        if payload.action == "cancel" and (
+            await commands.unprocessed_cancel_commands(run_id=run.id)
+        ):
+            await database_session.commit()
+            return RunResponse.from_entity(updated)
         await runs.update(updated)
         await commands.add(
             RunCommand.create(
@@ -248,12 +256,15 @@ async def control_run(
                 employee_id=run.employee_id,
                 run_id=run.id,
                 sequence=await events.next_sequence(run_id=run.id),
-                event_type=(
-                    EventType.RUN_CANCELLED
-                    if payload.action in {"cancel", "reject"}
-                    else EventType.RUN_PROGRESS
-                ),
-                payload={"action": payload.action, **command_payload},
+                event_type=EventType.RUN_PROGRESS,
+                payload={
+                    "action": (
+                        f"{payload.action}_requested"
+                        if payload.action in {"cancel", "reject"}
+                        else payload.action
+                    ),
+                    **command_payload,
+                },
             )
         )
         await database_session.commit()
@@ -281,14 +292,18 @@ def _apply_control_request(run: Run, payload: ControlRunRequest) -> Run:
                 "message": f"{run.status.value} 不接受 {payload.action}",
             },
         )
-    if payload.action in {"cancel", "reject"}:
-        try:
-            return run.transition_to(RunStatus.CANCELLED)
-        except InvalidRunTransition as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "invalid_run_transition", "message": str(error)},
-            ) from error
+    if payload.action == "cancel" and run.status in {
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "invalid_run_transition",
+                "message": f"{run.status.value} 不接受 cancel",
+            },
+        )
     return run
 
 

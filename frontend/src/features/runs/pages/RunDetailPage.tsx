@@ -44,6 +44,10 @@ export function RunDetailPage() {
   const data = run.data
   const status = runStatusLabels[data.status]
   const cancellable = !terminalStatuses.has(data.status)
+  const cancelRequested = cancellable && (
+    (control.variables?.action === 'cancel' && (control.isPending || control.isSuccess))
+    || (events.data ?? []).some((event) => event.payload.action === 'cancel_requested')
+  )
   const approvalId = [...(events.data ?? [])]
     .reverse()
     .find((event) => event.type === 'approval.required')?.payload.approval_id
@@ -87,9 +91,10 @@ export function RunDetailPage() {
             <Button
               danger
               loading={control.isPending}
+              disabled={cancelRequested}
               onClick={() => control.mutate({ action: 'cancel' })}
             >
-              取消任务
+              {cancelRequested ? '取消处理中' : '取消任务'}
             </Button>
           )}
         </Space>

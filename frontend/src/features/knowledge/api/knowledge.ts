@@ -1,4 +1,5 @@
 import { apiClient } from '../../../api/client'
+import { tenantRequestConfig } from '../../../api/tenant'
 
 
 export interface KnowledgeBase {
@@ -27,17 +28,15 @@ export interface KnowledgeCitation {
   metadata: Record<string, unknown>
 }
 
-const headers = (tenantId: string) => ({ 'X-Tenant-ID': tenantId })
-
 export async function listKnowledgeBases(tenantId: string): Promise<KnowledgeBase[]> {
-  return (await apiClient.get('/knowledge-bases', { headers: headers(tenantId) })).data
+  return (await apiClient.get('/knowledge-bases', tenantRequestConfig(tenantId))).data
 }
 
 export async function createKnowledgeBase(
   tenantId: string,
   values: { name: string; description: string },
 ): Promise<KnowledgeBase> {
-  return (await apiClient.post('/knowledge-bases', values, { headers: headers(tenantId) })).data
+  return (await apiClient.post('/knowledge-bases', values, tenantRequestConfig(tenantId))).data
 }
 
 export async function listDocuments(
@@ -46,7 +45,7 @@ export async function listDocuments(
 ): Promise<KnowledgeDocument[]> {
   return (
     await apiClient.get(`/knowledge-bases/${knowledgeBaseId}/documents`, {
-      headers: headers(tenantId),
+      ...tenantRequestConfig(tenantId),
     })
   ).data
 }
@@ -60,7 +59,7 @@ export async function uploadDocument(
   body.append('file', file)
   return (
     await apiClient.post(`/knowledge-bases/${knowledgeBaseId}/documents`, body, {
-      headers: headers(tenantId),
+      ...tenantRequestConfig(tenantId),
     })
   ).data
 }
@@ -74,7 +73,7 @@ export async function retrieve(
     await apiClient.post(
       `/knowledge-bases/${knowledgeBaseId}/retrieve`,
       { question },
-      { headers: headers(tenantId) },
+      tenantRequestConfig(tenantId),
     )
   ).data
 }

@@ -1,6 +1,8 @@
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import suppress
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from langgraph.types import Command, StateSnapshot
 from pydantic import JsonValue, TypeAdapter
@@ -13,7 +15,7 @@ from agent_platform.runtimes.base import (
     RuntimeStartRequest,
     RuntimeState,
 )
-from agent_platform.workers.runtime_recovery import (
+from agent_platform.runtimes.recovery import (
     RuntimeControlMismatch,
     RuntimeRecoveryUnavailable,
 )
@@ -51,8 +53,13 @@ class LangGraphRuntime:
         self._states: dict[UUID, RuntimeState] = {}
         self._history: dict[UUID, list[PlatformEvent]] = {}
         self._pending_interrupts: dict[UUID, tuple[str, UUID | None]] = {}
+        self._active_tasks: dict[UUID, asyncio.Task[RuntimeState]] = {}
+        self._cancel_requested: set[UUID] = set()
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+        existing = self._active_tasks.get(request.run_id)
+        if existing is not None and not existing.done():
+            raise RuntimeOperationNotSupported
         self._requests[request.run_id] = request
         self._history[request.run_id] = []
         self._append_event(
@@ -63,7 +70,11 @@ class LangGraphRuntime:
         try:
             graph = self._graph_factory(request)
             self._graphs[request.run_id] = graph
-            return await self._drive(graph, request, {"input": request.input_data})
+            return await self._run_drive(graph, request, {"input": request.input_data})
+        except asyncio.CancelledError:
+            if request.run_id in self._cancel_requested:
+                return self._mark_cancelled(request)
+            raise
         except Exception as error:
             self._append_event(
                 request,
@@ -103,10 +114,9 @@ class LangGraphRuntime:
             output: JsonValue = TypeAdapter(JsonValue).validate_python(
                 snapshot.values.get("output")
             )
-            if (
-                (snapshot.metadata or {}).get(PLATFORM_TERMINAL_STATUS_KEY)
-                == RunStatus.CANCELLED.value
-            ):
+            if (snapshot.metadata or {}).get(
+                PLATFORM_TERMINAL_STATUS_KEY
+            ) == RunStatus.CANCELLED.value:
                 self._append_event(
                     request,
                     EventType.RUN_CANCELLED,
@@ -139,7 +149,11 @@ class LangGraphRuntime:
             return state
         if not interrupts:
             raise RuntimeRecoveryUnavailable
-        pending = self._pending_interrupt(interrupts, status=status)
+        pending = self._pending_interrupt(
+            interrupts,
+            run_id=request.run_id,
+            status=status,
+        )
         self._pending_interrupts[request.run_id] = pending
         if status is RunStatus.WAITING_FOR_APPROVAL:
             approval_id = pending[1]
@@ -207,12 +221,33 @@ class LangGraphRuntime:
 
     async def cancel(self, run_id: UUID) -> None:
         request = self._required_request(run_id)
-        self._append_event(request, EventType.RUN_CANCELLED, {"status": "cancelled"})
-        self._states[run_id] = RuntimeState(
-            run_id=run_id,
+        self._cancel_requested.add(run_id)
+        task = self._active_tasks.get(run_id)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        self._mark_cancelled(request)
+        if task is None:
+            self._cancel_requested.discard(run_id)
+
+    def _mark_cancelled(self, request: RuntimeStartRequest) -> RuntimeState:
+        history = self._required_history(request.run_id)
+        if not any(event.type is EventType.RUN_CANCELLED for event in history):
+            self._append_event(
+                request,
+                EventType.RUN_CANCELLED,
+                {"status": "cancelled"},
+            )
+        self._pending_interrupts.pop(request.run_id, None)
+        state = RuntimeState(
+            run_id=request.run_id,
             status=RunStatus.CANCELLED,
             data={},
         )
+        self._states[request.run_id] = state
+        return state
 
     async def get_state(self, run_id: UUID) -> RuntimeState:
         try:
@@ -254,12 +289,49 @@ class LangGraphRuntime:
     ) -> None:
         request = self._required_request(run_id)
         graph = self._graphs[run_id]
-        await self._drive(
+        await self._run_drive(
             graph,
             request,
             Command(resume=value),
             completion_status=completion_status,
         )
+
+    async def _run_drive(
+        self,
+        graph: LangGraphAgentGraph,
+        request: RuntimeStartRequest,
+        input_data: dict[str, object] | Command[Any],
+        completion_status: RunStatus = RunStatus.COMPLETED,
+    ) -> RuntimeState:
+        existing = self._active_tasks.get(request.run_id)
+        if existing is not None and not existing.done():
+            raise RuntimeOperationNotSupported
+        task = asyncio.create_task(
+            self._drive(
+                graph,
+                request,
+                input_data,
+                completion_status=completion_status,
+            )
+        )
+        self._active_tasks[request.run_id] = task
+        try:
+            state = await task
+            if request.run_id in self._cancel_requested:
+                return self._mark_cancelled(request)
+            return state
+        except asyncio.CancelledError:
+            if request.run_id in self._cancel_requested:
+                return self._mark_cancelled(request)
+            raise
+        finally:
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            if self._active_tasks.get(request.run_id) is task:
+                self._active_tasks.pop(request.run_id, None)
+            self._cancel_requested.discard(request.run_id)
 
     async def _drive(
         self,
@@ -296,10 +368,14 @@ class LangGraphRuntime:
             interrupts = self._interrupt_values(snapshot)
             waiting_status = (
                 RunStatus.WAITING_FOR_APPROVAL
-                if any(value.get("kind") == "approval" for value in interrupts)
+                if any(value.get("kind") == "approval" for _, value in interrupts)
                 else RunStatus.WAITING_FOR_INPUT
             )
-            pending = self._pending_interrupt(interrupts, status=waiting_status)
+            pending = self._pending_interrupt(
+                interrupts,
+                run_id=request.run_id,
+                status=waiting_status,
+            )
             self._pending_interrupts[request.run_id] = pending
             if waiting_status is RunStatus.WAITING_FOR_APPROVAL:
                 approval_id = pending[1]
@@ -316,6 +392,8 @@ class LangGraphRuntime:
             self._states[request.run_id] = state
             return state
         self._pending_interrupts.pop(request.run_id, None)
+        if request.run_id in self._cancel_requested:
+            return self._mark_cancelled(request)
         if completion_status is RunStatus.CANCELLED:
             self._append_event(request, EventType.RUN_CANCELLED, {"status": "cancelled"})
             state = RuntimeState(
@@ -345,36 +423,44 @@ class LangGraphRuntime:
         return {"configurable": {"thread_id": request.thread_id}}
 
     @staticmethod
-    def _interrupt_values(snapshot: StateSnapshot) -> list[dict[str, JsonValue]]:
-        values: list[dict[str, JsonValue]] = []
+    def _interrupt_values(
+        snapshot: StateSnapshot,
+    ) -> list[tuple[str, dict[str, JsonValue]]]:
+        values: list[tuple[str, dict[str, JsonValue]]] = []
         for task in snapshot.tasks:
             for item in task.interrupts:
                 if isinstance(item.value, Mapping):
                     values.append(
-                        TypeAdapter(dict[str, JsonValue]).validate_python(item.value)
+                        (
+                            str(item.id),
+                            TypeAdapter(dict[str, JsonValue]).validate_python(item.value),
+                        )
                     )
         return values
 
     @staticmethod
     def _pending_interrupt(
-        interrupts: list[dict[str, JsonValue]],
+        interrupts: list[tuple[str, dict[str, JsonValue]]],
         *,
+        run_id: UUID,
         status: RunStatus,
     ) -> tuple[str, UUID | None]:
         if len(interrupts) != 1:
             raise RuntimeRecoveryUnavailable
+        occurrence_id, value = interrupts[0]
         if status is RunStatus.WAITING_FOR_APPROVAL:
-            for value in interrupts:
-                if value.get("kind") == "approval":
-                    try:
-                        return "approval", TypeAdapter(UUID).validate_python(
-                            value.get("approval_id")
-                        )
-                    except ValueError:
-                        raise RuntimeRecoveryUnavailable from None
+            if value.get("kind") == "approval":
+                try:
+                    TypeAdapter(UUID).validate_python(value.get("approval_id"))
+                except ValueError:
+                    raise RuntimeRecoveryUnavailable from None
+                return "approval", uuid5(
+                    NAMESPACE_URL,
+                    f"agent-platform:{run_id}:{occurrence_id}",
+                )
             raise RuntimeRecoveryUnavailable
         if status is RunStatus.WAITING_FOR_INPUT:
-            if any(value.get("kind") == "input" for value in interrupts):
+            if value.get("kind") == "input":
                 return "input", None
             raise RuntimeRecoveryUnavailable
         raise RuntimeRecoveryUnavailable

@@ -2,8 +2,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from pydantic import JsonValue, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+)
 
+from agent_platform.platform.knowledge.errors import (
+    InvalidKnowledgeProviderResponse,
+    KnowledgeProviderUnavailable,
+)
 from agent_platform.platform.knowledge.models import (
     KnowledgeCitation,
     KnowledgeDataset,
@@ -12,11 +24,76 @@ from agent_platform.platform.knowledge.models import (
 )
 
 
-class RagFlowError(Exception):
-    """RAGFlow 官方 API 调用失败。"""
+class _RagFlowEnvelope(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    code: int
+    data: Any = None
+
+
+class _RagFlowDatasetPayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    document_count: int = Field(default=0, ge=0)
+    chunk_count: int = Field(default=0, ge=0)
+
+
+class _RagFlowDocumentPayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    run: str = Field(min_length=1)
+    size: int = Field(default=0, ge=0)
+    chunk_count: int = Field(default=0, ge=0)
+
+
+class _RagFlowDocumentListPayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    docs: list[_RagFlowDocumentPayload]
+
+
+class _RagFlowCitationPayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    id: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
+    document_name: str = Field(min_length=1)
+    dataset_id: str = Field(min_length=1)
+    content: str
+    similarity: FiniteFloat
+    document_metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class _RagFlowRetrievalPayload(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    total: int = Field(ge=0)
+    chunks: list[_RagFlowCitationPayload]
+
+
+_ENVELOPE_ADAPTER = TypeAdapter(_RagFlowEnvelope)
+_DATASET_ADAPTER = TypeAdapter(_RagFlowDatasetPayload)
+_DOCUMENTS_ADAPTER = TypeAdapter(list[_RagFlowDocumentPayload])
+_DOCUMENT_LIST_ADAPTER = TypeAdapter(_RagFlowDocumentListPayload)
+_RETRIEVAL_ADAPTER = TypeAdapter(_RagFlowRetrievalPayload)
+
+
+def _validate_response[T](adapter: TypeAdapter[T], data: Any, message: str) -> T:
+    try:
+        return adapter.validate_python(data, strict=True)
+    except ValidationError as error:
+        raise InvalidKnowledgeProviderResponse(message) from error
+    except (OverflowError, TypeError, ValueError) as error:
+        raise InvalidKnowledgeProviderResponse(message) from error
 
 
 class RagFlowClient:
+    provider_name = "ragflow"
+
     def __init__(
         self,
         *,
@@ -67,9 +144,14 @@ class RagFlowClient:
             f"/api/v1/datasets/{dataset_id}/documents",
             files={"file": (Path(filename).name, content, content_type)},
         )
-        if not isinstance(data, list) or not data:
-            raise RagFlowError("RAGFlow 未返回上传文档")
-        return self._document(data[0])
+        documents = _validate_response(
+            _DOCUMENTS_ADAPTER,
+            data,
+            "知识供应商文档响应格式错误",
+        )
+        if not documents:
+            raise InvalidKnowledgeProviderResponse("知识供应商未返回上传文档")
+        return self._document(documents[0])
 
     async def start_parsing(self, *, dataset_id: str, document_ids: list[str]) -> None:
         await self._request(
@@ -84,8 +166,12 @@ class RagFlowClient:
             f"/api/v1/datasets/{dataset_id}/documents",
             params={"page": 1, "page_size": 100, "orderby": "create_time", "desc": "true"},
         )
-        records = data.get("docs", []) if isinstance(data, dict) else []
-        return [self._document(record) for record in records]
+        payload = _validate_response(
+            _DOCUMENT_LIST_ADAPTER,
+            data,
+            "知识供应商文档列表响应格式错误",
+        )
+        return [self._document(record) for record in payload.docs]
 
     async def retrieve(
         self,
@@ -104,12 +190,14 @@ class RagFlowClient:
         if metadata_condition is not None:
             payload["metadata_condition"] = metadata_condition
         data = await self._request("POST", "/api/v1/retrieval", json=payload)
-        if not isinstance(data, dict):
-            raise RagFlowError("RAGFlow 检索响应格式错误")
-        chunks = data.get("chunks", [])
+        response = _validate_response(
+            _RETRIEVAL_ADAPTER,
+            data,
+            "知识供应商检索响应格式错误",
+        )
         return KnowledgeSearchResult(
-            total=int(data.get("total", len(chunks))),
-            citations=[self._citation(chunk) for chunk in chunks],
+            total=response.total,
+            citations=[self._citation(chunk) for chunk in response.chunks],
         )
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -117,53 +205,52 @@ class RagFlowClient:
             response = await self._client.request(method, path, headers=self._headers, **kwargs)
             response.raise_for_status()
         except httpx.HTTPError as error:
-            raise RagFlowError("RAGFlow 服务暂时不可用") from error
-        envelope = response.json()
-        if not isinstance(envelope, dict) or envelope.get("code") != 0:
-            message = (
-                envelope.get("message", "未知错误")
-                if isinstance(envelope, dict)
-                else "响应格式错误"
-            )
-            raise RagFlowError(str(message))
-        return envelope.get("data")
+            raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
+        try:
+            envelope = response.json()
+        except (OverflowError, ValueError) as error:
+            raise InvalidKnowledgeProviderResponse("知识供应商返回了畸形 JSON") from error
+        validated = _validate_response(
+            _ENVELOPE_ADAPTER,
+            envelope,
+            "知识供应商响应信封格式错误",
+        )
+        if validated.code != 0:
+            raise KnowledgeProviderUnavailable("知识供应商拒绝了请求")
+        return validated.data
 
     @staticmethod
     def _dataset(data: Any) -> KnowledgeDataset:
-        if not isinstance(data, dict):
-            raise RagFlowError("RAGFlow 数据集响应格式错误")
+        payload = _validate_response(
+            _DATASET_ADAPTER,
+            data,
+            "知识供应商数据集响应格式错误",
+        )
         return KnowledgeDataset(
-            provider_id=str(data["id"]),
-            name=str(data["name"]),
-            document_count=int(data.get("document_count", 0)),
-            chunk_count=int(data.get("chunk_count", 0)),
+            provider_id=payload.id,
+            name=payload.name,
+            document_count=payload.document_count,
+            chunk_count=payload.chunk_count,
         )
 
     @staticmethod
-    def _document(data: Any) -> KnowledgeDocument:
-        if not isinstance(data, dict):
-            raise RagFlowError("RAGFlow 文档响应格式错误")
+    def _document(data: _RagFlowDocumentPayload) -> KnowledgeDocument:
         return KnowledgeDocument(
-            provider_id=str(data["id"]),
-            name=str(data["name"]),
-            status=str(data.get("run", "UNSTART")),
-            size_bytes=int(data.get("size", 0)),
-            chunk_count=int(data.get("chunk_count", 0)),
+            provider_id=data.id,
+            name=data.name,
+            status=data.run,
+            size_bytes=data.size,
+            chunk_count=data.chunk_count,
         )
 
     @staticmethod
-    def _citation(data: Any) -> KnowledgeCitation:
-        if not isinstance(data, dict):
-            raise RagFlowError("RAGFlow 切片响应格式错误")
-        metadata = TypeAdapter(dict[str, JsonValue]).validate_python(
-            data.get("document_metadata", {})
-        )
+    def _citation(data: _RagFlowCitationPayload) -> KnowledgeCitation:
         return KnowledgeCitation(
-            chunk_id=str(data["id"]),
-            document_id=str(data["document_id"]),
-            document_name=str(data.get("document_name", "")),
-            dataset_id=str(data["dataset_id"]),
-            content=str(data.get("content", "")),
-            score=float(data.get("similarity", 0.0)),
-            metadata=metadata,
+            chunk_id=data.id,
+            document_id=data.document_id,
+            document_name=data.document_name,
+            dataset_id=data.dataset_id,
+            content=data.content,
+            score=data.similarity,
+            metadata=data.document_metadata,
         )

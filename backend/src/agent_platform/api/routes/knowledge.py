@@ -16,6 +16,7 @@ from agent_platform.platform.knowledge.models import (
     KnowledgeSearchResult,
 )
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
+from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["knowledge"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
@@ -60,8 +61,12 @@ def _not_found() -> HTTPException:
     )
 
 
-def _provider(request: Request) -> KnowledgeProvider:
-    return cast(KnowledgeProvider, request.app.state.knowledge_provider)
+def _providers(request: Request) -> KnowledgeProviderRegistry:
+    return cast(KnowledgeProviderRegistry, request.app.state.knowledge_provider_registry)
+
+
+def _provider_for(request: Request, knowledge_base: KnowledgeBase) -> KnowledgeProvider:
+    return _providers(request).resolve(knowledge_base.provider)
 
 
 def _provider_dataset_name(tenant_id: UUID, name: str) -> str:
@@ -89,7 +94,8 @@ async def create_knowledge_base(
         user, access = await resolve_workspace(
             request=request, database_session=session, tenant_id=tenant_id, owner_required=False
         )
-        dataset = await _provider(request).create_dataset(
+        provider = _providers(request).default_provider
+        dataset = await provider.create_dataset(
             name=_provider_dataset_name(access.tenant.id, payload.name),
             description=payload.description,
         )
@@ -97,6 +103,7 @@ async def create_knowledge_base(
             tenant_id=access.tenant.id,
             name=payload.name,
             description=payload.description,
+            provider=provider.provider_name,
             provider_id=dataset.provider_id,
             created_by=user.id,
         )
@@ -105,7 +112,7 @@ async def create_knowledge_base(
             await session.commit()
         except IntegrityError as error:
             await session.rollback()
-            await _provider(request).delete_dataset(dataset.provider_id)
+            await provider.delete_dataset(dataset.provider_id)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "knowledge_base_name_exists", "message": "知识库名称已存在"},
@@ -141,7 +148,8 @@ async def delete_knowledge_base(
         )
         if value is None:
             raise _not_found()
-        await _provider(request).delete_dataset(value.provider_id)
+        provider = _provider_for(request, value)
+        await provider.delete_dataset(value.provider_id)
         await repository.delete(value)
         await session.commit()
 
@@ -158,21 +166,20 @@ async def upload_document(
             request=request, database_session=session, tenant_id=tenant_id, owner_required=False
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    provider = _provider_for(request, value)
     content = await file.read(MAX_DOCUMENT_BYTES + 1)
     if len(content) > MAX_DOCUMENT_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail={"code": "document_too_large", "message": "文档不能超过 50 MB"},
         )
-    document = await _provider(request).upload_document(
+    document = await provider.upload_document(
         dataset_id=value.provider_id,
         filename=file.filename or "document",
         content=content,
         content_type=file.content_type or "application/octet-stream",
     )
-    await _provider(request).start_parsing(
-        dataset_id=value.provider_id, document_ids=[document.provider_id]
-    )
+    await provider.start_parsing(dataset_id=value.provider_id, document_ids=[document.provider_id])
     return document
 
 
@@ -187,7 +194,7 @@ async def list_documents(
             request=request, database_session=session, tenant_id=tenant_id, owner_required=False
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
-    return await _provider(request).list_documents(dataset_id=value.provider_id)
+    return await _provider_for(request, value).list_documents(dataset_id=value.provider_id)
 
 
 @router.post("/{knowledge_base_id}/retrieve", response_model=KnowledgeSearchResult)
@@ -202,7 +209,7 @@ async def retrieve(
             request=request, database_session=session, tenant_id=tenant_id, owner_required=False
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
-    return await _provider(request).retrieve(
+    return await _provider_for(request, value).retrieve(
         question=payload.question,
         dataset_ids=[value.provider_id],
         page_size=payload.limit,

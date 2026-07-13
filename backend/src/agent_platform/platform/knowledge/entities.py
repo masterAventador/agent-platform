@@ -21,6 +21,7 @@ class KnowledgeBase:
         tenant_id: UUID,
         name: str,
         description: str,
+        provider: str,
         provider_id: str,
         created_by: UUID,
     ) -> "KnowledgeBase":
@@ -29,7 +30,7 @@ class KnowledgeBase:
             tenant_id=tenant_id,
             name=name.strip(),
             description=description.strip(),
-            provider="ragflow",
+            provider=provider,
             provider_id=provider_id,
             created_by=created_by,
             created_at=datetime.now(UTC),

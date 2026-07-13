@@ -1,7 +1,10 @@
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, TypeVar
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue, TypeAdapter
@@ -34,6 +37,7 @@ from agent_platform.infrastructure.queue.redis_streams import (
     RedisRunQueue,
     RunQueueDelivery,
 )
+from agent_platform.platform.runs.commands import RunCommand
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.runtimes.base import (
@@ -42,15 +46,16 @@ from agent_platform.runtimes.base import (
     RuntimeStartRequest,
     RuntimeState,
 )
-from agent_platform.workers.runtime_composition import PermanentRuntimePreparationError
-from agent_platform.workers.runtime_recovery import (
+from agent_platform.runtimes.recovery import (
     ApprovalCheckpointRuntime,
     RecoverableEmployeeRuntime,
+    RuntimeControlMismatch,
     RuntimeInterrupted,
     RuntimeRecoveryTransient,
     RuntimeRecoveryUnavailable,
     ToolExecutionUncertain,
 )
+from agent_platform.workers.runtime_composition import PermanentRuntimePreparationError
 
 
 class RuntimeResolver(Protocol):
@@ -84,6 +89,7 @@ class WorkerFenced(RuntimeError):
 
 
 logger = logging.getLogger(__name__)
+RuntimeOperationResult = TypeVar("RuntimeOperationResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,10 +108,16 @@ class RunWorker:
         runtime_resolver: RuntimeResolver,
         consumer_name: str,
         runtime_lease_duration: timedelta = timedelta(seconds=30),
+        cancellation_poll_initial_seconds: float = 0.25,
+        cancellation_poll_max_seconds: float = 2.0,
         dead_letter_service: RunDeadLetterService | None = None,
     ) -> None:
         if runtime_lease_duration <= timedelta(0):
             raise ValueError("runtime_lease_duration must be positive")
+        if cancellation_poll_initial_seconds <= 0:
+            raise ValueError("cancellation_poll_initial_seconds must be positive")
+        if cancellation_poll_max_seconds < cancellation_poll_initial_seconds:
+            raise ValueError("cancellation_poll_max_seconds must be at least the initial delay")
         self._session_factory = session_factory
         self._queue = queue
         self._runtime_resolver = runtime_resolver
@@ -113,6 +125,8 @@ class RunWorker:
         self._owner_id = str(uuid4())
         self._fenced = False
         self._runtime_lease_duration = runtime_lease_duration
+        self._cancellation_poll_initial_seconds = cancellation_poll_initial_seconds
+        self._cancellation_poll_max_seconds = cancellation_poll_max_seconds
         self._dead_letters = dead_letter_service or RunDeadLetterService(
             session_factory=session_factory
         )
@@ -196,9 +210,7 @@ class RunWorker:
         after_run_id: UUID | None = None
         while True:
             async with self._session_factory() as session:
-                candidates = await SqlAlchemyRunRepository(
-                    session
-                ).list_recovery_candidates(
+                candidates = await SqlAlchemyRunRepository(session).list_recovery_candidates(
                     limit=limit,
                     after_updated_at=after_updated_at,
                     after_run_id=after_run_id,
@@ -235,21 +247,14 @@ class RunWorker:
                 error_code=RuntimeRecoveryUnavailable.code,
             )
             return 0
-        replay_invocation_id = await self._started_approval_invocation(run)
         try:
-            prepared = await self._recover_runtime(
-                run,
-                version.definition,
-                replay_invocation_id=replay_invocation_id,
-            )
+            prepared = await self._recover_runtime(run, version.definition)
         except RuntimeRecoveryUnavailable as error:
             await self._persist_orphaned_run_failure(
                 run,
                 error_code=error.code,
                 settle_approval_id=(
-                    error.approval_id
-                    if isinstance(error, ToolExecutionUncertain)
-                    else None
+                    error.approval_id if isinstance(error, ToolExecutionUncertain) else None
                 ),
             )
             await self._close_failed_recovery(run.id)
@@ -319,6 +324,7 @@ class RunWorker:
             return
         assert version is not None
 
+        cancellation_command_ids: tuple[UUID, ...] = ()
         pending_result = self._pending_results.get(run.id)
         if pending_result is not None:
             if pending_result.command_id != message.command_id:
@@ -333,6 +339,11 @@ class RunWorker:
                 else:
                     raise RuntimeAlreadyPrepared(run.id)
             await self._claim_ownership(run)
+            if await self._settle_pre_start_cancellation(
+                run=run,
+                start_command_id=message.command_id,
+            ):
+                return
             try:
                 prepared = await self._runtime_resolver.resolve(run, version.definition)
             except PermanentRuntimePreparationError as error:
@@ -364,8 +375,13 @@ class RunWorker:
                 await self._release_runtime(run.id)
                 return
             try:
-                state = await runtime.start(self._runtime_request(run, prepared))
+                state, cancellation_command_ids = await self._start_cancellable_runtime(
+                    run=run,
+                    runtime=runtime,
+                    request=self._runtime_request(run, prepared),
+                )
             except Exception as error:
+                cancellation_command_ids = ()
                 state = RuntimeState(
                     run_id=run.id,
                     status=RunStatus.FAILED,
@@ -395,6 +411,7 @@ class RunWorker:
             else:
                 history = None
         else:
+            cancellation_command_ids = ()
             if run.id not in self._prepared_runtimes:
                 if run.status is RunStatus.RUNNING:
                     await self._claim_ownership(run)
@@ -409,17 +426,8 @@ class RunWorker:
                     RunStatus.WAITING_FOR_APPROVAL,
                 }:
                     raise RuntimeNotPrepared(run.id)
-                replay_invocation_id = (
-                    UUID(str(message.payload["approval_id"]))
-                    if message.action == "approve"
-                    else None
-                )
                 try:
-                    prepared = await self._recover_runtime(
-                        run,
-                        version.definition,
-                        replay_invocation_id=replay_invocation_id,
-                    )
+                    prepared = await self._recover_runtime(run, version.definition)
                 except RuntimeRecoveryUnavailable as error:
                     await self._persist_preparation_failure(
                         run=run,
@@ -432,7 +440,22 @@ class RunWorker:
                 self._prepared_runtimes[run.id] = prepared
                 self._active_runs[run.id] = run
             runtime = self._required_runtime(run.id)
-            await self._invoke_control(runtime, delivery)
+            try:
+                if message.action == "cancel":
+                    await self._invoke_control(runtime, delivery)
+                else:
+                    _, cancellation_command_ids = await self._run_cancellable_runtime_operation(
+                        run_id=run.id,
+                        runtime=runtime,
+                        operation=lambda: self._invoke_control(runtime, delivery),
+                    )
+            except RuntimeControlMismatch:
+                await self._persist_control_mismatch(
+                    run=run,
+                    message_command_id=message.command_id,
+                    action=message.action,
+                )
+                return
             state = await runtime.get_state(run.id)
             history = None
 
@@ -453,6 +476,7 @@ class RunWorker:
                 message_command_id=message.command_id,
                 state=state,
                 history=history,
+                additional_command_ids=cancellation_command_ids,
             )
         except Exception:
             self._pending_results[run.id] = _PendingRuntimeResult(
@@ -472,6 +496,7 @@ class RunWorker:
         message_command_id: UUID,
         state: RuntimeState,
         history: list[PlatformEvent],
+        additional_command_ids: tuple[UUID, ...] = (),
     ) -> RunStatus:
         async with self._session_factory() as session:
             await self._assert_owned(session=session, run_id=run.id)
@@ -480,21 +505,47 @@ class RunWorker:
             if current is None:
                 raise LookupError(run.id)
             if self._is_terminal(current.status):
-                await SqlAlchemyRunCommandRepository(session).mark_processed(
-                    message_command_id
-                )
+                commands = SqlAlchemyRunCommandRepository(session)
+                await commands.mark_processed(message_command_id)
+                for command_id in additional_command_ids:
+                    if command_id != message_command_id:
+                        await commands.mark_processed(command_id)
                 await session.commit()
                 return current.status
+            commands = SqlAlchemyRunCommandRepository(session)
+            pending_cancellations = await commands.unprocessed_cancel_commands(run_id=run.id)
+            if pending_cancellations and state.status is not RunStatus.CANCELLED:
+                state = RuntimeState(
+                    run_id=run.id,
+                    status=RunStatus.CANCELLED,
+                    data={},
+                )
+                history = [
+                    event
+                    for event in history
+                    if event.type not in {EventType.RUN_COMPLETED, EventType.RUN_FAILED}
+                ]
+                if not any(event.type is EventType.RUN_CANCELLED for event in history):
+                    history.append(
+                        PlatformEvent.create(
+                            tenant_id=run.tenant_id,
+                            employee_id=run.employee_id,
+                            run_id=run.id,
+                            sequence=len(history) + 1,
+                            event_type=EventType.RUN_CANCELLED,
+                            payload={"status": "cancelled"},
+                        )
+                    )
+                additional_command_ids = tuple(
+                    dict.fromkeys(
+                        (
+                            *additional_command_ids,
+                            *(command.id for command in pending_cancellations),
+                        )
+                    )
+                )
             events = SqlAlchemyRunEventRepository(session)
-            existing_event_ids = {
-                event.event_id for event in await events.list(run_id=run.id, after_sequence=0)
-            }
-            sequence = await events.next_sequence(run_id=run.id)
-            for event in history:
-                if event.event_id in existing_event_ids:
-                    continue
-                await events.append(event.model_copy(update={"sequence": sequence}))
-                sequence += 1
+            await self._append_new_history(events=events, run_id=run.id, history=history)
             if current.status != state.status:
                 if current.status in {
                     RunStatus.WAITING_FOR_INPUT,
@@ -510,9 +561,133 @@ class RunWorker:
                     error_message=str(state.data.get("error_message", "")) or None,
                 )
                 await runs.update(current)
-            await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
+            await commands.mark_processed(message_command_id)
+            for command_id in additional_command_ids:
+                if command_id != message_command_id:
+                    await commands.mark_processed(command_id)
             await session.commit()
             return state.status
+
+    async def _start_cancellable_runtime(
+        self,
+        *,
+        run: Run,
+        runtime: EmployeeRuntime,
+        request: RuntimeStartRequest,
+    ) -> tuple[RuntimeState, tuple[UUID, ...]]:
+        state, cancellation_command_ids = await self._run_cancellable_runtime_operation(
+            run_id=run.id,
+            runtime=runtime,
+            operation=lambda: runtime.start(request),
+            check_for_cancel_before_operation=False,
+        )
+        if state is None or cancellation_command_ids:
+            state = await runtime.get_state(run.id)
+        return state, cancellation_command_ids
+
+    async def _run_cancellable_runtime_operation(
+        self,
+        *,
+        run_id: UUID,
+        runtime: EmployeeRuntime,
+        operation: Callable[[], Awaitable[RuntimeOperationResult]],
+        check_for_cancel_before_operation: bool = True,
+    ) -> tuple[RuntimeOperationResult | None, tuple[UUID, ...]]:
+        cancellation_commands = (
+            await self._pending_cancel_commands(run_id) if check_for_cancel_before_operation else []
+        )
+        if cancellation_commands:
+            await runtime.cancel(run_id)
+            return None, tuple(command.id for command in cancellation_commands)
+
+        async def invoke_operation() -> RuntimeOperationResult:
+            return await operation()
+
+        operation_task = asyncio.create_task(invoke_operation())
+        await asyncio.sleep(0)
+        poll_delay = self._cancellation_poll_initial_seconds
+        try:
+            while not operation_task.done():
+                cancellation_commands = await self._pending_cancel_commands(run_id)
+                if cancellation_commands:
+                    await runtime.cancel(run_id)
+                    break
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(operation_task),
+                        timeout=poll_delay,
+                    )
+                except TimeoutError:
+                    poll_delay = min(
+                        poll_delay * 2,
+                        self._cancellation_poll_max_seconds,
+                    )
+
+            try:
+                result = await operation_task
+            except asyncio.CancelledError:
+                if not cancellation_commands:
+                    raise
+                result = None
+            if not cancellation_commands:
+                cancellation_commands = await self._pending_cancel_commands(run_id)
+                if cancellation_commands:
+                    await runtime.cancel(run_id)
+            return result, tuple(command.id for command in cancellation_commands)
+        finally:
+            if not operation_task.done():
+                operation_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await operation_task
+
+    async def _pending_cancel_commands(self, run_id: UUID) -> list[RunCommand]:
+        async with self._session_factory() as session:
+            return await SqlAlchemyRunCommandRepository(session).unprocessed_cancel_commands(
+                run_id=run_id
+            )
+
+    async def _settle_pre_start_cancellation(
+        self,
+        *,
+        run: Run,
+        start_command_id: UUID,
+    ) -> bool:
+        async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
+            runs = SqlAlchemyRunRepository(session)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
+            if current is None:
+                raise LookupError(run.id)
+            commands = SqlAlchemyRunCommandRepository(session)
+            pending_cancellations = await commands.unprocessed_cancel_commands(run_id=run.id)
+            if not pending_cancellations:
+                return False
+            if not self._is_terminal(current.status):
+                await runs.update(current.transition_to(RunStatus.CANCELLED))
+                events = SqlAlchemyRunEventRepository(session)
+                await events.append(
+                    PlatformEvent.create(
+                        tenant_id=run.tenant_id,
+                        employee_id=run.employee_id,
+                        run_id=run.id,
+                        sequence=await events.next_sequence(run_id=run.id),
+                        event_type=EventType.RUN_CANCELLED,
+                        payload={"status": "cancelled"},
+                    )
+                )
+            await commands.mark_processed(start_command_id)
+            for command in pending_cancellations:
+                if command.id != start_command_id:
+                    await commands.mark_processed(command.id)
+            ownership = self._ownerships[run.id]
+            await SqlAlchemyRuntimeOwnershipRepository(session).release(
+                run_id=run.id,
+                owner_id=ownership.owner_id or "",
+                epoch=ownership.epoch,
+            )
+            await session.commit()
+        self._ownerships.pop(run.id, None)
+        return True
 
     async def _mark_running(
         self,
@@ -530,14 +705,44 @@ class RunWorker:
             if current is None:
                 raise LookupError(run.id)
             if self._is_terminal(current.status):
-                await SqlAlchemyRunCommandRepository(session).mark_processed(
-                    message_command_id
-                )
+                await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
                 await session.commit()
                 return False
             await repository.update(current.transition_to(RunStatus.RUNNING))
             await session.commit()
             return True
+
+    async def _persist_control_mismatch(
+        self,
+        *,
+        run: Run,
+        message_command_id: UUID,
+        action: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            await self._assert_owned(session=session, run_id=run.id)
+            runs = SqlAlchemyRunRepository(session)
+            current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
+            if current is None:
+                raise LookupError(run.id)
+            commands = SqlAlchemyRunCommandRepository(session)
+            await commands.mark_processed(message_command_id)
+            events = SqlAlchemyRunEventRepository(session)
+            await events.append(
+                PlatformEvent.create(
+                    tenant_id=run.tenant_id,
+                    employee_id=run.employee_id,
+                    run_id=run.id,
+                    sequence=await events.next_sequence(run_id=run.id),
+                    event_type=EventType.RUN_PROGRESS,
+                    payload={
+                        "action": action,
+                        "status": "control_rejected",
+                        "code": "runtime_control_mismatch",
+                    },
+                )
+            )
+            await session.commit()
 
     async def _persist_preparation_failure(
         self,
@@ -555,9 +760,7 @@ class RunWorker:
             if current is None:
                 raise LookupError(run.id)
             if self._is_terminal(current.status):
-                await SqlAlchemyRunCommandRepository(session).mark_processed(
-                    message_command_id
-                )
+                await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
                 await SqlAlchemyRuntimeOwnershipRepository(session).release(
                     run_id=run.id,
                     owner_id=ownership.owner_id or "",
@@ -812,28 +1015,15 @@ class RunWorker:
                 return current.status
             events = SqlAlchemyRunEventRepository(session)
             existing = await events.list(run_id=run.id, after_sequence=0)
-            existing_ids = {event.event_id for event in existing}
             existing_approvals = {
                 str(event.payload.get("approval_id"))
                 for event in existing
                 if event.type is EventType.APPROVAL_REQUIRED
                 and event.payload.get("approval_id") is not None
             }
-            sequence = await events.next_sequence(run_id=run.id)
-            for event in history:
-                if event.event_id in existing_ids:
-                    continue
-                if (
-                    event.type is EventType.APPROVAL_REQUIRED
-                    and str(event.payload.get("approval_id")) in existing_approvals
-                ):
-                    continue
-                await events.append(event.model_copy(update={"sequence": sequence}))
-                sequence += 1
+            await self._append_new_history(events=events, run_id=run.id, history=history)
             stale_approval_ids = {
-                UUID(value)
-                for value in existing_approvals
-                if value != str(current_approval_id)
+                UUID(value) for value in existing_approvals if value != str(current_approval_id)
             }
             if stale_approval_ids:
                 await self._settle_approval_commands(
@@ -857,6 +1047,33 @@ class RunWorker:
             return state.status
 
     @staticmethod
+    async def _append_new_history(
+        *,
+        events: SqlAlchemyRunEventRepository,
+        run_id: UUID,
+        history: list[PlatformEvent],
+    ) -> None:
+        existing = await events.list(run_id=run_id, after_sequence=0)
+        existing_ids = {event.event_id for event in existing}
+        existing_approvals = {
+            str(event.payload.get("approval_id"))
+            for event in existing
+            if event.type is EventType.APPROVAL_REQUIRED
+            and event.payload.get("approval_id") is not None
+        }
+        sequence = await events.next_sequence(run_id=run_id)
+        for event in history:
+            if event.event_id in existing_ids:
+                continue
+            if (
+                event.type is EventType.APPROVAL_REQUIRED
+                and str(event.payload.get("approval_id")) in existing_approvals
+            ):
+                continue
+            await events.append(event.model_copy(update={"sequence": sequence}))
+            sequence += 1
+
+    @staticmethod
     async def _settle_approval_commands(
         *,
         session: AsyncSession,
@@ -873,11 +1090,11 @@ class RunWorker:
             if approval_id in approval_ids:
                 await commands.mark_processed(command.id)
 
-    async def _started_approval_invocation(self, run: Run) -> UUID | None:
+    async def _started_pending_approval_invocation(self, run: Run) -> UUID | None:
         async with self._session_factory() as session:
-            commands = await SqlAlchemyRunCommandRepository(
-                session
-            ).unprocessed_approval_commands(run_id=run.id)
+            commands = await SqlAlchemyRunCommandRepository(session).unprocessed_approval_commands(
+                run_id=run.id
+            )
             audits = SqlAlchemyToolAuditReader(session)
             for command in commands:
                 try:
@@ -896,8 +1113,6 @@ class RunWorker:
         self,
         run: Run,
         definition: dict[str, object],
-        *,
-        replay_invocation_id: UUID | None = None,
     ) -> PreparedRuntime:
         recover = getattr(self._runtime_resolver, "recover", None)
         if not callable(recover):
@@ -909,30 +1124,24 @@ class RunWorker:
             runtime = prepared.runtime
             if not isinstance(runtime, RecoverableEmployeeRuntime):
                 raise RuntimeRecoveryUnavailable
-            if replay_invocation_id is not None:
-                async with self._session_factory() as session:
-                    started = await SqlAlchemyToolAuditReader(session).has_started(
-                        tenant_id=run.tenant_id,
-                        run_id=run.id,
-                        invocation_id=replay_invocation_id,
-                    )
-                if started:
-                    raise ToolExecutionUncertain(approval_id=replay_invocation_id)
-            state = await runtime.recover(
-                self._runtime_request(run, prepared),
-                run.status,
-            )
-            if (
-                state.status is RunStatus.WAITING_FOR_APPROVAL
-                and isinstance(runtime, ApprovalCheckpointRuntime)
+            started_approval_id = await self._started_pending_approval_invocation(run)
+            try:
+                state = await runtime.recover(
+                    self._runtime_request(run, prepared),
+                    run.status,
+                )
+            except RuntimeRecoveryUnavailable:
+                if started_approval_id is not None:
+                    raise ToolExecutionUncertain(approval_id=started_approval_id) from None
+                raise
+            if state.status is RunStatus.WAITING_FOR_APPROVAL and isinstance(
+                runtime, ApprovalCheckpointRuntime
             ):
                 approval_id = runtime.pending_approval_id(run.id)
                 if approval_id is not None:
                     async with self._session_factory() as session:
                         started = await SqlAlchemyToolAuditReader(session).has_started(
-                            tenant_id=run.tenant_id,
-                            run_id=run.id,
-                            invocation_id=approval_id
+                            tenant_id=run.tenant_id, run_id=run.id, invocation_id=approval_id
                         )
                     if started:
                         raise ToolExecutionUncertain(approval_id=approval_id)

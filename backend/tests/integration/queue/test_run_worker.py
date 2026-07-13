@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from pydantic import JsonValue
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -46,6 +47,12 @@ from agent_platform.platform.tool_gateway import (
     ToolAuditEvent,
 )
 from agent_platform.runtimes.base import RuntimeStartRequest, RuntimeState
+from agent_platform.runtimes.recovery import (
+    RuntimeControlMismatch,
+    RuntimeRecoveryTransient,
+    RuntimeRecoveryUnavailable,
+)
+from agent_platform.workers import run_worker as run_worker_module
 from agent_platform.workers.run_worker import (
     RuntimeAlreadyPrepared,
     RuntimeCleanupError,
@@ -54,10 +61,6 @@ from agent_platform.workers.run_worker import (
     WorkerFenced,
 )
 from agent_platform.workers.runtime_composition import UntrustedRuntimeDefinition
-from agent_platform.workers.runtime_recovery import (
-    RuntimeRecoveryTransient,
-    RuntimeRecoveryUnavailable,
-)
 
 
 class CompletingRuntime:
@@ -175,9 +178,47 @@ class ApprovalRecoverRuntime(RestorableRuntime):
         super().__init__()
         self.approval_id = approval_id
         self.approvals: list[tuple[UUID, UUID]] = []
+        self.rejections: list[tuple[UUID, UUID]] = []
 
     async def approve(self, run_id: UUID, approval_id: UUID) -> None:
         self.approvals.append((run_id, approval_id))
+
+    async def reject(
+        self,
+        run_id: UUID,
+        approval_id: UUID,
+        reason: str | None = None,
+    ) -> None:
+        del reason
+        if approval_id != self.approval_id:
+            raise RuntimeControlMismatch
+        self.rejections.append((run_id, approval_id))
+        request = self.requests[-1]
+        self.events.append(
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=len(self.events) + 1,
+                event_type=EventType.RUN_CANCELLED,
+                payload={"status": "cancelled"},
+            )
+        )
+        self.state = RuntimeState(run_id=run_id, status=RunStatus.CANCELLED, data={})
+
+    async def cancel(self, run_id: UUID) -> None:
+        request = self.requests[-1]
+        self.events.append(
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=len(self.events) + 1,
+                event_type=EventType.RUN_CANCELLED,
+                payload={"status": "cancelled"},
+            )
+        )
+        self.state = RuntimeState(run_id=run_id, status=RunStatus.CANCELLED, data={})
 
     def pending_approval_id(self, run_id: UUID) -> UUID | None:
         del run_id
@@ -467,6 +508,162 @@ class StartFailingRuntime(CompletingRuntime):
         raise ValueError("model invocation failed")
 
 
+class PreStartCountingRuntime(CompletingRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_calls = 0
+
+    async def cancel(self, run_id: UUID) -> None:
+        del run_id
+        self.cancel_calls += 1
+        raise RuntimeError("runtime is not initialized")
+
+
+class BlockingCancellableRuntime(CompletingRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.side_effects = 0
+        self._start_task: asyncio.Task[RuntimeState] | None = None
+
+    async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+        self.requests.append(request)
+        self._start_task = asyncio.current_task()
+        self.events = [
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=1,
+                event_type=EventType.RUN_STARTED,
+                payload={},
+            )
+        ]
+        self.state = RuntimeState(
+            run_id=request.run_id,
+            status=RunStatus.RUNNING,
+            data={},
+        )
+        self.started.set()
+        try:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                assert self.state is not None
+                return self.state
+            self.side_effects += 1
+            raise AssertionError("cancelled runtime must not continue")
+        finally:
+            self.stopped.set()
+
+    async def cancel(self, run_id: UUID) -> None:
+        request = self.requests[0]
+        assert run_id == request.run_id
+        if not any(event.type is EventType.RUN_CANCELLED for event in self.events):
+            self.events.append(
+                PlatformEvent.create(
+                    tenant_id=request.tenant_id,
+                    employee_id=request.employee_id,
+                    run_id=request.run_id,
+                    sequence=len(self.events) + 1,
+                    event_type=EventType.RUN_CANCELLED,
+                    payload={"status": "cancelled"},
+                )
+            )
+        self.state = RuntimeState(
+            run_id=run_id,
+            status=RunStatus.CANCELLED,
+            data={},
+        )
+        if self._start_task is not None:
+            self._start_task.cancel()
+
+
+class BlockingControlRuntime(CompletingRuntime):
+    def __init__(self, run_id: UUID) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.cancel_calls = 0
+        self.control_side_effects = 0
+        self.state = RuntimeState(run_id=run_id, status=RunStatus.RUNNING, data={})
+        self._control_task: asyncio.Task[None] | None = None
+
+    async def _block(self) -> None:
+        self._control_task = asyncio.current_task()
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+            self.control_side_effects += 1
+        except asyncio.CancelledError:
+            return
+        finally:
+            self.stopped.set()
+
+    async def send_message(self, run_id: UUID, message: str) -> None:
+        del run_id, message
+        await self._block()
+
+    async def resume(self, run_id: UUID) -> None:
+        del run_id
+        await self._block()
+
+    async def approve(self, run_id: UUID, approval_id: UUID) -> None:
+        del run_id, approval_id
+        await self._block()
+
+    async def reject(
+        self,
+        run_id: UUID,
+        approval_id: UUID,
+        reason: str | None = None,
+    ) -> None:
+        del run_id, approval_id, reason
+        await self._block()
+
+    async def cancel(self, run_id: UUID) -> None:
+        self.cancel_calls += 1
+        self.state = RuntimeState(run_id=run_id, status=RunStatus.CANCELLED, data={})
+        if self.requests and not any(
+            event.type is EventType.RUN_CANCELLED for event in self.events
+        ):
+            request = self.requests[-1]
+            self.events.append(
+                PlatformEvent.create(
+                    tenant_id=request.tenant_id,
+                    employee_id=request.employee_id,
+                    run_id=run_id,
+                    sequence=len(self.events) + 1,
+                    event_type=EventType.RUN_CANCELLED,
+                    payload={"status": "cancelled"},
+                )
+            )
+        if self._control_task is not None:
+            self._control_task.cancel()
+
+
+class WaitingBlockingControlRuntime(BlockingControlRuntime):
+    async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+        self.requests.append(request)
+        self.events = [
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=1,
+                event_type=EventType.RUN_STARTED,
+                payload={},
+            )
+        ]
+        self.state = RuntimeState(
+            run_id=request.run_id,
+            status=RunStatus.WAITING_FOR_INPUT,
+            data={},
+        )
+        return self.state
+
+
 class StreamFailingRuntime(CompletingRuntime):
     def stream(self, run_id: UUID, *, after_sequence: int = 0):
         self.stream_calls += 1
@@ -563,6 +760,692 @@ async def test_worker_executes_run_and_persists_events_and_terminal_state(factor
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert [event.type for event in events] == [EventType.RUN_STARTED, EventType.RUN_COMPLETED]
         assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_observes_cancel_intent_during_blocking_start_and_stops_runtime(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"task": "block"},
+    )
+    start = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(start)
+        await session.commit()
+
+    runtime = BlockingCancellableRuntime()
+    queue = MessageQueue(
+        [
+            RunQueueDelivery(
+                delivery_id="blocking-start",
+                message=RunQueueMessage(
+                    command_id=start.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            )
+        ]
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(runtime),
+        consumer_name="cancel-aware-worker",
+    )
+    start_delivery_task = asyncio.create_task(worker.run_once(block_ms=1))
+    await asyncio.wait_for(runtime.started.wait(), timeout=1)
+
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunCommandRepository(session).add(cancel)
+        await session.commit()
+    queue.deliveries.append(
+        RunQueueDelivery(
+            delivery_id="blocking-cancel",
+            message=RunQueueMessage(
+                command_id=cancel.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="cancel",
+            ),
+        )
+    )
+
+    assert await asyncio.wait_for(start_delivery_task, timeout=1) is True
+    assert await worker.run_once(block_ms=1) is True
+
+    assert runtime.side_effects == 0
+    assert queue.acknowledged == ["blocking-start", "blocking-cancel"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        assert await commands.is_processed(start.id)
+        assert await commands.is_processed(cancel.id)
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    assert [event.type for event in events].count(EventType.RUN_CANCELLED) == 1
+    assert EventType.RUN_COMPLETED not in [event.type for event in events]
+
+
+@pytest.mark.asyncio
+async def test_cancel_committed_before_start_never_calls_uninitialized_runtime(factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    start = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(start)
+        await SqlAlchemyRunCommandRepository(session).add(cancel)
+        await session.commit()
+    runtime = PreStartCountingRuntime()
+    resolver = Resolver(runtime)
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="cancel-before-start",
+            message=RunQueueMessage(
+                command_id=start.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=resolver,
+        consumer_name="cancel-before-start",
+    )
+
+    assert await worker.run_once(block_ms=1)
+
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        ownership = await SqlAlchemyRuntimeOwnershipRepository(session).get(run_id=run.id)
+        assert await commands.is_processed(start.id)
+        assert await commands.is_processed(cancel.id)
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    assert resolver.calls == []
+    assert resolver.prepared is None
+    assert runtime.requests == []
+    assert runtime.cancel_calls == 0
+    assert [event.type for event in events] == [EventType.RUN_CANCELLED]
+    assert ownership is not None and ownership.owner_id is None
+    assert queue.acknowledged == ["cancel-before-start"]
+
+
+@pytest.mark.asyncio
+async def test_start_monitor_database_failure_cancels_and_awaits_runtime_child(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    runtime = BlockingCancellableRuntime()
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(runtime),
+        consumer_name="structured-child-cleanup",
+    )
+
+    checks = 0
+
+    async def fail_after_start(run_id: UUID) -> list[RunCommand]:
+        nonlocal checks
+        assert run_id == run.id
+        checks += 1
+        if checks == 1:
+            return []
+        await runtime.started.wait()
+        raise RuntimeError("database unavailable")
+
+    worker._pending_cancel_commands = fail_after_start  # type: ignore[method-assign]
+    request = RuntimeStartRequest(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        user_id=run.created_by,
+        employee_id=run.employee_id,
+        thread_id=run.thread_id,
+        employee_definition={},
+        input_data=run.input_data,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await worker._start_cancellable_runtime(
+            run=run,
+            runtime=runtime,
+            request=request,
+        )
+
+    assert runtime.stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_start_monitor_runtime_cancel_failure_still_reaps_runtime_child(
+    factory,
+) -> None:
+    class CancelFailingRuntime(BlockingCancellableRuntime):
+        async def cancel(self, run_id: UUID) -> None:
+            del run_id
+            raise RuntimeError("runtime cancel failed")
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    runtime = CancelFailingRuntime()
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(runtime),
+        consumer_name="cancel-failure-cleanup",
+    )
+
+    checks = 0
+
+    async def request_cancel(run_id: UUID) -> list[RunCommand]:
+        nonlocal checks
+        assert run_id == run.id
+        checks += 1
+        if checks == 1:
+            return []
+        await runtime.started.wait()
+        return [cancel]
+
+    worker._pending_cancel_commands = request_cancel  # type: ignore[method-assign]
+    request = RuntimeStartRequest(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        user_id=run.created_by,
+        employee_id=run.employee_id,
+        thread_id=run.thread_id,
+        employee_definition={},
+        input_data=run.input_data,
+    )
+
+    with pytest.raises(RuntimeError, match="runtime cancel failed"):
+        await worker._start_cancellable_runtime(
+            run=run,
+            runtime=runtime,
+            request=request,
+        )
+
+    assert runtime.stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_start_monitor_parent_cancellation_cancels_and_awaits_runtime_child(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    runtime = BlockingCancellableRuntime()
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(runtime),
+        consumer_name="structured-parent-cancel",
+    )
+    never = asyncio.Event()
+
+    checks = 0
+
+    async def wait_forever(run_id: UUID) -> list[RunCommand]:
+        nonlocal checks
+        assert run_id == run.id
+        checks += 1
+        if checks == 1:
+            return []
+        await never.wait()
+        return []
+
+    worker._pending_cancel_commands = wait_forever  # type: ignore[method-assign]
+    request = RuntimeStartRequest(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        user_id=run.created_by,
+        employee_id=run.employee_id,
+        thread_id=run.thread_id,
+        employee_definition={},
+        input_data=run.input_data,
+    )
+    monitor_task = asyncio.create_task(
+        worker._start_cancellable_runtime(run=run, runtime=runtime, request=request)
+    )
+    await runtime.started.wait()
+
+    monitor_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor_task
+
+    assert runtime.stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_start_monitor_uses_bounded_backoff_instead_of_fixed_busy_poll(
+    factory,
+    monkeypatch,
+) -> None:
+    class PollingRuntime(CompletingRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+            self.requests.append(request)
+            await self.release.wait()
+            self.state = RuntimeState(
+                run_id=request.run_id,
+                status=RunStatus.COMPLETED,
+                data={},
+            )
+            return self.state
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    runtime = PollingRuntime()
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(runtime),
+        consumer_name="bounded-cancel-poll",
+        cancellation_poll_initial_seconds=0.01,
+        cancellation_poll_max_seconds=0.04,
+    )
+    poll_count = 0
+
+    async def pending(run_id: UUID) -> list[RunCommand]:
+        nonlocal poll_count
+        assert run_id == run.id
+        poll_count += 1
+        if poll_count == 4:
+            runtime.release.set()
+        return []
+
+    observed_timeouts: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, *, timeout: float):
+        observed_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    worker._pending_cancel_commands = pending  # type: ignore[method-assign]
+    monkeypatch.setattr(run_worker_module.asyncio, "wait_for", recording_wait_for)
+    request = RuntimeStartRequest(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        user_id=run.created_by,
+        employee_id=run.employee_id,
+        thread_id=run.thread_id,
+        employee_definition={},
+        input_data=run.input_data,
+    )
+
+    state, command_ids = await worker._start_cancellable_runtime(
+        run=run,
+        runtime=runtime,
+        request=request,
+    )
+
+    assert state.status is RunStatus.COMPLETED
+    assert command_ids == ()
+    assert poll_count == 5
+    assert observed_timeouts == [0.01, 0.02, 0.04, 0.04]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["message", "resume", "approve", "reject"])
+async def test_control_runner_interrupts_blocking_graph_operation_on_concurrent_cancel(
+    factory,
+    action: str,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    approval_id = uuid4()
+    payload: dict[str, JsonValue] = {}
+    if action == "message":
+        payload["message"] = "continue"
+    elif action in {"approve", "reject"}:
+        payload["approval_id"] = str(approval_id)
+    delivery = RunQueueDelivery(
+        delivery_id=f"blocking-{action}",
+        message=RunQueueMessage(
+            command_id=uuid4(),
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action=action,
+            payload=payload,
+        ),
+    )
+    runtime = BlockingControlRuntime(run.id)
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(runtime),
+        consumer_name=f"blocking-{action}",
+    )
+
+    checks = 0
+
+    async def pending(run_id: UUID) -> list[RunCommand]:
+        nonlocal checks
+        assert run_id == run.id
+        checks += 1
+        if checks == 1:
+            return []
+        await runtime.started.wait()
+        return [cancel]
+
+    worker._pending_cancel_commands = pending  # type: ignore[method-assign]
+
+    result, cancellation_ids = await worker._run_cancellable_runtime_operation(
+        run_id=run.id,
+        runtime=runtime,
+        operation=lambda: worker._invoke_control(runtime, delivery),
+    )
+
+    assert result is None
+    assert cancellation_ids == (cancel.id,)
+    assert runtime.cancel_calls == 1
+    assert runtime.stopped.is_set()
+    assert runtime.state is not None and runtime.state.status is RunStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_blocking_resume_and_concurrent_cancel_are_persisted_and_acknowledged(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    start = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    resume = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.RESUME,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(start)
+        await SqlAlchemyRunCommandRepository(session).add(resume)
+        await session.commit()
+    runtime = WaitingBlockingControlRuntime(run.id)
+    queue = MessageQueue(
+        [
+            RunQueueDelivery(
+                delivery_id="waiting-start",
+                message=RunQueueMessage(
+                    command_id=start.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            ),
+            RunQueueDelivery(
+                delivery_id="blocking-resume",
+                message=RunQueueMessage(
+                    command_id=resume.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="resume",
+                ),
+            ),
+        ]
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(runtime),
+        consumer_name="resume-cancel-worker",
+        cancellation_poll_initial_seconds=0.01,
+        cancellation_poll_max_seconds=0.02,
+    )
+    assert await worker.run_once(block_ms=1)
+    resume_task = asyncio.create_task(worker.run_once(block_ms=1))
+    await asyncio.wait_for(runtime.started.wait(), timeout=1)
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunCommandRepository(session).add(cancel)
+        await session.commit()
+    queue.deliveries.append(
+        RunQueueDelivery(
+            delivery_id="concurrent-cancel",
+            message=RunQueueMessage(
+                command_id=cancel.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="cancel",
+            ),
+        )
+    )
+
+    assert await asyncio.wait_for(resume_task, timeout=1)
+    assert await worker.run_once(block_ms=1)
+
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        assert await commands.is_processed(start.id)
+        assert await commands.is_processed(resume.id)
+        assert await commands.is_processed(cancel.id)
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    assert queue.acknowledged == [
+        "waiting-start",
+        "blocking-resume",
+        "concurrent-cancel",
+    ]
+    assert runtime.control_side_effects == 0
+    assert [event.type for event in events].count(EventType.RUN_CANCELLED) == 1
+    assert EventType.RUN_COMPLETED not in [event.type for event in events]
+
+
+@pytest.mark.asyncio
+async def test_terminal_persistence_prefers_cancel_committed_after_runtime_return(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    ).transition_to(RunStatus.RUNNING)
+    start = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    cancel = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.CANCEL,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyRunCommandRepository(session).add(start)
+        await SqlAlchemyRunCommandRepository(session).add(cancel)
+        await session.commit()
+
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=Resolver(CompletingRuntime()),
+        consumer_name="terminal-cancel-race",
+    )
+    await worker._claim_ownership(run)
+    history = [
+        PlatformEvent.create(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            run_id=run.id,
+            sequence=1,
+            event_type=EventType.RUN_STARTED,
+            payload={},
+        ),
+        PlatformEvent.create(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            run_id=run.id,
+            sequence=2,
+            event_type=EventType.RUN_COMPLETED,
+            payload={"status": "completed"},
+        ),
+    ]
+
+    persisted_status = await worker._persist_runtime_result(
+        run=run,
+        message_command_id=start.id,
+        state=RuntimeState(
+            run_id=run.id,
+            status=RunStatus.COMPLETED,
+            data={"output": "too late"},
+        ),
+        history=history,
+    )
+
+    assert persisted_status is RunStatus.CANCELLED
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        assert await commands.is_processed(start.id)
+        assert await commands.is_processed(cancel.id)
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    assert [event.type for event in events] == [
+        EventType.RUN_STARTED,
+        EventType.RUN_CANCELLED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -894,13 +1777,17 @@ async def test_control_command_without_local_runtime_is_not_acknowledged(factory
 
 @pytest.mark.asyncio
 async def test_new_worker_recovers_waiting_run_before_processing_control(factory) -> None:
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=4,
-        created_by=uuid4(),
-        input_data={"task": "wait"},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=4,
+            created_by=uuid4(),
+            input_data={"task": "wait"},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
     command = RunCommand.create(
         run_id=run.id,
         tenant_id=run.tenant_id,
@@ -961,24 +1848,206 @@ async def test_new_worker_recovers_waiting_run_before_processing_control(factory
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["cancel", "reject"])
+async def test_recovered_terminal_control_does_not_duplicate_approval_required(
+    factory,
+    action: str,
+) -> None:
+    approval_id = uuid4()
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    command_action = RunCommandAction.REJECT if action == "reject" else RunCommandAction.CANCEL
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=command_action,
+        payload={"approval_id": str(approval_id)} if action == "reject" else {},
+    )
+    existing_approval = PlatformEvent.create(
+        tenant_id=run.tenant_id,
+        employee_id=run.employee_id,
+        run_id=run.id,
+        sequence=1,
+        event_type=EventType.APPROVAL_REQUIRED,
+        payload={"approval_id": str(approval_id)},
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await SqlAlchemyRunEventRepository(session).append(existing_approval)
+        await session.commit()
+    runtime = ApprovalRecoverRuntime(approval_id)
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id=f"recovered-{action}",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action=action,
+                payload=command.payload,
+            ),
+        )
+    )
+
+    assert await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=RecoveringResolver(runtime),
+        consumer_name=f"replacement-{action}",
+    ).run_once(block_ms=1)
+
+    assert runtime.rejections == ([(run.id, approval_id)] if action == "reject" else [])
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        assert await commands.is_processed(command.id)
+        assert await commands.unprocessed_cancel_commands(run_id=run.id) == []
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    assert [event.type for event in events].count(EventType.APPROVAL_REQUIRED) == 1
+    assert [event.type for event in events].count(EventType.RUN_CANCELLED) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovered_reject_with_wrong_approval_id_is_controlled_noop(factory) -> None:
+    expected_approval_id = uuid4()
+    wrong_approval_id = uuid4()
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    reject = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.REJECT,
+        payload={"approval_id": str(wrong_approval_id)},
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(reject)
+        await SqlAlchemyRunEventRepository(session).append(
+            PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=1,
+                event_type=EventType.APPROVAL_REQUIRED,
+                payload={"approval_id": str(expected_approval_id)},
+            )
+        )
+        await session.commit()
+    runtime = ApprovalRecoverRuntime(expected_approval_id)
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="mismatched-reject",
+            message=RunQueueMessage(
+                command_id=reject.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="reject",
+                payload=reject.payload,
+            ),
+        )
+    )
+
+    assert await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=RecoveringResolver(runtime),
+        consumer_name="replacement-mismatch",
+    ).run_once(block_ms=1)
+
+    assert runtime.rejections == []
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(reject.id)
+    assert persisted is not None
+    assert persisted.status is RunStatus.WAITING_FOR_APPROVAL
+    assert [event.type for event in events].count(EventType.APPROVAL_REQUIRED) == 1
+    assert events[-1].payload == {
+        "action": "reject",
+        "status": "control_rejected",
+        "code": "runtime_control_mismatch",
+    }
+
+
+@pytest.mark.asyncio
 async def test_worker_startup_recovers_waiting_runs_and_fails_unknown_running_work(factory) -> None:
     tenant_id = uuid4()
     user_id = uuid4()
     employee_id = uuid4()
-    waiting = Run.create(
-        tenant_id=tenant_id,
-        employee_id=employee_id,
-        employee_version=1,
-        created_by=user_id,
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
-    waiting_two = Run.create(
-        tenant_id=tenant_id,
-        employee_id=employee_id,
-        employee_version=1,
-        created_by=user_id,
-        input_data={"second": True},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
+    waiting = (
+        Run.create(
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            employee_version=1,
+            created_by=user_id,
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
+    waiting_two = (
+        Run.create(
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            employee_version=1,
+            created_by=user_id,
+            input_data={"second": True},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
     running = Run.create(
         tenant_id=tenant_id,
         employee_id=employee_id,
@@ -1026,9 +2095,7 @@ async def test_worker_startup_recovers_waiting_runs_and_fails_unknown_running_wo
         assert persisted_running is not None
         assert persisted_running.status is RunStatus.FAILED
         assert persisted_running.error_code == "runtime_interrupted"
-        waiting_owner = await SqlAlchemyRuntimeOwnershipRepository(session).get(
-            run_id=waiting.id
-        )
+        waiting_owner = await SqlAlchemyRuntimeOwnershipRepository(session).get(run_id=waiting.id)
         assert waiting_owner is not None and waiting_owner.owner_id is not None
 
     previous_expiry = waiting_owner.expires_at
@@ -1045,20 +2112,28 @@ async def test_startup_busy_retry_does_not_recover_completed_partial_batch_twice
     tenant_id = uuid4()
     user_id = uuid4()
     employee_id = uuid4()
-    first = Run.create(
-        tenant_id=tenant_id,
-        employee_id=employee_id,
-        employee_version=1,
-        created_by=user_id,
-        input_data={"order": 1},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
-    second = Run.create(
-        tenant_id=tenant_id,
-        employee_id=employee_id,
-        employee_version=1,
-        created_by=user_id,
-        input_data={"order": 2},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
+    first = (
+        Run.create(
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            employee_version=1,
+            created_by=user_id,
+            input_data={"order": 1},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
+    second = (
+        Run.create(
+            tenant_id=tenant_id,
+            employee_id=employee_id,
+            employee_version=1,
+            created_by=user_id,
+            input_data={"order": 2},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=employee_id,
@@ -1110,13 +2185,17 @@ async def test_startup_busy_retry_does_not_recover_completed_partial_batch_twice
 async def test_startup_runtime_recovery_transient_failure_can_retry_without_leaking_owner(
     factory,
 ) -> None:
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1157,13 +2236,17 @@ async def test_startup_runtime_recovery_transient_failure_can_retry_without_leak
 
 @pytest.mark.asyncio
 async def test_transient_recovery_releases_ownership_even_when_detach_fails(factory) -> None:
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_INPUT)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_INPUT)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1197,13 +2280,17 @@ async def test_started_tool_without_advanced_checkpoint_fails_uncertain_without_
     factory,
 ) -> None:
     approval_id = uuid4()
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1267,27 +2354,30 @@ async def test_started_tool_without_advanced_checkpoint_fails_uncertain_without_
         )
         assert persisted is not None and persisted.status is RunStatus.FAILED
         assert persisted.error_code == "tool_execution_uncertain"
-        assert await SqlAlchemyRunCommandRepository(session).is_processed(
-            approval_command.id
-        )
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(approval_command.id)
     assert resolver.recovery_calls == [(run, version.definition)]
     assert resolver.prepared is not None and resolver.prepared.close_calls == 1
-    assert runtime.recovered == []
+    assert len(runtime.recovered) == 1
+    assert runtime.recovered[0][1] is RunStatus.WAITING_FOR_APPROVAL
     assert runtime.approvals == []
 
 
 @pytest.mark.asyncio
-async def test_redelivered_approval_with_started_tool_fails_uncertain_before_runtime_recovery(
+async def test_redelivered_approval_with_started_tool_fails_uncertain_after_runtime_recovery(
     factory,
 ) -> None:
     approval_id = uuid4()
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1334,7 +2424,7 @@ async def test_redelivered_approval_with_started_tool_fails_uncertain_before_run
         ),
     )
     queue = OneMessageQueue(delivery)
-    runtime = ApprovalRecoverRuntime(uuid4())
+    runtime = ApprovalRecoverRuntime(approval_id)
     resolver = RecoveringResolver(runtime)
     worker = RunWorker(
         session_factory=factory,
@@ -1347,7 +2437,8 @@ async def test_redelivered_approval_with_started_tool_fails_uncertain_before_run
 
     assert resolver.recovery_calls == [(run, version.definition)]
     assert resolver.prepared is not None and resolver.prepared.close_calls == 1
-    assert runtime.recovered == []
+    assert len(runtime.recovered) == 1
+    assert runtime.recovered[0][1] is RunStatus.WAITING_FOR_APPROVAL
     assert runtime.approvals == []
     assert queue.acknowledged == [delivery.delivery_id]
     async with factory() as session:
@@ -1364,13 +2455,17 @@ async def test_redelivered_approval_with_started_tool_fails_uncertain_before_run
 async def test_recovered_next_interrupt_settles_old_approval_command(factory) -> None:
     old_approval_id = uuid4()
     current_approval_id = uuid4()
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1401,12 +2496,25 @@ async def test_recovered_next_interrupt_settles_old_approval_command(factory) ->
             )
         )
         await session.commit()
+    await SqlAlchemyToolAuditSink(factory).emit(
+        ToolAuditEvent(
+            event_type=AuditEventType.STARTED,
+            occurred_at=datetime.now(UTC),
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            employee_id=run.employee_id,
+            user_id=run.created_by,
+            tool_id=uuid4(),
+            tool_name="external_operation",
+            risk=None,
+            argument_summary=ArgumentSummary(keys=("value",), sha256="a" * 64, size_bytes=1),
+            invocation_id=old_approval_id,
+        )
+    )
     worker = RunWorker(
         session_factory=factory,
         queue=MessageQueue([]),
-        runtime_resolver=RecoveringResolver(
-            ApprovalRecoverRuntime(current_approval_id)
-        ),
+        runtime_resolver=RecoveringResolver(ApprovalRecoverRuntime(current_approval_id)),
         consumer_name="replacement",
     )
 
@@ -1425,13 +2533,17 @@ async def test_recovered_next_interrupt_settles_old_approval_command(factory) ->
 @pytest.mark.asyncio
 async def test_completed_checkpoint_rolls_waiting_database_forward_without_replay(factory) -> None:
     approval_id = uuid4()
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
     version = EmployeeVersion(
         id=uuid4(),
         employee_id=run.employee_id,
@@ -1462,6 +2574,28 @@ async def test_completed_checkpoint_rolls_waiting_database_forward_without_repla
             )
         )
         await session.commit()
+    tool_id = uuid4()
+    audit_common = {
+        "occurred_at": datetime.now(UTC),
+        "tenant_id": run.tenant_id,
+        "run_id": run.id,
+        "employee_id": run.employee_id,
+        "user_id": run.created_by,
+        "tool_id": tool_id,
+        "tool_name": "external_operation",
+        "risk": None,
+        "argument_summary": ArgumentSummary(keys=("value",), sha256="a" * 64, size_bytes=1),
+        "invocation_id": approval_id,
+    }
+    audit_sink = SqlAlchemyToolAuditSink(factory)
+    await audit_sink.emit(ToolAuditEvent(event_type=AuditEventType.STARTED, **audit_common))
+    await audit_sink.emit(
+        ToolAuditEvent(
+            event_type=AuditEventType.COMPLETED,
+            succeeded=True,
+            **audit_common,
+        )
+    )
     resolver = RecoveringResolver(CompletedRecoverRuntime())
     worker = RunWorker(
         session_factory=factory,
@@ -1483,14 +2617,88 @@ async def test_completed_checkpoint_rolls_waiting_database_forward_without_repla
 
 
 @pytest.mark.asyncio
+async def test_started_tool_with_unavailable_checkpoint_fails_uncertain(factory) -> None:
+    approval_id = uuid4()
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.APPROVE,
+        payload={"approval_id": str(approval_id)},
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    await SqlAlchemyToolAuditSink(factory).emit(
+        ToolAuditEvent(
+            event_type=AuditEventType.STARTED,
+            occurred_at=datetime.now(UTC),
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            employee_id=run.employee_id,
+            user_id=run.created_by,
+            tool_id=uuid4(),
+            tool_name="external_operation",
+            risk=None,
+            argument_summary=ArgumentSummary(keys=("value",), sha256="a" * 64, size_bytes=1),
+            invocation_id=approval_id,
+        )
+    )
+    resolver = RecoveringResolver(UnavailableRuntime())
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue([]),
+        runtime_resolver=resolver,
+        consumer_name="replacement-worker",
+    )
+
+    assert await worker.recover_incomplete_runs() == 0
+
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        assert persisted is not None and persisted.status is RunStatus.FAILED
+        assert persisted.error_code == "tool_execution_uncertain"
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+    assert resolver.prepared is not None and resolver.prepared.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_unrecoverable_runtime_is_stably_failed_and_control_is_acknowledged(factory) -> None:
-    run = Run.create(
-        tenant_id=uuid4(),
-        employee_id=uuid4(),
-        employee_version=1,
-        created_by=uuid4(),
-        input_data={},
-    ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    run = (
+        Run.create(
+            tenant_id=uuid4(),
+            employee_id=uuid4(),
+            employee_version=1,
+            created_by=uuid4(),
+            input_data={},
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
     command = RunCommand.create(
         run_id=run.id,
         tenant_id=run.tenant_id,
@@ -2110,9 +3318,7 @@ async def test_exhausted_malformed_message_is_safely_persisted_then_acknowledged
         records = list((await session.execute(select(RunDeadLetterRecord))).scalars())
         assert len(records) == 1
         assert records[0].error_type == "malformed_queue_message"
-        assert "database-password-must-not-persist" not in repr(
-            records[0].raw_fields_summary
-        )
+        assert "database-password-must-not-persist" not in repr(records[0].raw_fields_summary)
 
 
 @pytest.mark.asyncio
@@ -2537,9 +3743,7 @@ async def test_cross_spliced_malformed_does_not_discard_unrelated_active_runtime
             run_id=active.id,
         )
         assert persisted is not None and persisted.status is RunStatus.RUNNING
-        assert not await SqlAlchemyRunCommandRepository(session).is_processed(
-            unrelated_command.id
-        )
+        assert not await SqlAlchemyRunCommandRepository(session).is_processed(unrelated_command.id)
 
 
 @pytest.mark.asyncio

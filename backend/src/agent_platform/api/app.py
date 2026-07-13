@@ -24,10 +24,15 @@ from agent_platform.infrastructure.object_storage.minio import (
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
-from agent_platform.knowledge.ragflow import RagFlowClient, RagFlowError
+from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
 from agent_platform.platform.auth.ports import AuthRateLimiter
+from agent_platform.platform.knowledge.errors import (
+    InvalidKnowledgeProviderResponse,
+    KnowledgeProviderUnavailable,
+)
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
+from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.skills.ports import SkillStorage
 
 
@@ -101,6 +106,7 @@ def create_app(
     app.state.password_hasher = Argon2PasswordHasher()
     app.state.session_token_manager = SessionTokenManager()
     app.state.knowledge_provider = knowledge_provider
+    app.state.knowledge_provider_registry = KnowledgeProviderRegistry([knowledge_provider])
     app.state.skill_storage = skill_storage
     app.include_router(auth_router)
     app.include_router(employees_router)
@@ -111,8 +117,12 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(tool_router)
 
-    @app.exception_handler(RagFlowError)
-    async def handle_ragflow_error(_: Request, __: RagFlowError) -> JSONResponse:
+    @app.exception_handler(KnowledgeProviderUnavailable)
+    @app.exception_handler(InvalidKnowledgeProviderResponse)
+    async def handle_knowledge_provider_error(
+        _: Request,
+        __: KnowledgeProviderUnavailable | InvalidKnowledgeProviderResponse,
+    ) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={

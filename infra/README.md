@@ -16,7 +16,15 @@ docker compose --env-file .env -f core.yml up
 docker compose --env-file .env -f core.yml down
 ```
 
-`.env.example` 中的凭据只用于本机开发，生产环境必须由密钥服务提供。
+`.env.example` 中的凭据只用于本机开发，生产环境必须由密钥服务提供。PostgreSQL、Redis 和 MinIO 的所有宿主机发布端口都固定绑定 `127.0.0.1`；平台容器继续通过受控 Docker 网络访问这些服务。
+
+核心 Compose 的标准静态门禁会校验 Compose 语法以及全部发布端口的回环绑定契约：
+
+```bash
+bash infra/compose/test.sh config
+```
+
+该入口要求 Docker Compose `>= 2.20.0`；Docker Compose 缺失或版本过低时会明确失败。脚本按自身路径解析仓库根目录，因此用绝对路径调用时可从任意 cwd 执行，例如 `bash /path/to/ai-agent/infra/compose/test.sh config`。
 
 ## 本机链路追踪
 

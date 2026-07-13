@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { apiClient } from '../../../api/client'
+import { tenantRequestConfig } from '../../../api/tenant'
 
 
 const uuidSchema = z.uuid()
@@ -53,14 +54,12 @@ const runDeadLetterListSchema = z.array(runDeadLetterSchema)
 export type RunDeadLetter = z.infer<typeof runDeadLetterSchema>
 export type ReplayedRun = z.infer<typeof replayedRunSchema>
 
-const tenantHeaders = (tenantId: string) => ({ 'X-Tenant-ID': tenantId })
-
 export async function listRunDeadLetters(
   tenantId: string,
   limit = 100,
 ): Promise<RunDeadLetter[]> {
   const response = await apiClient.get('/run-dead-letters', {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
     params: { limit },
   })
   return runDeadLetterListSchema.parse(response.data)
@@ -73,7 +72,7 @@ export async function replayRunDeadLetter(
   const response = await apiClient.post(
     `/run-dead-letters/${deadLetterId}/replay`,
     undefined,
-    { headers: tenantHeaders(tenantId) },
+    tenantRequestConfig(tenantId),
   )
   return replayedRunSchema.parse(response.data)
 }

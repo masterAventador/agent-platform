@@ -1,4 +1,4 @@
-from .errors import ToolExecutionError
+from .errors import ToolExecutionError, ToolInvocationClaimRejected
 from .gateway import ToolGateway
 from .models import (
     ArgumentSummary,
@@ -26,6 +26,7 @@ __all__ = [
     "ToolDefinition",
     "ToolDefinitionResolver",
     "ToolExecutionError",
+    "ToolInvocationClaimRejected",
     "ToolExecutor",
     "ToolGateway",
     "ToolInvocation",

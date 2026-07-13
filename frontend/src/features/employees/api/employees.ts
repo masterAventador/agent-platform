@@ -1,4 +1,5 @@
 import { apiClient } from '../../../api/client'
+import { tenantRequestConfig } from '../../../api/tenant'
 import { EmployeeConfigurationUnavailableError } from './errors'
 
 
@@ -49,10 +50,6 @@ export interface Employee {
   definition: EmployeeDefinition
 }
 
-function tenantHeaders(tenantId: string) {
-  return { 'X-Tenant-ID': tenantId }
-}
-
 export function isEmployeeConfigurationAvailable(definition: EmployeeDefinition): boolean {
   return definition.work_mode === 'autonomous'
     && !definition.capabilities.scheduled_tasks
@@ -67,14 +64,14 @@ function assertEmployeeConfigurationAvailable(definition: EmployeeDefinition): v
 
 export async function listEmployees(tenantId: string): Promise<Employee[]> {
   const response = await apiClient.get<Employee[]>('/employees', {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })
   return response.data
 }
 
 export async function getEmployee(tenantId: string, employeeId: string): Promise<Employee> {
   const response = await apiClient.get<Employee>(`/employees/${employeeId}`, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })
   return response.data
 }
@@ -85,7 +82,7 @@ export async function createEmployee(
 ): Promise<Employee> {
   assertEmployeeConfigurationAvailable(definition)
   const response = await apiClient.post<Employee>('/employees', definition, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })
   return response.data
 }
@@ -97,7 +94,7 @@ export async function updateEmployee(
 ): Promise<Employee> {
   assertEmployeeConfigurationAvailable(definition)
   const response = await apiClient.put<Employee>(`/employees/${employeeId}`, definition, {
-    headers: tenantHeaders(tenantId),
+    ...tenantRequestConfig(tenantId),
   })
   return response.data
 }
@@ -109,7 +106,7 @@ export async function publishEmployee(
   const response = await apiClient.post<Employee>(
     `/employees/${employeeId}/publish`,
     undefined,
-    { headers: tenantHeaders(tenantId) },
+    tenantRequestConfig(tenantId),
   )
   return response.data
 }

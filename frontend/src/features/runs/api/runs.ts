@@ -1,4 +1,5 @@
 import { apiClient } from '../../../api/client'
+import { tenantRequestConfig } from '../../../api/tenant'
 
 
 export type RunStatus =
@@ -34,8 +35,6 @@ export interface RunEvent {
   payload: Record<string, unknown>
 }
 
-const headers = (tenantId: string) => ({ 'X-Tenant-ID': tenantId })
-
 export async function createRun(
   tenantId: string,
   employeeId: string,
@@ -44,23 +43,23 @@ export async function createRun(
   const response = await apiClient.post<Run>(
     `/employees/${employeeId}/runs`,
     { input },
-    { headers: headers(tenantId) },
+    tenantRequestConfig(tenantId),
   )
   return response.data
 }
 
 export async function listRuns(tenantId: string): Promise<Run[]> {
-  return (await apiClient.get<Run[]>('/runs', { headers: headers(tenantId) })).data
+  return (await apiClient.get<Run[]>('/runs', tenantRequestConfig(tenantId))).data
 }
 
 export async function getRun(tenantId: string, runId: string): Promise<Run> {
-  return (await apiClient.get<Run>(`/runs/${runId}`, { headers: headers(tenantId) })).data
+  return (await apiClient.get<Run>(`/runs/${runId}`, tenantRequestConfig(tenantId))).data
 }
 
 export async function listRunEvents(tenantId: string, runId: string): Promise<RunEvent[]> {
   return (
     await apiClient.get<RunEvent[]>(`/runs/${runId}/events`, {
-      headers: headers(tenantId),
+      ...tenantRequestConfig(tenantId),
     })
   ).data
 }
@@ -75,7 +74,7 @@ export async function controlRun(
     await apiClient.post<Run>(
       `/runs/${runId}/control`,
       { action, ...options },
-      { headers: headers(tenantId) },
+      tenantRequestConfig(tenantId),
     )
   ).data
 }

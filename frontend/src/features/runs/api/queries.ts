@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import { controlRun, createRun, getRun, listRunEvents, listRuns } from './runs'
 
@@ -41,6 +42,7 @@ export function useCreateRun(employeeId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'runs', 'create', employeeId),
     mutationFn: (input: Record<string, unknown>) => createRun(tenantId!, employeeId, input),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: runKeys.all(tenantId!) }),
   })
@@ -50,6 +52,7 @@ export function useControlRun(runId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'runs', 'control', runId),
     mutationFn: ({
       action,
       approvalId,

@@ -8,6 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.runs import (
+    SqlAlchemyRunCommandRepository,
+    SqlAlchemyRunRepository,
+)
+from agent_platform.platform.runs.entities import RunStatus
+from agent_platform.platform.tool_gateway.errors import ToolInvocationClaimRejected
 from agent_platform.platform.tool_gateway.models import AuditEventType, ToolAuditEvent
 
 
@@ -56,10 +62,42 @@ class SqlAlchemyToolAuditSink:
     async def emit(self, event: ToolAuditEvent) -> None:
         try:
             async with self._session_factory() as session:
+                if event.event_type is AuditEventType.STARTED:
+                    await self._assert_started_claim_allowed(session, event)
                 session.add(self._record(event))
                 await session.commit()
+        except ToolInvocationClaimRejected:
+            raise
         except Exception:
             raise ToolAuditPersistenceError("Tool audit persistence failed") from None
+
+    async def _assert_started_claim_allowed(
+        self,
+        session: AsyncSession,
+        event: ToolAuditEvent,
+    ) -> None:
+        run = await SqlAlchemyRunRepository(session).get_for_update(
+            tenant_id=event.tenant_id,
+            run_id=event.run_id,
+        )
+        pending_cancel = await SqlAlchemyRunCommandRepository(session).unprocessed_cancel_commands(
+            run_id=event.run_id
+        )
+        if (
+            run is None
+            or run.status
+            in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }
+            or pending_cancel
+        ):
+            raise ToolInvocationClaimRejected
+        await self._after_started_claim_locked()
+
+    async def _after_started_claim_locked(self) -> None:
+        """Extension seam used by deterministic lock-order integration tests."""
 
     @staticmethod
     def _record(event: ToolAuditEvent) -> ToolAuditRecord:

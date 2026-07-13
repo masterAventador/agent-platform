@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
@@ -142,6 +142,182 @@ describe('App', () => {
       user_id: '00000000-0000-0000-0000-000000000001',
       workspace_id: memberWorkspace.id,
     })
+  })
+
+  it('旧租户写操作进行中时提示并阻止切换，结算后才允许切换', async () => {
+    const user = userEvent.setup()
+    authState.workspaces = [ownerWorkspace, memberWorkspace]
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    queryClient.setQueryData(['employees', ownerWorkspace.id], [{ id: 'owner-only' }])
+    let resolveMutation: (() => void) | undefined
+    const pendingMutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [
+        'tenant-mutation',
+        ownerWorkspace.id,
+        'employees',
+        'update',
+        'employee-1',
+      ],
+      mutationFn: () => new Promise<void>((resolve) => {
+        resolveMutation = resolve
+      }),
+    }).execute(undefined)
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect((await screen.findByLabelText('当前工作区')).closest('.ant-select'))
+      .toHaveTextContent('Owner workspace')
+    await user.click(screen.getByLabelText('当前工作区'))
+    await user.click(screen.getByText('Member workspace'))
+
+    expect(await screen.findByText(
+      '当前工作区仍有操作正在提交，请等待完成后再切换。',
+    )).toBeInTheDocument()
+    expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
+      .toHaveTextContent('Owner workspace')
+    expect(queryClient.getQueryData(['employees', ownerWorkspace.id])).toEqual([
+      { id: 'owner-only' },
+    ])
+
+    await act(async () => {
+      resolveMutation?.()
+      await pendingMutation
+    })
+    await waitFor(() => expect(screen.queryByText(
+      '当前工作区仍有操作正在提交，请等待完成后再切换。',
+    )).not.toBeInTheDocument())
+    expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
+      .toHaveTextContent('Owner workspace')
+
+    await user.click(screen.getByLabelText('当前工作区'))
+    await user.click(screen.getByText('Member workspace'))
+
+    expect(await screen.findByRole('heading', { name: '工作台' })).toBeInTheDocument()
+    expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
+      .toHaveTextContent('Member workspace')
+  })
+
+  it('cancelQueries 等待期间旧租户新增写操作时不删缓存且不切换', async () => {
+    const user = userEvent.setup()
+    authState.workspaces = [ownerWorkspace, memberWorkspace]
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    queryClient.setQueryData(['employees', ownerWorkspace.id], [{ id: 'owner-only' }])
+
+    let markCancelStarted: (() => void) | undefined
+    const cancelStarted = new Promise<void>((resolve) => {
+      markCancelStarted = resolve
+    })
+    let releaseCancel: (() => void) | undefined
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve
+    })
+    vi.spyOn(queryClient, 'cancelQueries').mockImplementation(async () => {
+      markCancelStarted?.()
+      await cancelGate
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect((await screen.findByLabelText('当前工作区')).closest('.ant-select'))
+      .toHaveTextContent('Owner workspace')
+    await user.click(screen.getByLabelText('当前工作区'))
+    await user.click(screen.getByText('Member workspace'))
+    await cancelStarted
+
+    let resolveMutation: (() => void) | undefined
+    const pendingMutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [
+        'tenant-mutation',
+        ownerWorkspace.id,
+        'employees',
+        'update',
+        'employee-during-cancel',
+      ],
+      mutationFn: () => new Promise<void>((resolve) => {
+        resolveMutation = resolve
+      }),
+    }).execute(undefined)
+
+    await act(async () => {
+      releaseCancel?.()
+      await Promise.resolve()
+    })
+
+    expect(await screen.findByText(
+      '当前工作区仍有操作正在提交，请等待完成后再切换。',
+    )).toBeInTheDocument()
+    expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
+      .toHaveTextContent('Owner workspace')
+    expect(queryClient.getQueryData(['employees', ownerWorkspace.id])).toEqual([
+      { id: 'owner-only' },
+    ])
+
+    await act(async () => {
+      resolveMutation?.()
+      await pendingMutation
+    })
+  })
+
+  it('快速尝试从 A 切到 B 再切 C 时串行化并禁用 workspace Select', async () => {
+    const user = userEvent.setup()
+    authState.workspaces = [ownerWorkspace, memberWorkspace, adminWorkspace]
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    let markCancelStarted: (() => void) | undefined
+    const cancelStarted = new Promise<void>((resolve) => {
+      markCancelStarted = resolve
+    })
+    let releaseCancel: (() => void) | undefined
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve
+    })
+    const cancelQueries = vi.spyOn(queryClient, 'cancelQueries')
+      .mockImplementation(async () => {
+        markCancelStarted?.()
+        await cancelGate
+      })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    const workspaceSelect = await screen.findByLabelText('当前工作区')
+    await user.click(workspaceSelect)
+    await user.click(screen.getByText('Member workspace'))
+    await cancelStarted
+
+    expect(workspaceSelect).toBeDisabled()
+    await user.click(workspaceSelect)
+    expect(workspaceSelect).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('option', { name: 'Admin workspace' }))
+      .toHaveAttribute('aria-selected', 'false')
+
+    await act(async () => {
+      releaseCancel?.()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(workspaceSelect).not.toBeDisabled())
+    expect(cancelQueries).toHaveBeenCalledTimes(1)
+    expect(workspaceSelect.closest('.ant-select')).toHaveTextContent('Member workspace')
   })
 
   it('active admin workspace 而非第一 workspace 决定权限入口', async () => {
