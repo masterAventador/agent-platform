@@ -97,6 +97,107 @@ async def test_dead_letter_transaction_fails_run_and_processes_original_command(
 
 
 @pytest.mark.asyncio
+async def test_valid_dead_letter_rejects_cross_spliced_command_and_run(session_factory) -> None:
+    tenant_a, tenant_b = uuid4(), uuid4()
+    run_a = Run.create(
+        tenant_id=tenant_a,
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    ).transition_to(RunStatus.RUNNING)
+    run_b = Run.create(
+        tenant_id=tenant_b,
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    ).transition_to(RunStatus.RUNNING)
+    command_a = RunCommand.create(
+        run_id=run_a.id,
+        tenant_id=tenant_a,
+        action=RunCommandAction.START,
+    )
+    from agent_platform.infrastructure.database.repositories.runs import (
+        SqlAlchemyRunCommandRepository,
+        SqlAlchemyRunRepository,
+    )
+
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        await runs.add(run_a)
+        await runs.add(run_b)
+        await SqlAlchemyRunCommandRepository(session).add(command_a)
+        await session.commit()
+
+    service = RunDeadLetterService(session_factory=session_factory)
+    with pytest.raises(LookupError):
+        await service.record_failure(
+            RunQueueDelivery(
+                delivery_id="valid-cross-splice",
+                message=RunQueueMessage(
+                    command_id=command_a.id,
+                    run_id=run_b.id,
+                    tenant_id=tenant_b,
+                    action="start",
+                ),
+            ),
+            attempts=5,
+            error_type="delivery_processing_failed",
+        )
+
+    assert await service.list(tenant_id=tenant_a, limit=10) == []
+    assert await service.list(tenant_id=tenant_b, limit=10) == []
+    async with session_factory() as session:
+        persisted_b = await SqlAlchemyRunRepository(session).get(
+            tenant_id=tenant_b,
+            run_id=run_b.id,
+        )
+        assert persisted_b is not None and persisted_b.status is RunStatus.RUNNING
+        assert not await SqlAlchemyRunCommandRepository(session).is_processed(command_a.id)
+
+
+@pytest.mark.asyncio
+async def test_valid_dead_letter_rejects_command_action_mismatch(session_factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    ).transition_to(RunStatus.RUNNING)
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.MESSAGE,
+    )
+    from agent_platform.infrastructure.database.repositories.runs import (
+        SqlAlchemyRunCommandRepository,
+        SqlAlchemyRunRepository,
+    )
+
+    async with session_factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    with pytest.raises(LookupError):
+        await RunDeadLetterService(session_factory=session_factory).record_failure(
+            RunQueueDelivery(
+                delivery_id="valid-action-mismatch",
+                message=RunQueueMessage(
+                    command_id=command.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            ),
+            attempts=5,
+            error_type="delivery_processing_failed",
+        )
+
+
+@pytest.mark.asyncio
 async def test_replay_is_idempotent_and_creates_new_run_and_start_command(session_factory) -> None:
     run = Run.create(
         tenant_id=uuid4(),
@@ -136,8 +237,17 @@ async def test_replay_is_idempotent_and_creates_new_run_and_start_command(sessio
         error_type="delivery_processing_failed",
     )
 
-    first = await service.replay(tenant_id=run.tenant_id, dead_letter_id=dead_letter.id)
-    second = await service.replay(tenant_id=run.tenant_id, dead_letter_id=dead_letter.id)
+    operator_user_id = uuid4()
+    first = await service.replay(
+        tenant_id=run.tenant_id,
+        dead_letter_id=dead_letter.id,
+        operator_user_id=operator_user_id,
+    )
+    second = await service.replay(
+        tenant_id=run.tenant_id,
+        dead_letter_id=dead_letter.id,
+        operator_user_id=operator_user_id,
+    )
 
     assert first == second
     assert first.run_id != run.id
@@ -152,6 +262,7 @@ async def test_replay_is_idempotent_and_creates_new_run_and_start_command(sessio
         assert cloned.employee_id == run.employee_id
         assert cloned.employee_version == run.employee_version
         assert cloned.input_data == run.input_data
+        assert cloned.created_by == operator_user_id
         pending = await SqlAlchemyRunCommandRepository(session).pending(limit=100)
         replayed = [item for item in pending if item.id == first.command_id]
         assert len(replayed) == 1
@@ -180,7 +291,11 @@ async def test_malformed_dead_letter_stores_only_bounded_metadata_and_cannot_rep
     assert len(record.raw_fields_summary["sha256"]) == 64
     assert "secret-value" not in repr(record.raw_fields_summary)
     with pytest.raises(LookupError):
-        await service.replay(tenant_id=uuid4(), dead_letter_id=record.id)
+        await service.replay(
+            tenant_id=uuid4(),
+            dead_letter_id=record.id,
+            operator_user_id=uuid4(),
+        )
 
 
 @pytest.mark.asyncio
@@ -233,7 +348,7 @@ async def test_malformed_with_verified_ids_fails_and_processes_original_but_stay
 
     assert record.is_malformed is True
     assert record.original_command_id == command.id
-    assert await service.list(tenant_id=run.tenant_id, limit=10) == []
+    assert await service.list(tenant_id=run.tenant_id, limit=10) == [record]
     async with session_factory() as session:
         persisted = await SqlAlchemyRunRepository(session).get(
             tenant_id=run.tenant_id,
@@ -493,7 +608,7 @@ async def test_malformed_cross_spliced_ids_cannot_mutate_another_run(session_fac
         await SqlAlchemyRunCommandRepository(session).add(command_a)
         await session.commit()
 
-    await RunDeadLetterService(session_factory=session_factory).record_malformed(
+    record = await RunDeadLetterService(session_factory=session_factory).record_malformed(
         delivery_id="cross-spliced-malformed",
         attempts=5,
         error_type="malformed_queue_message",
@@ -505,6 +620,11 @@ async def test_malformed_cross_spliced_ids_cannot_mutate_another_run(session_fac
             "payload": "not-json",
         },
     )
+
+    assert record.tenant_id is None
+    service = RunDeadLetterService(session_factory=session_factory)
+    assert await service.list(tenant_id=tenant_a, limit=10) == []
+    assert await service.list(tenant_id=tenant_b, limit=10) == []
 
     async with session_factory() as session:
         runs = SqlAlchemyRunRepository(session)
@@ -556,7 +676,11 @@ async def test_list_and_replay_are_tenant_scoped(session_factory) -> None:
 
     assert await service.list(tenant_id=another_tenant, limit=10) == []
     with pytest.raises(LookupError):
-        await service.replay(tenant_id=another_tenant, dead_letter_id=record.id)
+        await service.replay(
+            tenant_id=another_tenant,
+            dead_letter_id=record.id,
+            operator_user_id=uuid4(),
+        )
 
 
 @pytest.mark.asyncio
@@ -961,6 +1085,7 @@ async def test_real_redis_mirror_is_idempotent_and_replay_enters_dispatch_stream
         replayed = await service.replay(
             tenant_id=run.tenant_id,
             dead_letter_id=dead_letter.id,
+            operator_user_id=uuid4(),
         )
         assert (
             await RunCommandDispatcher(

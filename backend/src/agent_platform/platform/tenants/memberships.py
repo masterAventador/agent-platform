@@ -8,6 +8,7 @@ from agent_platform.platform.tenants.entities import Tenant
 
 class TenantRole(StrEnum):
     OWNER = "owner"
+    ADMIN = "admin"
     MEMBER = "member"
 
 

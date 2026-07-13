@@ -1,4 +1,4 @@
-import { Button, Flex, Layout, Space, Typography } from 'antd'
+import { Button, Flex, Layout, Result, Space, Typography } from 'antd'
 import { lazy, Suspense } from 'react'
 import { Link, Route, Routes, useNavigate } from 'react-router-dom'
 
@@ -64,6 +64,11 @@ const ToolsPage = lazy(() =>
     default: module.ToolsPage,
   })),
 )
+const DeadLettersPage = lazy(() =>
+  import('../features/operations/pages/DeadLettersPage').then((module) => ({
+    default: module.DeadLettersPage,
+  })),
+)
 
 export function App() {
   return (
@@ -88,6 +93,8 @@ function PlatformShell() {
   const currentUser = useCurrentUser()
   const logout = useLogout()
   const navigate = useNavigate()
+  const activeWorkspaceRole = currentUser.data?.workspaces[0]?.role
+  const canManageDeadLetters = activeWorkspaceRole === 'owner' || activeWorkspaceRole === 'admin'
 
   const signOut = async () => {
     await logout.mutateAsync()
@@ -108,6 +115,9 @@ function PlatformShell() {
             <Link to="/knowledge-bases">知识库</Link>
             <Link to="/skills">Skill 中心</Link>
             <Link to="/tools">工具与 MCP</Link>
+            {canManageDeadLetters && (
+              <Link to="/operations/dead-letters">任务运维</Link>
+            )}
           </Space>
         </nav>
       </Sider>
@@ -131,9 +141,23 @@ function PlatformShell() {
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/skills/:skillId" element={<SkillDetailPage />} />
           <Route path="/tools" element={<ToolsPage />} />
+          <Route
+            path="/operations/dead-letters"
+            element={canManageDeadLetters ? <DeadLettersPage /> : <DeadLetterAccessDenied />}
+          />
         </Routes>
       </Content>
     </Layout>
+  )
+}
+
+function DeadLetterAccessDenied() {
+  return (
+    <Result
+      status="403"
+      title="无权访问死信管理"
+      subTitle="仅工作区所有者和管理员可以查看和重放死信任务。"
+    />
   )
 }
 

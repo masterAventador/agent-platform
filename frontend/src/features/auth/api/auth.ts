@@ -11,7 +11,7 @@ export interface Workspace {
   id: string
   name: string
   slug: string
-  role: 'owner' | 'member'
+  role: 'owner' | 'admin' | 'member'
 }
 
 export interface Credentials {

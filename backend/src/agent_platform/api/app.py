@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.routes.auth import router as auth_router
+from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
 from agent_platform.api.routes.runs import router as runs_router
@@ -104,6 +105,7 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(employees_router)
     app.include_router(runs_router)
+    app.include_router(dead_letters_router)
     app.include_router(knowledge_router)
     app.include_router(skills_router)
     app.include_router(mcp_router)

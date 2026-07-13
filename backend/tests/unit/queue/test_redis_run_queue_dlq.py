@@ -132,6 +132,7 @@ async def test_redis_mirror_is_idempotent_metadata_only() -> None:
         failed_at=datetime.now(UTC),
         replayed_run_id=None,
         replayed_command_id=None,
+        replayed_at=None,
         settled_run_id=None,
         mirrored_at=None,
     )

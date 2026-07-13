@@ -59,7 +59,6 @@ class SqlAlchemyRunDeadLetterRepository:
         query = select(RunDeadLetterRecord).where(
             RunDeadLetterRecord.id == dead_letter_id,
             RunDeadLetterRecord.tenant_id == tenant_id,
-            RunDeadLetterRecord.is_malformed.is_(False),
         )
         if for_update:
             query = query.with_for_update()
@@ -89,12 +88,14 @@ class SqlAlchemyRunDeadLetterRepository:
     ) -> list[RunDeadLetterRecord]:
         query = select(RunDeadLetterRecord).where(
             RunDeadLetterRecord.tenant_id == tenant_id,
-            RunDeadLetterRecord.is_malformed.is_(False),
         )
         if only_unmirrored:
             query = query.where(RunDeadLetterRecord.mirrored_at.is_(None))
         result = await self._session.execute(
-            query.order_by(RunDeadLetterRecord.failed_at).limit(limit)
+            query.order_by(
+                RunDeadLetterRecord.failed_at.desc(),
+                RunDeadLetterRecord.id.desc(),
+            ).limit(limit)
         )
         return list(result.scalars())
 

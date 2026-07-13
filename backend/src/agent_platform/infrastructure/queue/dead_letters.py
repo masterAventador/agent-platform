@@ -51,6 +51,7 @@ class RunDeadLetter:
     failed_at: datetime
     replayed_run_id: UUID | None
     replayed_command_id: UUID | None
+    replayed_at: datetime | None
     settled_run_id: UUID | None
     mirrored_at: datetime | None
 
@@ -67,6 +68,14 @@ class DeadLetterSettlementPending(RuntimeError):
     def __init__(self, dead_letter: RunDeadLetter) -> None:
         super().__init__("dead_letter_settlement_pending")
         self.dead_letter = dead_letter
+
+
+class DeadLetterNotReplayable(ValueError):
+    """死信不具备安全重放所需的合法来源信息。"""
+
+
+class DeadLetterNotSettled(ValueError):
+    """死信尚未完成业务结算，不能创建重放任务。"""
 
 
 class DeadLetterMirrorPublisher(Protocol):
@@ -107,19 +116,22 @@ class RunDeadLetterService:
         message = delivery.message
         async with self._session_factory() as session:
             repository = SqlAlchemyRunDeadLetterRepository(session)
+            commands = SqlAlchemyRunCommandRepository(session)
+            command = await commands.get(message.command_id)
+            runs = SqlAlchemyRunRepository(session)
+            run = await runs.get(
+                tenant_id=message.tenant_id,
+                run_id=message.run_id,
+            )
+            self._validate_delivery_binding(command=command, run=run, delivery=delivery)
             existing = await repository.get_by_delivery_id(
                 source_stream=delivery.source_stream,
                 delivery_id=delivery.delivery_id,
             )
             if existing is not None:
                 record = existing
+                self._validate_record_binding(record=record, delivery=delivery)
             else:
-                run = await SqlAlchemyRunRepository(session).get(
-                    tenant_id=message.tenant_id,
-                    run_id=message.run_id,
-                )
-                if run is None:
-                    raise LookupError(message.run_id)
                 record = RunDeadLetterRecord(
                     id=uuid4(),
                     source_stream=delivery.source_stream,
@@ -184,6 +196,9 @@ class RunDeadLetterService:
     ) -> RunDeadLetter:
         self._validate_error_type(error_type)
         summary = self._summarize_fields(raw_fields)
+        candidate_command_id = self._safe_uuid(raw_fields.get("command_id"))
+        candidate_run_id = self._safe_uuid(raw_fields.get("run_id"))
+        candidate_tenant_id = self._safe_uuid(raw_fields.get("tenant_id"))
         async with self._session_factory() as session:
             repository = SqlAlchemyRunDeadLetterRepository(session)
             existing = await repository.get_by_delivery_id(
@@ -199,9 +214,9 @@ class RunDeadLetterService:
                     id=uuid4(),
                     source_stream=source_stream,
                     original_delivery_id=delivery_id,
-                    original_command_id=self._safe_uuid(raw_fields.get("command_id")),
-                    original_run_id=self._safe_uuid(raw_fields.get("run_id")),
-                    tenant_id=self._safe_uuid(raw_fields.get("tenant_id")),
+                    original_command_id=candidate_command_id,
+                    original_run_id=candidate_run_id,
+                    tenant_id=None,
                     action=None,
                     attempts=attempts,
                     error_type=error_type,
@@ -225,18 +240,31 @@ class RunDeadLetterService:
                     if existing_after_conflict is None:
                         raise error
                     record = existing_after_conflict
+            verification_command_id: UUID | None
+            verification_run_id: UUID | None
+            verification_tenant_id: UUID | None
+            if record.tenant_id is not None:
+                verification_command_id = record.original_command_id
+                verification_run_id = record.original_run_id
+                verification_tenant_id = record.tenant_id
+            else:
+                verification_command_id = candidate_command_id
+                verification_run_id = candidate_run_id
+                verification_tenant_id = candidate_tenant_id
             verified_target = False
             if (
-                record.original_command_id is not None
-                and record.original_run_id is not None
-                and record.tenant_id is not None
+                verification_command_id is not None
+                and verification_run_id is not None
+                and verification_tenant_id is not None
+                and record.original_command_id == verification_command_id
+                and record.original_run_id == verification_run_id
             ):
                 commands = SqlAlchemyRunCommandRepository(session)
-                command = await commands.get(record.original_command_id)
+                command = await commands.get(verification_command_id)
                 runs = SqlAlchemyRunRepository(session)
                 run = await runs.get(
-                    tenant_id=record.tenant_id,
-                    run_id=record.original_run_id,
+                    tenant_id=verification_tenant_id,
+                    run_id=verification_run_id,
                 )
                 if (
                     command is not None
@@ -245,6 +273,7 @@ class RunDeadLetterService:
                     and command.tenant_id == run.tenant_id
                 ):
                     verified_target = True
+                    record.tenant_id = run.tenant_id
                     ownership_repository = SqlAlchemyRuntimeOwnershipRepository(session)
                     settlement_ownership = next(
                         (
@@ -299,6 +328,8 @@ class RunDeadLetterService:
                             epoch=settlement_ownership.epoch,
                         )
                         record.settled_run_id = run.id
+            if not verified_target:
+                record.tenant_id = None
             await session.commit()
             dead_letter = self._to_entity(record)
             if verified_target and record.settled_run_id is None:
@@ -331,8 +362,17 @@ class RunDeadLetterService:
             )
             if record is None or record.id != dead_letter_id:
                 raise LookupError(dead_letter_id)
+            self._validate_record_binding(record=record, delivery=delivery)
             if record.settled_run_id is not None:
                 return self._to_entity(record)
+            commands = SqlAlchemyRunCommandRepository(session)
+            command = await commands.get(message.command_id)
+            runs = SqlAlchemyRunRepository(session)
+            run = await runs.get(
+                tenant_id=message.tenant_id,
+                run_id=message.run_id,
+            )
+            self._validate_delivery_binding(command=command, run=run, delivery=delivery)
             ownership_repository = SqlAlchemyRuntimeOwnershipRepository(session)
             settlement_ownership = ownership
             if settlement_ownership is not None:
@@ -353,7 +393,6 @@ class RunDeadLetterService:
                     )
                 except RuntimeOwnershipBusy:
                     raise DeadLetterSettlementPending(self._to_entity(record)) from None
-            runs = SqlAlchemyRunRepository(session)
             run = await runs.get_for_update(
                 tenant_id=message.tenant_id,
                 run_id=message.run_id,
@@ -372,7 +411,7 @@ class RunDeadLetterService:
                         error_message=None,
                     )
                 )
-            await SqlAlchemyRunCommandRepository(session).mark_processed(message.command_id)
+            await commands.mark_processed(message.command_id)
             await ownership_repository.release(
                 run_id=message.run_id,
                 owner_id=settlement_ownership.owner_id or "",
@@ -382,7 +421,13 @@ class RunDeadLetterService:
             await session.commit()
             return self._to_entity(record)
 
-    async def replay(self, *, tenant_id: UUID, dead_letter_id: UUID) -> ReplayedRun:
+    async def replay(
+        self,
+        *,
+        tenant_id: UUID,
+        dead_letter_id: UUID,
+        operator_user_id: UUID,
+    ) -> ReplayedRun:
         async with self._session_factory() as session:
             repository = SqlAlchemyRunDeadLetterRepository(session)
             record = await repository.get(
@@ -392,13 +437,17 @@ class RunDeadLetterService:
             )
             if record is None:
                 raise LookupError(dead_letter_id)
+            if record.is_malformed:
+                raise DeadLetterNotReplayable(dead_letter_id)
+            if record.settled_run_id is None:
+                raise DeadLetterNotSettled(dead_letter_id)
             if record.replayed_run_id is not None and record.replayed_command_id is not None:
                 return ReplayedRun(
                     run_id=record.replayed_run_id,
                     command_id=record.replayed_command_id,
                 )
             if record.original_run_id is None or record.tenant_id is None:
-                raise ValueError("malformed dead letter cannot be replayed")
+                raise DeadLetterNotReplayable(dead_letter_id)
             runs = SqlAlchemyRunRepository(session)
             original = await runs.get(
                 tenant_id=record.tenant_id,
@@ -410,7 +459,7 @@ class RunDeadLetterService:
                 tenant_id=original.tenant_id,
                 employee_id=original.employee_id,
                 employee_version=original.employee_version,
-                created_by=original.created_by,
+                created_by=operator_user_id,
                 input_data=original.input_data,
             )
             replayed_command = RunCommand.create(
@@ -501,6 +550,39 @@ class RunDeadLetterService:
             return None
 
     @staticmethod
+    def _validate_delivery_binding(
+        *,
+        command: RunCommand | None,
+        run: Run | None,
+        delivery: RunQueueDelivery,
+    ) -> None:
+        message = delivery.message
+        if (
+            command is None
+            or run is None
+            or command.run_id != message.run_id
+            or command.tenant_id != message.tenant_id
+            or command.action.value != message.action
+        ):
+            raise LookupError(message.command_id)
+
+    @staticmethod
+    def _validate_record_binding(
+        *,
+        record: RunDeadLetterRecord,
+        delivery: RunQueueDelivery,
+    ) -> None:
+        message = delivery.message
+        if (
+            record.is_malformed
+            or record.original_command_id != message.command_id
+            or record.original_run_id != message.run_id
+            or record.tenant_id != message.tenant_id
+            or record.action != message.action
+        ):
+            raise LookupError(record.id)
+
+    @staticmethod
     def _summarize_fields(raw_fields: dict[str, str]) -> dict[str, JsonValue]:
         keys = sorted(raw_fields)
         canonical = json.dumps(
@@ -543,9 +625,22 @@ class RunDeadLetterService:
             error_type=record.error_type,
             is_malformed=record.is_malformed,
             raw_fields_summary=record.raw_fields_summary,
-            failed_at=record.failed_at,
+            failed_at=RunDeadLetterService._as_utc(record.failed_at),
             replayed_run_id=record.replayed_run_id,
             replayed_command_id=record.replayed_command_id,
+            replayed_at=(
+                RunDeadLetterService._as_utc(record.replayed_at)
+                if record.replayed_at is not None
+                else None
+            ),
             settled_run_id=record.settled_run_id,
-            mirrored_at=record.mirrored_at,
+            mirrored_at=(
+                RunDeadLetterService._as_utc(record.mirrored_at)
+                if record.mirrored_at is not None
+                else None
+            ),
         )
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

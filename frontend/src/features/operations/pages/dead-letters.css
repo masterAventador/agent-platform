@@ -1,0 +1,8 @@
+.dead-letter-alert,
+.dead-letter-card {
+  margin-top: 24px;
+}
+
+.dead-letter-loading {
+  padding: 64px 0;
+}
