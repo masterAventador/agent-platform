@@ -514,3 +514,84 @@ async def test_multiple_workspaces_require_exact_tenant_header(
     )
     assert original_list.json() == []
     assert [item["id"] for item in second_list.json()] == [created.json()["id"]]
+
+
+@pytest.mark.asyncio
+async def test_admin_manages_employees_while_member_only_sees_published_tenant_entries(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    _, session_factory, client = employee_api
+    owner = await register_and_login(client, "employee-rbac-owner@example.com")
+    tenant_id = UUID(owner["workspaces"][0]["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+
+    draft = (
+        await client.post(
+            "/api/v1/employees",
+            headers=headers,
+            json=employee_definition(name="RBAC 草稿员工"),
+        )
+    ).json()
+    published = (
+        await client.post(
+            "/api/v1/employees",
+            headers=headers,
+            json=employee_definition(name="RBAC 已发布员工"),
+        )
+    ).json()
+    await client.post(f"/api/v1/employees/{published['id']}/publish", headers=headers)
+    private = (
+        await client.post(
+            "/api/v1/employees",
+            headers=headers,
+            json={
+                **employee_definition(name="RBAC 私有员工"),
+                "visibility": "private",
+            },
+        )
+    ).json()
+    await client.post(f"/api/v1/employees/{private['id']}/publish", headers=headers)
+
+    async def join_workspace(email: str, role: str) -> dict[str, object]:
+        await client.post("/api/v1/auth/logout")
+        user = await register_and_login(client, email)
+        async with session_factory() as session:
+            session.add(
+                TenantMembershipRecord(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=UUID(user["id"]),
+                    role=role,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+        return user
+
+    await join_workspace("employee-rbac-admin@example.com", "admin")
+    admin_update = await client.put(
+        f"/api/v1/employees/{draft['id']}",
+        headers=headers,
+        json=employee_definition(name="RBAC 管理员已更新草稿"),
+    )
+    assert admin_update.status_code == 200
+
+    await join_workspace("employee-rbac-member@example.com", "member")
+    listed = await client.get("/api/v1/employees", headers=headers)
+    assert listed.status_code == 200
+    assert [employee["id"] for employee in listed.json()] == [published["id"]]
+    assert (
+        await client.get(f"/api/v1/employees/{published['id']}", headers=headers)
+    ).status_code == 200
+    assert (
+        await client.get(f"/api/v1/employees/{draft['id']}", headers=headers)
+    ).status_code == 404
+    assert (
+        await client.get(f"/api/v1/employees/{private['id']}", headers=headers)
+    ).status_code == 404
+    assert (
+        await client.get(
+            f"/api/v1/employees/{published['id']}/versions",
+            headers=headers,
+        )
+    ).status_code == 403

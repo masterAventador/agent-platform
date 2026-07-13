@@ -14,11 +14,10 @@ from agent_platform.infrastructure.queue.dead_letters import (
     RunDeadLetter,
     RunDeadLetterService,
 )
-from agent_platform.platform.tenants.memberships import TenantRole
+from agent_platform.platform.tenants.permissions import TenantPermission
 
 router = APIRouter(prefix="/api/v1", tags=["run-dead-letters"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
-_DEAD_LETTER_OPERATOR_ROLES = frozenset({TenantRole.OWNER, TenantRole.ADMIN})
 _KNOWN_QUEUE_FIELD_NAMES = frozenset(
     {"command_id", "run_id", "tenant_id", "action", "payload"}
 )
@@ -143,13 +142,6 @@ class ReplayDeadLetterResponse(BaseModel):
         return cls(run_id=replayed.run_id, command_id=replayed.command_id)
 
 
-def _permission_denied() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={"code": "permission_denied", "message": "没有执行此操作的权限"},
-    )
-
-
 def _not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -179,10 +171,8 @@ async def list_run_dead_letters(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.OPERATIONS_MANAGE,
         )
-    if access.role not in _DEAD_LETTER_OPERATOR_ROLES:
-        raise _permission_denied()
 
     dead_letters = await RunDeadLetterService(
         session_factory=request.app.state.session_factory
@@ -209,10 +199,8 @@ async def replay_run_dead_letter(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.OPERATIONS_MANAGE,
         )
-    if access.role not in _DEAD_LETTER_OPERATOR_ROLES:
-        raise _permission_denied()
 
     service = RunDeadLetterService(session_factory=request.app.state.session_factory)
     try:

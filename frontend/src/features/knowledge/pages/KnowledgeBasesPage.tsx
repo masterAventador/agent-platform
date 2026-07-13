@@ -11,7 +11,7 @@ interface CreateValues {
   description: string
 }
 
-export function KnowledgeBasesPage() {
+export function KnowledgeBasesPage({ canManageKnowledge }: { canManageKnowledge: boolean }) {
   const knowledgeBases = useKnowledgeBases()
   const create = useCreateKnowledgeBase()
   const navigate = useNavigate()
@@ -19,6 +19,7 @@ export function KnowledgeBasesPage() {
   const [form] = Form.useForm<CreateValues>()
 
   const submit = async () => {
+    if (!canManageKnowledge) return
     const values = await form.validateFields()
     const value = await create.mutateAsync(values)
     setOpen(false)
@@ -33,7 +34,9 @@ export function KnowledgeBasesPage() {
           <Typography.Title level={2}>知识库</Typography.Title>
           <Typography.Text type="secondary">管理企业文档、解析状态与检索引用</Typography.Text>
         </div>
-        <Button type="primary" onClick={() => setOpen(true)}>创建知识库</Button>
+        {canManageKnowledge && (
+          <Button type="primary" onClick={() => setOpen(true)}>创建知识库</Button>
+        )}
       </Flex>
       {knowledgeBases.data?.length ? (
         <div className="knowledge-grid">

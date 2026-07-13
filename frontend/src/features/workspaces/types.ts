@@ -5,6 +5,7 @@ export interface Workspace {
   name: string
   slug: string
   role: WorkspaceRole
+  permissions: string[]
 }
 
 export interface WorkspaceUser {

@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
@@ -195,6 +196,191 @@ async def test_create_and_read_queued_run_for_published_employee(run_client: Asy
     assert events_response.status_code == 200
     assert [event["type"] for event in events_response.json()] == ["run.progress"]
     assert events_response.json()[0]["payload"]["action"] == "cancel_requested"
+
+
+@pytest.mark.asyncio
+async def test_member_run_access_is_owner_scoped_and_admin_can_manage_any_run(
+    multi_workspace_run_api: tuple[
+        FastAPI, async_sessionmaker[AsyncSession], AsyncClient, AsyncClient
+    ],
+) -> None:
+    _, session_factory, owner_client, member_client = multi_workspace_run_api
+    owner = await _register_and_login(owner_client, "run-rbac-owner@example.com")
+    tenant_id = UUID(owner["workspaces"][0]["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+    employee = (
+        await owner_client.post(
+            "/api/v1/employees",
+            headers=headers,
+            json={
+                "name": "Run RBAC 员工",
+                "role_description": "验证任务所有权",
+                "work_mode": "autonomous",
+                "system_prompt": "只验证任务权限。",
+                "model": {"provider": "openai", "name": "gpt-5"},
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+                "capabilities": {
+                    "conversation": True,
+                    "scheduled_tasks": False,
+                    "file_upload": False,
+                },
+            },
+        )
+    ).json()
+    await owner_client.post(f"/api/v1/employees/{employee['id']}/publish", headers=headers)
+    owner_run = (
+        await owner_client.post(
+            f"/api/v1/employees/{employee['id']}/runs",
+            headers=headers,
+            json={"input": {"owner": True}},
+        )
+    ).json()
+
+    member = await _register_and_login(member_client, "run-rbac-member@example.com")
+    async with session_factory() as session:
+        membership = TenantMembershipRecord(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            user_id=UUID(member["id"]),
+            role="member",
+            created_at=datetime.now(UTC),
+        )
+        session.add(membership)
+        await session.commit()
+
+    member_run_response = await member_client.post(
+        f"/api/v1/employees/{employee['id']}/runs",
+        headers=headers,
+        json={"input": {"member": True}},
+    )
+    assert member_run_response.status_code == 201
+    member_run = member_run_response.json()
+    listed = await member_client.get("/api/v1/runs", headers=headers)
+    assert [run["id"] for run in listed.json()] == [member_run["id"]]
+    assert (
+        await member_client.get(f"/api/v1/runs/{owner_run['id']}", headers=headers)
+    ).status_code == 404
+    assert (
+        await member_client.get(
+            f"/api/v1/runs/{owner_run['id']}/events",
+            headers=headers,
+        )
+    ).status_code == 404
+    assert (
+        await member_client.get(
+            f"/api/v1/runs/{owner_run['id']}/stream",
+            headers=headers,
+        )
+    ).status_code == 404
+    assert (
+        await member_client.post(
+            f"/api/v1/runs/{owner_run['id']}/control",
+            headers=headers,
+            json={"action": "cancel"},
+        )
+    ).status_code == 404
+
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        own_run = await runs.get(tenant_id=tenant_id, run_id=UUID(member_run["id"]))
+        assert own_run is not None
+        await runs.update(
+            own_run.transition_to(RunStatus.RUNNING).transition_to(
+                RunStatus.WAITING_FOR_APPROVAL
+            )
+        )
+        await session.commit()
+    member_approval = await member_client.post(
+        f"/api/v1/runs/{member_run['id']}/control",
+        headers=headers,
+        json={"action": "approve", "approval_id": str(uuid4())},
+    )
+    assert member_approval.status_code == 403
+
+    async with session_factory() as session:
+        membership = (
+            await session.execute(
+                select(TenantMembershipRecord).where(
+                    TenantMembershipRecord.tenant_id == tenant_id,
+                    TenantMembershipRecord.user_id == UUID(member["id"]),
+                )
+            )
+        ).scalar_one()
+        membership.role = "admin"
+        await session.commit()
+    admin_list = await member_client.get("/api/v1/runs", headers=headers)
+    assert {run["id"] for run in admin_list.json()} == {owner_run["id"], member_run["id"]}
+    assert (
+        await member_client.get(f"/api/v1/runs/{owner_run['id']}", headers=headers)
+    ).status_code == 200
+    assert (
+        await member_client.post(
+            f"/api/v1/runs/{member_run['id']}/control",
+            headers=headers,
+            json={"action": "approve", "approval_id": str(uuid4())},
+        )
+    ).status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_member_cannot_probe_draft_employee_when_creating_run(
+    multi_workspace_run_api: tuple[
+        FastAPI, async_sessionmaker[AsyncSession], AsyncClient, AsyncClient
+    ],
+) -> None:
+    _, session_factory, owner_client, member_client = multi_workspace_run_api
+    owner = await _register_and_login(owner_client, "run-visibility-owner@example.com")
+    tenant_id = UUID(owner["workspaces"][0]["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+    draft = (
+        await owner_client.post(
+            "/api/v1/employees",
+            headers=headers,
+            json={
+                "name": "隐藏草稿",
+                "role_description": "验证运行创建的资源防枚举",
+                "work_mode": "autonomous",
+                "system_prompt": "仅用于权限测试。",
+                "model": {"provider": "openai", "name": "gpt-5"},
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+                "capabilities": {
+                    "conversation": True,
+                    "scheduled_tasks": False,
+                    "file_upload": False,
+                },
+            },
+        )
+    ).json()
+    member = await _register_and_login(member_client, "run-visibility-member@example.com")
+    async with session_factory() as session:
+        session.add(
+            TenantMembershipRecord(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=UUID(member["id"]),
+                role="member",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    hidden = await member_client.post(
+        f"/api/v1/employees/{draft['id']}/runs",
+        headers=headers,
+        json={"input": {}},
+    )
+    assert hidden.status_code == 404
+    assert hidden.json()["detail"]["code"] == "resource_not_found"
+
+    owner_draft = await owner_client.post(
+        f"/api/v1/employees/{draft['id']}/runs",
+        headers=headers,
+        json={"input": {}},
+    )
+    assert owner_draft.status_code == 409
+    assert owner_draft.json()["detail"]["code"] == "employee_not_published"
 
 
 @pytest.mark.asyncio

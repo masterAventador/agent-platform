@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
+from agent_platform.platform.tenants.permissions import TenantPermission
 from agent_platform.platform.tools.entities import (
     McpServer,
     McpTransport,
@@ -145,7 +146,10 @@ async def create_mcp_server(
 ) -> McpServerResponse:
     async with request.app.state.session_factory() as session:
         user, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         try:
             server = await _service(session).register_server(
@@ -172,7 +176,10 @@ async def list_mcp_servers(
 ) -> list[McpServerResponse]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         servers = await _service(session).list_servers(tenant_id=access.tenant.id)
     return [McpServerResponse.from_entity(server) for server in servers]
@@ -187,7 +194,10 @@ async def set_mcp_server_enabled(
 ) -> McpServerResponse:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         try:
             server = await _service(session).set_server_enabled(
@@ -206,7 +216,10 @@ async def create_tool(
 ) -> ToolResponse:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         try:
             tool = await _service(session).register_tool(
@@ -233,7 +246,10 @@ async def list_tools(
 ) -> list[ToolResponse]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         tools = await _service(session).list_tools(
             tenant_id=access.tenant.id, server_id=server_id
@@ -250,7 +266,10 @@ async def set_tool_enabled(
 ) -> ToolResponse:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.TOOLS_MANAGE,
         )
         try:
             tool = await _service(session).set_tool_enabled(

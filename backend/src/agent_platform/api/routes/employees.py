@@ -15,6 +15,7 @@ from agent_platform.infrastructure.database.repositories.tools import SqlAlchemy
 from agent_platform.platform.employees.entities import (
     Employee,
     EmployeeDraft,
+    EmployeeStatus,
     EmployeeVersion,
     EmployeeVisibility,
     RuntimeType,
@@ -27,6 +28,10 @@ from agent_platform.platform.employees.errors import (
     EmployeeToolNotBindable,
 )
 from agent_platform.platform.employees.services import EmployeeService
+from agent_platform.platform.tenants.permissions import (
+    TenantPermission,
+    role_has_permission,
+)
 
 router = APIRouter(prefix="/api/v1/employees", tags=["employees"])
 
@@ -184,6 +189,13 @@ def _raise_employee_error(error: Exception) -> None:
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
 
 
+def _is_member_visible(employee: Employee) -> bool:
+    return (
+        employee.status is EmployeeStatus.PUBLISHED
+        and employee.draft.visibility is EmployeeVisibility.TENANT
+    )
+
+
 @router.post("", response_model=EmployeeResponse, status_code=status.HTTP_201_CREATED)
 async def create_employee(
     payload: EmployeeDefinitionRequest,
@@ -195,7 +207,7 @@ async def create_employee(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=True,
+            required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
         try:
             employee = await _service(database_session).create(
@@ -224,9 +236,13 @@ async def list_employees(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=None,
         )
         employees = await _service(database_session).list_all(tenant_id=access.tenant.id)
+        if not role_has_permission(
+            role=access.role, permission=TenantPermission.EMPLOYEES_MANAGE
+        ):
+            employees = [employee for employee in employees if _is_member_visible(employee)]
     return [EmployeeResponse.from_entity(employee) for employee in employees]
 
 
@@ -241,13 +257,17 @@ async def get_employee(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=None,
         )
         try:
             employee = await _service(database_session).get(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,
             )
+            if not role_has_permission(
+                role=access.role, permission=TenantPermission.EMPLOYEES_MANAGE
+            ) and not _is_member_visible(employee):
+                raise EmployeeNotFound
         except EmployeeNotFound as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
@@ -266,7 +286,7 @@ async def update_employee(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=True,
+            required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
         try:
             employee = await _service(database_session).update(
@@ -297,7 +317,7 @@ async def publish_employee(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=True,
+            required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
         try:
             employee = await _service(database_session).publish(
@@ -328,7 +348,7 @@ async def list_employee_versions(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
         try:
             versions = await _service(database_session).list_versions(

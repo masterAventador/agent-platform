@@ -15,6 +15,7 @@ from agent_platform.platform.auth.errors import (
     RegistrationUnavailable,
 )
 from agent_platform.platform.tenants.memberships import WorkspaceAccess
+from agent_platform.platform.tenants.permissions import permissions_for_role
 from agent_platform.platform.users.entities import User
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -48,6 +49,7 @@ class WorkspaceResponse(BaseModel):
     name: str
     slug: str
     role: str
+    permissions: list[str]
 
     @classmethod
     def from_access(cls, access: WorkspaceAccess) -> "WorkspaceResponse":
@@ -56,6 +58,9 @@ class WorkspaceResponse(BaseModel):
             name=access.tenant.name,
             slug=access.tenant.slug,
             role=access.role.value,
+            permissions=sorted(
+                permission.value for permission in permissions_for_role(access.role)
+            ),
         )
 
 

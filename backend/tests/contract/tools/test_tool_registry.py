@@ -276,7 +276,7 @@ async def test_employee_can_only_bind_enabled_tools_from_enabled_tenant_server(
 
 
 @pytest.mark.asyncio
-async def test_member_can_read_registry_but_only_owner_can_write(tool_client) -> None:
+async def test_only_registry_managers_can_read_or_write_registry(tool_client) -> None:
     client, session_factory = tool_client
     owner_headers = await _register_workspace(client, "registry-owner@example.com")
     tenant_id = UUID(owner_headers["X-Tenant-ID"])
@@ -304,11 +304,36 @@ async def test_member_can_read_registry_but_only_owner_can_write(tool_client) ->
     member_headers = {"X-Tenant-ID": str(tenant_id)}
 
     listed = await client.get("/api/v1/mcp-servers", headers=member_headers)
-    assert listed.status_code == 200
-    assert [server["name"] for server in listed.json()] == ["member-visible"]
+    assert listed.status_code == 403
+    assert (await client.get("/api/v1/tools", headers=member_headers)).status_code == 403
     forbidden = await client.post(
         "/api/v1/mcp-servers",
         headers=member_headers,
         json={"name": "member-write", "transport": "stdio", "command": "uvx"},
     )
     assert forbidden.status_code == 403
+
+    await client.post("/api/v1/auth/logout")
+    await _register_workspace(client, "registry-admin@example.com")
+    admin = (await client.get("/api/v1/auth/me")).json()
+    async with session_factory() as session:
+        session.add(
+            TenantMembershipRecord(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=UUID(admin["id"]),
+                role="admin",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    admin_listed = await client.get("/api/v1/mcp-servers", headers=member_headers)
+    assert admin_listed.status_code == 200
+    assert [server["name"] for server in admin_listed.json()] == ["member-visible"]
+    admin_created = await client.post(
+        "/api/v1/mcp-servers",
+        headers=member_headers,
+        json={"name": "admin-write", "transport": "stdio", "command": "uvx"},
+    )
+    assert admin_created.status_code == 201

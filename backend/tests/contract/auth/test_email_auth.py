@@ -62,6 +62,16 @@ async def test_register_login_restore_session_and_logout(auth_client: AsyncClien
     assert register_response.status_code == 201
     assert register_response.json()["email"] == "owner@example.com"
     assert register_response.json()["email_verified"] is False
+    assert register_response.json()["workspaces"][0]["permissions"] == [
+        "employees.manage",
+        "knowledge.manage",
+        "operations.manage",
+        "runs.execute",
+        "runs.manage",
+        "skills.manage",
+        "tools.manage",
+        "workspace.manage",
+    ]
 
     login_response = await auth_client.post(
         "/api/v1/auth/login",

@@ -43,13 +43,18 @@ const employee: Employee = {
   },
 }
 
-function renderPage(canManageWorkspace = true) {
+function renderPage(canManageEmployees = true, canExecuteRuns = true) {
   return render(
     <MemoryRouter initialEntries={['/employees/employee-1']}>
       <Routes>
         <Route
           path="/employees/:employeeId"
-          element={<EmployeeDetailPage canManageWorkspace={canManageWorkspace} />}
+          element={(
+            <EmployeeDetailPage
+              canManageEmployees={canManageEmployees}
+              canExecuteRuns={canExecuteRuns}
+            />
+          )}
         />
         <Route path="/employees/:employeeId/edit" element={<div>editor</div>} />
       </Routes>
@@ -141,6 +146,18 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     expect(screen.getByText('完成用户交付的研究任务')).toBeInTheDocument()
   })
 
+  it('hides run creation when runs.execute is absent even if employee is published', () => {
+    vi.mocked(useEmployee).mockReturnValue({
+      data: { ...employee, status: 'published', published_version: 1 },
+      isPending: false,
+    } as never)
+
+    renderPage(true, false)
+
+    expect(screen.queryByRole('button', { name: '发起任务' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /编\s*辑/ })).toBeInTheDocument()
+  })
+
   it('catches createRun 409 and renders an actionable error in the modal', async () => {
     const user = userEvent.setup()
     const mutateAsync = vi.fn().mockRejectedValue({
@@ -170,5 +187,19 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
 
     await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ message: '执行任务' }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('renders a controlled not-found page instead of a permanent spinner', () => {
+    vi.mocked(useEmployee).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      error: { response: { status: 404 } },
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText('数字员工不存在或无权访问')).toBeInTheDocument()
+    expect(screen.queryByLabelText('正在加载页面')).not.toBeInTheDocument()
   })
 })

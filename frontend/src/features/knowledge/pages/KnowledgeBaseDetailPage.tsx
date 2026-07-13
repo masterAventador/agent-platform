@@ -1,8 +1,15 @@
-import { Button, Card, Empty, Flex, Input, Space, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Empty, Flex, Input, Modal, Space, Tag, Typography } from 'antd'
 import { useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 
-import { useKnowledgeBases, useKnowledgeDocuments, useKnowledgeSearch, useUploadKnowledgeDocument } from '../api/queries'
+import { getApiErrorMessage } from '../../auth/api/errors'
+import {
+  useDeleteKnowledgeBase,
+  useKnowledgeBases,
+  useKnowledgeDocuments,
+  useKnowledgeSearch,
+  useUploadKnowledgeDocument,
+} from '../api/queries'
 import './knowledge.css'
 
 
@@ -14,14 +21,18 @@ const documentStatuses: Record<string, { color: string; text: string }> = {
   CANCEL: { color: 'default', text: '已取消' },
 }
 
-export function KnowledgeBaseDetailPage() {
+export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowledge: boolean }) {
   const { knowledgeBaseId = '' } = useParams()
   const knowledgeBases = useKnowledgeBases()
   const documents = useKnowledgeDocuments(knowledgeBaseId)
   const upload = useUploadKnowledgeDocument(knowledgeBaseId)
+  const remove = useDeleteKnowledgeBase()
   const search = useKnowledgeSearch(knowledgeBaseId)
+  const navigate = useNavigate()
   const [file, setFile] = useState<File>()
   const [question, setQuestion] = useState('')
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteError, setDeleteError] = useState<unknown>()
   const value = useMemo(
     () => knowledgeBases.data?.find((item) => item.id === knowledgeBaseId),
     [knowledgeBaseId, knowledgeBases.data],
@@ -29,24 +40,39 @@ export function KnowledgeBaseDetailPage() {
 
   return (
     <section className="knowledge-detail">
-      <Typography.Title level={2}>{value?.name ?? '知识库详情'}</Typography.Title>
+      <Flex align="center" justify="space-between" gap={16}>
+        <Typography.Title level={2}>{value?.name ?? '知识库详情'}</Typography.Title>
+        {canManageKnowledge && (
+          <Button
+            danger
+            onClick={() => {
+              setDeleteError(undefined)
+              setDeleteOpen(true)
+            }}
+          >
+            删除知识库
+          </Button>
+        )}
+      </Flex>
       <Typography.Text type="secondary">{value?.description}</Typography.Text>
       <Card className="knowledge-section" title="文档">
-        <Flex gap={12} align="center">
-          <input
-            aria-label="选择文档"
-            type="file"
-            onChange={(event) => setFile(event.target.files?.[0])}
-          />
-          <Button
-            type="primary"
-            disabled={!file}
-            loading={upload.isPending}
-            onClick={() => file && upload.mutate(file)}
-          >
-            上传并解析
-          </Button>
-        </Flex>
+        {canManageKnowledge && (
+          <Flex gap={12} align="center">
+            <input
+              aria-label="选择文档"
+              type="file"
+              onChange={(event) => setFile(event.target.files?.[0])}
+            />
+            <Button
+              type="primary"
+              disabled={!file}
+              loading={upload.isPending}
+              onClick={() => canManageKnowledge && file && upload.mutate(file)}
+            >
+              上传并解析
+            </Button>
+          </Flex>
+        )}
         <div className="knowledge-documents">
           {documents.data?.length ? documents.data.map((document) => {
             const status = documentStatuses[document.status] ?? {
@@ -89,6 +115,36 @@ export function KnowledgeBaseDetailPage() {
           ))}
         </div>
       </Card>
+      <Modal
+        title="确认删除知识库"
+        open={deleteOpen}
+        okText="确认删除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        confirmLoading={remove.isPending}
+        onCancel={() => {
+          setDeleteOpen(false)
+          setDeleteError(undefined)
+        }}
+        onOk={async () => {
+          if (!canManageKnowledge) return
+          try {
+            await remove.mutateAsync(knowledgeBaseId)
+            navigate('/knowledge-bases', { replace: true })
+          } catch (error) {
+            setDeleteError(error)
+          }
+        }}
+      >
+        {deleteError !== undefined && (
+          <Alert
+            type="error"
+            showIcon
+            title={getApiErrorMessage(deleteError, '知识库删除失败，请稍后重试')}
+          />
+        )}
+        删除后知识库及其文档将无法恢复。
+      </Modal>
     </section>
   )
 }

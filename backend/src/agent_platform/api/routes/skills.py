@@ -19,6 +19,8 @@ from agent_platform.platform.skills.errors import (
 )
 from agent_platform.platform.skills.ports import SkillStorage
 from agent_platform.platform.skills.services import SkillService
+from agent_platform.platform.tenants.memberships import TenantRole
+from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
@@ -43,6 +45,20 @@ class SkillResponse(BaseModel):
             status="published" if skill.published_version is not None else "draft",
             latest_version=skill.latest_version,
             published_version=skill.published_version,
+        )
+
+    @classmethod
+    def from_published_version(
+        cls, skill: Skill, published: SkillVersion
+    ) -> "SkillResponse":
+        return cls(
+            id=skill.id,
+            tenant_id=skill.tenant_id,
+            name=skill.name,
+            description=published.description,
+            status="published",
+            latest_version=published.version,
+            published_version=published.version,
         )
 
 
@@ -71,6 +87,10 @@ def _service(request: Request, session: AsyncSession) -> SkillService:
         repository=SqlAlchemySkillRepository(session),
         storage=cast(SkillStorage, request.app.state.skill_storage),
     )
+
+
+def _can_manage_skills(role: TenantRole) -> bool:
+    return role_has_permission(role=role, permission=TenantPermission.SKILLS_MANAGE)
 
 
 async def _content(bundle: UploadFile) -> bytes:
@@ -112,7 +132,10 @@ async def create_skill(
 ) -> SkillResponse:
     async with request.app.state.session_factory() as session:
         user, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
         )
         try:
             skill, _ = await _service(request, session).create(
@@ -133,10 +156,27 @@ async def list_skills(
 ) -> list[SkillResponse]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
-        skills = await _service(request, session).list_all(tenant_id=access.tenant.id)
-    return [SkillResponse.from_entity(skill) for skill in skills]
+        service = _service(request, session)
+        skills = await service.list_all(tenant_id=access.tenant.id)
+        if _can_manage_skills(access.role):
+            responses = [SkillResponse.from_entity(skill) for skill in skills]
+        else:
+            responses = []
+            for skill in skills:
+                if skill.published_version is None:
+                    continue
+                published = await service.required_version(
+                    tenant_id=access.tenant.id,
+                    skill_id=skill.id,
+                    version=skill.published_version,
+                )
+                responses.append(SkillResponse.from_published_version(skill, published))
+    return responses
 
 
 @router.get("/{skill_id}", response_model=SkillResponse)
@@ -145,16 +185,32 @@ async def get_skill(
 ) -> SkillResponse:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
         try:
-            skill = await _service(request, session).required_skill(
+            service = _service(request, session)
+            skill = await service.required_skill(
                 tenant_id=access.tenant.id, skill_id=skill_id
             )
-        except SkillNotFound as error:
+            if _can_manage_skills(access.role):
+                response = SkillResponse.from_entity(skill)
+            else:
+                published_version = skill.published_version
+                if published_version is None:
+                    raise SkillNotFound
+                published = await service.required_version(
+                    tenant_id=access.tenant.id,
+                    skill_id=skill.id,
+                    version=published_version,
+                )
+                response = SkillResponse.from_published_version(skill, published)
+        except (SkillNotFound, SkillVersionNotFound) as error:
             _raise_skill_error(error)
             raise AssertionError("unreachable") from error
-    return SkillResponse.from_entity(skill)
+    return response
 
 
 @router.post(
@@ -170,7 +226,10 @@ async def add_skill_version(
 ) -> SkillVersionResponse:
     async with request.app.state.session_factory() as session:
         user, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
         )
         try:
             _, version = await _service(request, session).add_version(
@@ -192,12 +251,25 @@ async def list_skill_versions(
 ) -> list[SkillVersionResponse]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
         try:
-            versions = await _service(request, session).list_versions(
+            service = _service(request, session)
+            skill = await service.required_skill(
                 tenant_id=access.tenant.id, skill_id=skill_id
             )
+            if not _can_manage_skills(access.role) and skill.published_version is None:
+                raise SkillNotFound
+            versions = await service.list_versions(
+                tenant_id=access.tenant.id, skill_id=skill_id
+            )
+            if not _can_manage_skills(access.role):
+                versions = [
+                    item for item in versions if item.version == skill.published_version
+                ]
         except SkillNotFound as error:
             _raise_skill_error(error)
             raise AssertionError("unreachable") from error
@@ -213,7 +285,10 @@ async def publish_skill_version(
 ) -> SkillResponse:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
         )
         try:
             skill = await _service(request, session).publish(
@@ -238,10 +313,19 @@ async def read_skill_file(
 ) -> Response:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
         try:
-            content = await _service(request, session).read_file(
+            service = _service(request, session)
+            skill = await service.required_skill(
+                tenant_id=access.tenant.id, skill_id=skill_id
+            )
+            if not _can_manage_skills(access.role) and skill.published_version != version:
+                raise SkillVersionNotFound
+            content = await service.read_file(
                 tenant_id=access.tenant.id,
                 skill_id=skill_id,
                 version_number=version,

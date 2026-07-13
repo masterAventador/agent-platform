@@ -45,13 +45,21 @@ const runningRun = {
   error_message: null,
 }
 
-function renderPage() {
+function renderPage(canExecuteRuns = true, canManageRuns = true) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/runs/run-1']}>
         <Routes>
-          <Route path="/runs/:runId" element={<RunDetailPage />} />
+          <Route
+            path="/runs/:runId"
+            element={(
+              <RunDetailPage
+                canExecuteRuns={canExecuteRuns}
+                canManageRuns={canManageRuns}
+              />
+            )}
+          />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -122,5 +130,54 @@ describe('RunDetailPage tenant-scoped event stream', () => {
     expect(screen.getByRole('button', { name: '取消处理中' })).toBeDisabled()
     expect(screen.getByText('执行中', { exact: true })).toBeInTheDocument()
     expect(screen.queryByText('已取消', { exact: true })).not.toBeInTheDocument()
+  })
+
+  it('separates member run execution from owner/admin approval management', () => {
+    vi.mocked(useRun).mockReturnValue({
+      data: { ...runningRun, status: 'waiting_for_approval' },
+      isPending: false,
+    } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'approval-event',
+        type: 'approval.required',
+        sequence: 2,
+        payload: { approval_id: 'approval-1' },
+      }],
+      isPending: false,
+    } as never)
+
+    const view = renderPage(true, false)
+
+    expect(screen.getByRole('button', { name: '取消任务' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /批\s*准/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /拒\s*绝/ })).not.toBeInTheDocument()
+
+    view.unmount()
+    renderPage(true, true)
+    expect(screen.getByRole('button', { name: /批\s*准/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /拒\s*绝/ })).toBeInTheDocument()
+  })
+
+  it('hides resume and cancel when runs.execute is absent', () => {
+    renderPage(false, false)
+
+    expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [403, '无权访问任务'],
+    [404, '任务不存在或无权访问'],
+  ])('renders a controlled %s error page instead of a permanent spinner', (status, title) => {
+    vi.mocked(useRun).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+      error: { response: { status } },
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText(title)).toBeInTheDocument()
   })
 })

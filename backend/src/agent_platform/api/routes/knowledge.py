@@ -17,6 +17,7 @@ from agent_platform.platform.knowledge.models import (
 )
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.tenants.permissions import TenantPermission
 
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["knowledge"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
@@ -92,7 +93,10 @@ async def create_knowledge_base(
 ) -> KnowledgeBaseResponse:
     async with request.app.state.session_factory() as session:
         user, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
         )
         provider = _providers(request).default_provider
         dataset = await provider.create_dataset(
@@ -126,7 +130,10 @@ async def list_knowledge_bases(
 ) -> list[KnowledgeBaseResponse]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
         values = await SqlAlchemyKnowledgeBaseRepository(session).list(tenant_id=access.tenant.id)
     return [KnowledgeBaseResponse.from_entity(value) for value in values]
@@ -140,7 +147,10 @@ async def delete_knowledge_base(
 ) -> None:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=True
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
         )
         repository = SqlAlchemyKnowledgeBaseRepository(session)
         value = await repository.get(
@@ -163,7 +173,10 @@ async def upload_document(
 ) -> KnowledgeDocument:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     provider = _provider_for(request, value)
@@ -191,7 +204,10 @@ async def list_documents(
 ) -> list[KnowledgeDocument]:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     return await _provider_for(request, value).list_documents(dataset_id=value.provider_id)
@@ -206,7 +222,10 @@ async def retrieve(
 ) -> KnowledgeSearchResult:
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
-            request=request, database_session=session, tenant_id=tenant_id, owner_required=False
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=None,
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     return await _provider_for(request, value).retrieve(

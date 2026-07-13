@@ -8,6 +8,11 @@ import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
 import { BackendStatus } from '../features/system/components/BackendStatus'
+import { WorkspaceCapabilityGate } from '../features/workspaces/components/WorkspaceCapabilityGate'
+import {
+  getWorkspaceCapabilities,
+  workspacePermissions,
+} from '../features/workspaces/permissions'
 import { useWorkspaceSelection } from '../features/workspaces/store'
 import './app.css'
 
@@ -144,9 +149,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
     )
   }
 
-  const canManageDeadLetters = activeWorkspace.role === 'owner'
-    || activeWorkspace.role === 'admin'
-  const canManageWorkspace = activeWorkspace.role === 'owner'
+  const capabilities = getWorkspaceCapabilities(activeWorkspace)
 
   const switchWorkspace = async (workspaceId: string) => {
     if (workspaceId === activeWorkspace.id || workspaceSwitchInFlight.current) return
@@ -203,11 +206,11 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
           <Space className="app-navigation" orientation="vertical" size="middle">
             <Link to="/">工作台</Link>
             <Link to="/employees">数字员工</Link>
-            <Link to="/runs">任务中心</Link>
+            {capabilities.canExecuteRuns && <Link to="/runs">任务中心</Link>}
             <Link to="/knowledge-bases">知识库</Link>
             <Link to="/skills">Skill 中心</Link>
-            <Link to="/tools">工具与 MCP</Link>
-            {canManageDeadLetters && (
+            {capabilities.canManageTools && <Link to="/tools">工具与 MCP</Link>}
+            {capabilities.canManageOperations && (
               <Link to="/operations/dead-letters">任务运维</Link>
             )}
           </Space>
@@ -240,63 +243,115 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
           <Route path="/" element={<Dashboard />} />
           <Route
             path="/employees"
-            element={<EmployeesPage canManageWorkspace={canManageWorkspace} />}
+            element={<EmployeesPage canManageEmployees={capabilities.canManageEmployees} />}
           />
           <Route
             path="/employees/new"
-            element={canManageWorkspace ? <EmployeeEditorPage /> : <EmployeeWriteAccessDenied />}
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.employeesManage}
+                title="无权编辑数字员工"
+              >
+                <EmployeeEditorPage />
+              </WorkspaceCapabilityGate>
+            )}
           />
           <Route
             path="/employees/:employeeId"
-            element={<EmployeeDetailPage canManageWorkspace={canManageWorkspace} />}
+            element={(
+              <EmployeeDetailPage
+                canManageEmployees={capabilities.canManageEmployees}
+                canExecuteRuns={capabilities.canExecuteRuns}
+              />
+            )}
           />
           <Route
             path="/employees/:employeeId/edit"
-            element={canManageWorkspace ? <EmployeeEditorPage /> : <EmployeeWriteAccessDenied />}
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.employeesManage}
+                title="无权编辑数字员工"
+              >
+                <EmployeeEditorPage />
+              </WorkspaceCapabilityGate>
+            )}
           />
-          <Route path="/runs" element={<RunsPage />} />
-          <Route path="/runs/:runId" element={<RunDetailPage />} />
-          <Route path="/knowledge-bases" element={<KnowledgeBasesPage />} />
-          <Route path="/knowledge-bases/:knowledgeBaseId" element={<KnowledgeBaseDetailPage />} />
+          <Route
+            path="/runs"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.runsExecute}
+                title="无权访问任务中心"
+              >
+                <RunsPage />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/runs/:runId"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.runsExecute}
+                title="无权访问任务中心"
+              >
+                <RunDetailPage
+                  canExecuteRuns={capabilities.canExecuteRuns}
+                  canManageRuns={capabilities.canManageRuns}
+                />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/knowledge-bases"
+            element={(
+              <KnowledgeBasesPage canManageKnowledge={capabilities.canManageKnowledge} />
+            )}
+          />
+          <Route
+            path="/knowledge-bases/:knowledgeBaseId"
+            element={(
+              <KnowledgeBaseDetailPage canManageKnowledge={capabilities.canManageKnowledge} />
+            )}
+          />
           <Route
             path="/skills"
-            element={<SkillsPage canManageWorkspace={canManageWorkspace} />}
+            element={<SkillsPage canManageSkills={capabilities.canManageSkills} />}
           />
           <Route
             path="/skills/:skillId"
-            element={<SkillDetailPage canManageWorkspace={canManageWorkspace} />}
+            element={<SkillDetailPage canManageSkills={capabilities.canManageSkills} />}
           />
           <Route
             path="/tools"
-            element={<ToolsPage canManageWorkspace={canManageWorkspace} />}
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.toolsManage}
+                title="无权访问工具与 MCP"
+              >
+                <ToolsPage canManageTools={capabilities.canManageTools} />
+              </WorkspaceCapabilityGate>
+            )}
           />
           <Route
             path="/operations/dead-letters"
-            element={canManageDeadLetters ? <DeadLettersPage /> : <DeadLetterAccessDenied />}
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.operationsManage}
+                title="无权访问死信管理"
+              >
+                <DeadLettersPage />
+              </WorkspaceCapabilityGate>
+            )}
           />
         </Routes>
       </Content>
     </Layout>
-  )
-}
-
-function DeadLetterAccessDenied() {
-  return (
-    <Result
-      status="403"
-      title="无权访问死信管理"
-      subTitle="仅工作区所有者和管理员可以查看和重放死信任务。"
-    />
-  )
-}
-
-function EmployeeWriteAccessDenied() {
-  return (
-    <Result
-      status="403"
-      title="无权编辑数字员工"
-      subTitle="仅工作区所有者可以创建或编辑数字员工。"
-    />
   )
 }
 

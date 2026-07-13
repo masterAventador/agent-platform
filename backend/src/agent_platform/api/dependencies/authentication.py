@@ -12,7 +12,8 @@ from agent_platform.infrastructure.database.repositories.tenants import (
 )
 from agent_platform.platform.auth.errors import AuthenticationRequired
 from agent_platform.platform.auth.services import AuthService
-from agent_platform.platform.tenants.memberships import TenantRole, WorkspaceAccess
+from agent_platform.platform.tenants.memberships import WorkspaceAccess
+from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 from agent_platform.platform.users.entities import User
 
 
@@ -45,7 +46,7 @@ async def resolve_workspace(
     request: Request,
     database_session: AsyncSession,
     tenant_id: UUID | None,
-    owner_required: bool,
+    required_permission: TenantPermission | None,
 ) -> tuple[User, WorkspaceAccess]:
     user = await authenticate_request(request, database_session)
     workspaces = SqlAlchemyWorkspaceRepository(database_session)
@@ -66,7 +67,10 @@ async def resolve_workspace(
             )
         access = maybe_access
 
-    if owner_required and access.role is not TenantRole.OWNER:
+    if required_permission is not None and not role_has_permission(
+        role=access.role,
+        permission=required_permission,
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "permission_denied", "message": "没有执行此操作的权限"},

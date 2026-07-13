@@ -98,5 +98,7 @@ test('member 看不到入口且直接访问时受控拒绝', async ({ page }) =>
   await expect(page.getByRole('link', { name: '任务运维' })).toHaveCount(0)
   await page.goto('/operations/dead-letters')
   await expect(page.getByText('无权访问死信管理')).toBeVisible()
-  await expect(page.getByText('仅工作区所有者和管理员可以查看和重放死信任务。')).toBeVisible()
+  await expect(page.getByText(
+    '当前工作区没有执行此操作的权限，请联系工作区所有者。',
+  )).toBeVisible()
 })

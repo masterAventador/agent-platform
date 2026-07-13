@@ -12,12 +12,14 @@ const owner: Workspace = {
   name: 'Owner workspace',
   slug: 'owner-workspace',
   role: 'owner',
+  permissions: [],
 }
 const member: Workspace = {
   id: '00000000-0000-4000-8000-000000000020',
   name: 'Member workspace',
   slug: 'member-workspace',
   role: 'member',
+  permissions: [],
 }
 
 describe('active workspace store', () => {

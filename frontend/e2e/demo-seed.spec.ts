@@ -31,7 +31,7 @@ test('用户可以登录 Demo Seed 并从页面查看代表性数据', async ({ 
 
   await page.getByRole('link', { name: '工具与 MCP' }).click()
   await expect(page.getByRole('heading', { name: '工具与 MCP' })).toBeVisible()
-  await expect(page.getByText('演示企业搜索（未启用）', { exact: true })).toBeVisible()
+  await expect(page.getByText('演示企业搜索（未启用）', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('search_demo_documents', { exact: true })).toBeVisible()
 
   await page.getByRole('link', { name: '任务运维' }).click()

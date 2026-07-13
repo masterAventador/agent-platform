@@ -39,6 +39,16 @@ export async function createKnowledgeBase(
   return (await apiClient.post('/knowledge-bases', values, tenantRequestConfig(tenantId))).data
 }
 
+export async function deleteKnowledgeBase(
+  tenantId: string,
+  knowledgeBaseId: string,
+): Promise<void> {
+  await apiClient.delete(
+    `/knowledge-bases/${knowledgeBaseId}`,
+    tenantRequestConfig(tenantId),
+  )
+}
+
 export async function listDocuments(
   tenantId: string,
   knowledgeBaseId: string,

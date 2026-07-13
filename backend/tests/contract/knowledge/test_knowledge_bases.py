@@ -1,4 +1,6 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -10,6 +12,7 @@ from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.tenants import TenantMembershipRecord
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
     KnowledgeProviderUnavailable,
@@ -152,6 +155,75 @@ async def test_tenant_knowledge_base_document_and_retrieval_flow(knowledge_clien
     )
     assert deleted.status_code == 204
     assert len(provider.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_manages_knowledge_while_member_is_read_only(knowledge_client) -> None:
+    client, _, app = knowledge_client
+    password = "correct horse battery staple"
+    owner_credentials = {"email": "knowledge-owner@example.com", "password": password}
+    await client.post("/api/v1/auth/register", json=owner_credentials)
+    await client.post("/api/v1/auth/login", json=owner_credentials)
+    tenant_id = UUID((await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "权限演示知识库"},
+    )
+    assert created.status_code == 201
+
+    async def join_workspace(email: str, role: str) -> None:
+        await client.post("/api/v1/auth/logout")
+        credentials = {"email": email, "password": password}
+        await client.post("/api/v1/auth/register", json=credentials)
+        await client.post("/api/v1/auth/login", json=credentials)
+        user_id = UUID((await client.get("/api/v1/auth/me")).json()["id"])
+        async with app.state.session_factory() as session:
+            session.add(
+                TenantMembershipRecord(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    role=role,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+    await join_workspace("knowledge-admin@example.com", "admin")
+    admin_created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "管理员知识库"},
+    )
+    assert admin_created.status_code == 201
+    admin_uploaded = await client.post(
+        f"/api/v1/knowledge-bases/{created.json()['id']}/documents",
+        headers=headers,
+        files={"file": ("admin.txt", b"admin", "text/plain")},
+    )
+    assert admin_uploaded.status_code == 200
+
+    await join_workspace("knowledge-member@example.com", "member")
+    assert (await client.get("/api/v1/knowledge-bases", headers=headers)).status_code == 200
+    member_created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "成员不得创建"},
+    )
+    member_uploaded = await client.post(
+        f"/api/v1/knowledge-bases/{created.json()['id']}/documents",
+        headers=headers,
+        files={"file": ("member.txt", b"member", "text/plain")},
+    )
+    member_deleted = await client.delete(
+        f"/api/v1/knowledge-bases/{created.json()['id']}",
+        headers=headers,
+    )
+    assert member_created.status_code == 403
+    assert member_uploaded.status_code == 403
+    assert member_deleted.status_code == 403
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { useCreateRun } from '../../runs/api/queries'
+import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import { isEmployeeConfigurationAvailable } from '../api/employees'
 import { getEmployeeApiErrorMessage } from '../api/errors'
 import { useEmployee, usePublishEmployee } from '../api/queries'
@@ -15,7 +16,13 @@ const modeLabels = {
   hybrid: '混合协作',
 } as const
 
-export function EmployeeDetailPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
+export function EmployeeDetailPage({
+  canManageEmployees,
+  canExecuteRuns,
+}: {
+  canManageEmployees: boolean
+  canExecuteRuns: boolean
+}) {
   const { employeeId } = useParams()
   const employee = useEmployee(employeeId)
   const publish = usePublishEmployee(employeeId ?? '')
@@ -24,8 +31,11 @@ export function EmployeeDetailPage({ canManageWorkspace }: { canManageWorkspace:
   const [runModalOpen, setRunModalOpen] = useState(false)
   const [task, setTask] = useState('')
 
-  if (employee.isPending || !employee.data) {
+  if (employee.isPending) {
     return <Flex className="employee-loading" justify="center"><Spin /></Flex>
+  }
+  if (employee.isError || !employee.data) {
+    return <ResourceAccessError error={employee.error} resourceName="数字员工" />
   }
 
   const data = employee.data
@@ -43,17 +53,17 @@ export function EmployeeDetailPage({ canManageWorkspace }: { canManageWorkspace:
           <Typography.Text type="secondary">{data.definition.role_description}</Typography.Text>
         </div>
         <Space>
-          {published && configurationAvailable && (
+          {canExecuteRuns && published && configurationAvailable && (
             <Button onClick={() => setRunModalOpen(true)}>发起任务</Button>
           )}
-          {canManageWorkspace && (
+          {canManageEmployees && (
             <>
               <Button onClick={() => navigate(`/employees/${data.id}/edit`)}>编辑</Button>
               <Button
                 type="primary"
                 loading={publish.isPending}
                 disabled={!configurationAvailable}
-                onClick={() => publish.mutate()}
+                onClick={() => canManageEmployees && publish.mutate()}
               >
                 发布员工
               </Button>
@@ -70,15 +80,15 @@ export function EmployeeDetailPage({ canManageWorkspace }: { canManageWorkspace:
           title={published
             ? '已发布版本包含尚未开放的配置，当前不能发起任务'
             : '当前员工包含尚未开放的配置，不能直接发布'}
-          description={canManageWorkspace
+          description={canManageEmployees
             ? '请进入编辑器，显式切换为自主执行并关闭未接通能力。'
             : '请联系工作区所有者，将配置修正为自主执行并关闭未接通能力。'}
-          action={canManageWorkspace ? (
+          action={canManageEmployees ? (
             <Button onClick={() => navigate(`/employees/${data.id}/edit`)}>编辑并修正</Button>
           ) : undefined}
         />
       )}
-      {canManageWorkspace && publish.isError && (
+      {canManageEmployees && publish.isError && (
         <Alert
           className="employee-detail-card"
           type="error"

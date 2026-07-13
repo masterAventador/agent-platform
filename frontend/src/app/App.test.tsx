@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Workspace } from '../features/workspaces/types'
+import { workspacePermissions } from '../features/workspaces/permissions'
 import { useWorkspaceStore } from '../features/workspaces/store'
 import { App } from './App'
 
@@ -13,18 +14,32 @@ const ownerWorkspace: Workspace = {
   name: 'Owner workspace',
   slug: 'workspace-owner',
   role: 'owner',
+  permissions: Object.values(workspacePermissions),
 }
 const adminWorkspace: Workspace = {
   id: '00000000-0000-0000-0000-000000000020',
   name: 'Admin workspace',
   slug: 'workspace-admin',
   role: 'admin',
+  permissions: Object.values(workspacePermissions).filter(
+    (permission) => permission !== workspacePermissions.workspaceManage,
+  ),
 }
 const memberWorkspace: Workspace = {
   id: '00000000-0000-0000-0000-000000000030',
   name: 'Member workspace',
   slug: 'workspace-member',
   role: 'member',
+  permissions: [workspacePermissions.runsExecute],
+}
+const noRunWorkspace: Workspace = {
+  ...ownerWorkspace,
+  id: '00000000-0000-0000-0000-000000000040',
+  name: 'No run workspace',
+  slug: 'no-run-workspace',
+  permissions: ownerWorkspace.permissions.filter(
+    (permission) => permission !== workspacePermissions.runsExecute,
+  ),
 }
 const authState = vi.hoisted(() => ({ workspaces: [] as Workspace[] }))
 
@@ -355,8 +370,7 @@ describe('App', () => {
 
   it.each([
     ['member', memberWorkspace, '/employees/employee-1/edit'],
-    ['admin', adminWorkspace, '/employees/new'],
-  ])('%s 直接访问 owner-only 员工编辑路由时显示受控 403', async (_, workspace, path) => {
+  ])('%s 直接访问员工管理路由时显示受控 403', async (_, workspace, path) => {
     authState.workspaces = [workspace]
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
@@ -370,4 +384,38 @@ describe('App', () => {
     expect(screen.queryByRole('heading', { name: /创建数字员工|编辑数字员工/ }))
       .not.toBeInTheDocument()
   })
+
+  it('member 看不到工具入口且直接访问工具路由时显示统一 403', async () => {
+    authState.workspaces = [memberWorkspace]
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tools']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('无权访问工具与 MCP')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '工具与 MCP' })).not.toBeInTheDocument()
+    expect(screen.getByText(
+      '当前工作区没有执行此操作的权限，请联系工作区所有者。',
+    )).toBeInTheDocument()
+  })
+
+  it.each(['/runs', '/runs/run-1'])(
+    '缺少 runs.execute 时隐藏任务入口且直达 %s 显示统一 403',
+    async (path) => {
+      authState.workspaces = [noRunWorkspace]
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[path]}><App /></MemoryRouter>
+        </QueryClientProvider>,
+      )
+
+      expect(await screen.findByText('无权访问任务中心')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: '任务中心' })).not.toBeInTheDocument()
+    },
+  )
 })

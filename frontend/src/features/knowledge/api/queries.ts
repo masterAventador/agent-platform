@@ -4,6 +4,7 @@ import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createKnowledgeBase,
+  deleteKnowledgeBase,
   listDocuments,
   listKnowledgeBases,
   retrieve,
@@ -32,6 +33,16 @@ export function useCreateKnowledgeBase() {
     mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'create'),
     mutationFn: (values: { name: string; description: string }) =>
       createKnowledgeBase(tenantId!, values),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: keys.all(tenantId!) }),
+  })
+}
+
+export function useDeleteKnowledgeBase() {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'delete'),
+    mutationFn: (id: string) => deleteKnowledgeBase(tenantId!, id),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: keys.all(tenantId!) }),
   })
 }

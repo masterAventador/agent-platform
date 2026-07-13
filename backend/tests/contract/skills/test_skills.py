@@ -1,16 +1,20 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from io import BytesIO
+from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.tenants import TenantMembershipRecord
 
 
 class AllowAllRateLimiter:
@@ -32,20 +36,22 @@ class InMemorySkillStorage:
         self.objects.pop(key, None)
 
 
-def _skill_zip(*, description: str, reference: str) -> bytes:
+def _skill_zip(*, description: str, reference: str, name: str = "report-writer") -> bytes:
     output = BytesIO()
     with ZipFile(output, "w") as archive:
         archive.writestr(
-            "report-writer/SKILL.md",
-            "---\nname: report-writer\n"
+            f"{name}/SKILL.md",
+            f"---\nname: {name}\n"
             f"description: {description}\n---\n\n# Report writer\n",
         )
-        archive.writestr("report-writer/references/guide.md", reference)
+        archive.writestr(f"{name}/references/guide.md", reference)
     return output.getvalue()
 
 
 @pytest_asyncio.fixture
-async def skill_client() -> AsyncIterator[tuple[AsyncClient, InMemorySkillStorage]]:
+async def skill_client() -> AsyncIterator[
+    tuple[AsyncClient, InMemorySkillStorage, async_sessionmaker]
+]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     load_database_models()
     async with engine.begin() as connection:
@@ -60,7 +66,7 @@ async def skill_client() -> AsyncIterator[tuple[AsyncClient, InMemorySkillStorag
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
-        yield client, storage
+        yield client, storage, async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
 
 
@@ -74,7 +80,7 @@ async def _register_workspace(client: AsyncClient, email: str) -> dict[str, str]
 
 @pytest.mark.asyncio
 async def test_skill_version_publish_file_and_rollback_flow(skill_client) -> None:
-    client, storage = skill_client
+    client, storage, _ = skill_client
     headers = await _register_workspace(client, "skill-owner@example.com")
 
     created = await client.post(
@@ -135,7 +141,7 @@ async def test_skill_version_publish_file_and_rollback_flow(skill_client) -> Non
 
 @pytest.mark.asyncio
 async def test_skill_is_hidden_from_another_tenant(skill_client) -> None:
-    client, _ = skill_client
+    client, _, _ = skill_client
     owner_headers = await _register_workspace(client, "first-skill-owner@example.com")
     created = await client.post(
         "/api/v1/skills",
@@ -158,7 +164,7 @@ async def test_skill_is_hidden_from_another_tenant(skill_client) -> None:
 
 @pytest.mark.asyncio
 async def test_employee_can_only_bind_published_tenant_skills(skill_client) -> None:
-    client, _ = skill_client
+    client, _, _ = skill_client
     headers = await _register_workspace(client, "skill-binding-owner@example.com")
     created = await client.post(
         "/api/v1/skills",
@@ -206,3 +212,136 @@ async def test_employee_can_only_bind_published_tenant_skills(skill_client) -> N
     )
     assert cross_tenant.status_code == 422
     assert cross_tenant.json()["detail"]["code"] == "skill_not_bindable"
+
+
+@pytest.mark.asyncio
+async def test_member_sees_only_published_skill_and_published_version(skill_client) -> None:
+    client, _, session_factory = skill_client
+    owner_headers = await _register_workspace(client, "skill-rbac-owner@example.com")
+    tenant_id = UUID(owner_headers["X-Tenant-ID"])
+    published = await client.post(
+        "/api/v1/skills",
+        headers=owner_headers,
+        files={
+            "bundle": (
+                "report-writer.zip",
+                _skill_zip(description="Published skill.", reference="Version one"),
+                "application/zip",
+            )
+        },
+    )
+    assert published.status_code == 201
+    skill_id = published.json()["id"]
+    assert (
+        await client.post(f"/api/v1/skills/{skill_id}/versions/1/publish", headers=owner_headers)
+    ).status_code == 200
+    assert (
+        await client.post(
+            f"/api/v1/skills/{skill_id}/versions",
+            headers=owner_headers,
+            files={
+                "bundle": (
+                    "report-writer-v2.zip",
+                    _skill_zip(description="Draft version.", reference="Version two"),
+                    "application/zip",
+                )
+            },
+        )
+    ).status_code == 201
+    unpublished = await client.post(
+        "/api/v1/skills",
+        headers=owner_headers,
+        files={
+            "bundle": (
+                "draft.zip",
+                _skill_zip(
+                    description="Unpublished skill.",
+                    reference="Hidden",
+                    name="draft-skill",
+                ),
+                "application/zip",
+            )
+        },
+    )
+    assert unpublished.status_code == 201
+    owner_view = await client.get(f"/api/v1/skills/{skill_id}", headers=owner_headers)
+    assert owner_view.status_code == 200
+    assert owner_view.json()["description"] == "Draft version."
+    assert owner_view.json()["latest_version"] == 2
+
+    await client.post("/api/v1/auth/logout")
+    await _register_workspace(client, "skill-rbac-member@example.com")
+    member = (await client.get("/api/v1/auth/me")).json()
+    async with session_factory() as session:
+        session.add(
+            TenantMembershipRecord(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=UUID(member["id"]),
+                role="member",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+    member_headers = {"X-Tenant-ID": str(tenant_id)}
+
+    listed = await client.get("/api/v1/skills", headers=member_headers)
+    assert listed.status_code == 200
+    assert [skill["id"] for skill in listed.json()] == [skill_id]
+    assert listed.json()[0]["description"] == "Published skill."
+    assert listed.json()[0]["latest_version"] == 1
+    member_view = await client.get(f"/api/v1/skills/{skill_id}", headers=member_headers)
+    assert member_view.status_code == 200
+    assert member_view.json()["description"] == "Published skill."
+    assert member_view.json()["latest_version"] == 1
+    assert (
+        await client.get(
+            f"/api/v1/skills/{unpublished.json()['id']}", headers=member_headers
+        )
+    ).status_code == 404
+    versions = await client.get(
+        f"/api/v1/skills/{skill_id}/versions", headers=member_headers
+    )
+    assert versions.status_code == 200
+    assert [version["version"] for version in versions.json()] == [1]
+    assert (
+        await client.get(
+            f"/api/v1/skills/{skill_id}/versions/1/files/references/guide.md",
+            headers=member_headers,
+        )
+    ).status_code == 200
+    assert (
+        await client.get(
+            f"/api/v1/skills/{skill_id}/versions/2/files/references/guide.md",
+            headers=member_headers,
+        )
+    ).status_code == 404
+    assert (
+        await client.post(
+            f"/api/v1/skills/{skill_id}/versions",
+            headers=member_headers,
+            files={
+                "bundle": (
+                    "forbidden.zip",
+                    _skill_zip(description="Forbidden.", reference="Forbidden"),
+                    "application/zip",
+                )
+            },
+        )
+    ).status_code == 403
+
+    async with session_factory() as session:
+        membership = (
+            await session.execute(
+                select(TenantMembershipRecord).where(
+                    TenantMembershipRecord.tenant_id == tenant_id,
+                    TenantMembershipRecord.user_id == UUID(member["id"]),
+                )
+            )
+        ).scalar_one()
+        membership.role = "admin"
+        await session.commit()
+    admin_view = await client.get(f"/api/v1/skills/{skill_id}", headers=member_headers)
+    assert admin_view.status_code == 200
+    assert admin_view.json()["description"] == "Draft version."
+    assert admin_view.json()["latest_version"] == 2

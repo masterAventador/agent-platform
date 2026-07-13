@@ -20,11 +20,13 @@ from agent_platform.infrastructure.database.repositories.runs import (
 )
 from agent_platform.platform.employees.entities import (
     EmployeeStatus,
+    EmployeeVisibility,
     is_runnable_employee_definition,
 )
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
+from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
@@ -74,6 +76,13 @@ def _not_found() -> HTTPException:
     )
 
 
+def _permission_denied() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "permission_denied", "message": "没有执行此操作的权限"},
+    )
+
+
 @router.post(
     "/employees/{employee_id}/runs",
     response_model=RunResponse,
@@ -90,13 +99,22 @@ async def create_run(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         employee = await SqlAlchemyEmployeeRepository(database_session).get(
             tenant_id=access.tenant.id,
             employee_id=employee_id,
         )
         if employee is None:
+            raise _not_found()
+        if not role_has_permission(
+            role=access.role,
+            permission=TenantPermission.EMPLOYEES_MANAGE,
+        ) and (
+            employee.status is not EmployeeStatus.PUBLISHED
+            or employee.published_version is None
+            or employee.draft.visibility is not EmployeeVisibility.TENANT
+        ):
             raise _not_found()
         if employee.status is not EmployeeStatus.PUBLISHED or employee.published_version is None:
             raise HTTPException(
@@ -144,17 +162,21 @@ async def get_run(
     tenant_id: TenantHeader = None,
 ) -> RunResponse:
     async with request.app.state.session_factory() as database_session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         run = await SqlAlchemyRunRepository(database_session).get(
             tenant_id=access.tenant.id,
             run_id=run_id,
         )
         if run is None:
+            raise _not_found()
+        if not role_has_permission(
+            role=access.role, permission=TenantPermission.RUNS_MANAGE
+        ) and run.created_by != user.id:
             raise _not_found()
     return RunResponse.from_entity(run)
 
@@ -166,14 +188,22 @@ async def list_runs(
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
 ) -> list[RunResponse]:
     async with request.app.state.session_factory() as database_session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         runs = await SqlAlchemyRunRepository(database_session).list(
-            tenant_id=access.tenant.id, limit=limit
+            tenant_id=access.tenant.id,
+            limit=limit,
+            created_by=(
+                None
+                if role_has_permission(
+                    role=access.role, permission=TenantPermission.RUNS_MANAGE
+                )
+                else user.id
+            ),
         )
     return [RunResponse.from_entity(run) for run in runs]
 
@@ -186,17 +216,21 @@ async def list_run_events(
     after_sequence: Annotated[int, Query(ge=0)] = 0,
 ) -> list[PlatformEvent]:
     async with request.app.state.session_factory() as database_session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         run = await SqlAlchemyRunRepository(database_session).get(
             tenant_id=access.tenant.id,
             run_id=run_id,
         )
         if run is None:
+            raise _not_found()
+        if not role_has_permission(
+            role=access.role, permission=TenantPermission.RUNS_MANAGE
+        ) and run.created_by != user.id:
             raise _not_found()
         return await SqlAlchemyRunEventRepository(database_session).list(
             run_id=run_id,
@@ -220,12 +254,19 @@ async def control_run(
             request=request,
             database_session=database_session,
             tenant_id=tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         runs = SqlAlchemyRunRepository(database_session)
         run = await runs.get_for_update(tenant_id=access.tenant.id, run_id=run_id)
         if run is None:
             raise _not_found()
+        can_manage_runs = role_has_permission(
+            role=access.role, permission=TenantPermission.RUNS_MANAGE
+        )
+        if not can_manage_runs and run.created_by != user.id:
+            raise _not_found()
+        if payload.action in {"approve", "reject"} and not can_manage_runs:
+            raise _permission_denied()
 
         updated = _apply_control_request(run, payload)
 
@@ -317,11 +358,11 @@ async def stream_run_events(
 ) -> StreamingResponse:
     selected_tenant_id = stream_tenant_id or tenant_header
     async with request.app.state.session_factory() as database_session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=database_session,
             tenant_id=selected_tenant_id,
-            owner_required=False,
+            required_permission=TenantPermission.RUNS_EXECUTE,
         )
         if (
             tenant_header is not None
@@ -339,6 +380,10 @@ async def stream_run_events(
             tenant_id=access.tenant.id, run_id=run_id
         )
         if run is None:
+            raise _not_found()
+        if not role_has_permission(
+            role=access.role, permission=TenantPermission.RUNS_MANAGE
+        ) and run.created_by != user.id:
             raise _not_found()
 
     async def generate() -> AsyncIterator[str]:

@@ -59,7 +59,7 @@ const riskColors: Record<ToolRiskLevel, string> = {
   destructive: 'red',
 }
 
-export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
+export function ToolsPage({ canManageTools }: { canManageTools: boolean }) {
   const servers = useMcpServers()
   const tools = useTools()
   const createServer = useCreateMcpServer()
@@ -86,6 +86,7 @@ export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean 
   }
 
   const submitServer = async (values: ServerFormValues) => {
+    if (!canManageTools) return
     try {
       await createServer.mutateAsync({
         name: values.name,
@@ -103,6 +104,7 @@ export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean 
   }
 
   const submitTool = async (values: ToolFormValues) => {
+    if (!canManageTools) return
     try {
       await createTool.mutateAsync({
         server_id: values.serverId,
@@ -150,13 +152,16 @@ export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean 
         <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '已禁用'}</Tag>
       ),
     },
-    ...(canManageWorkspace ? [{
+    ...(canManageTools ? [{
       title: '操作',
       key: 'action',
       render: (_: unknown, server: McpServer) => (
         <Button
           loading={setServerEnabled.isPending}
-          onClick={() => setServerEnabled.mutate({ serverId: server.id, enabled: !server.enabled })}
+          onClick={() => canManageTools && setServerEnabled.mutate({
+            serverId: server.id,
+            enabled: !server.enabled,
+          })}
         >
           {server.enabled ? '禁用' : '启用'}
         </Button>
@@ -187,13 +192,16 @@ export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean 
         <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '已禁用'}</Tag>
       ),
     },
-    ...(canManageWorkspace ? [{
+    ...(canManageTools ? [{
       title: '操作',
       key: 'action',
       render: (_: unknown, tool: Tool) => (
         <Button
           loading={setToolEnabled.isPending}
-          onClick={() => setToolEnabled.mutate({ toolId: tool.id, enabled: !tool.enabled })}
+          onClick={() => canManageTools && setToolEnabled.mutate({
+            toolId: tool.id,
+            enabled: !tool.enabled,
+          })}
         >
           {tool.enabled ? '禁用' : '启用'}
         </Button>
@@ -208,7 +216,7 @@ export function ToolsPage({ canManageWorkspace }: { canManageWorkspace: boolean 
           <Typography.Title level={2}>工具与 MCP</Typography.Title>
           <Typography.Text type="secondary">管理企业 MCP Server 和数字员工可调用的 Tool</Typography.Text>
         </div>
-        {canManageWorkspace && (
+        {canManageTools && (
           <Space>
             <Button type="primary" onClick={() => setServerOpen(true)}>注册 MCP Server</Button>
             <Button disabled={!servers.data?.length} onClick={() => setToolOpen(true)}>登记 Tool</Button>

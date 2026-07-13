@@ -7,10 +7,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.api.routes.auth import CredentialsRequest
 from agent_platform.bootstrap.demo_seed import (
+    DEMO_ADMIN_EMAIL,
+    DEMO_ADMIN_MEMBERSHIP_ID,
+    DEMO_ADMIN_USER_ID,
+    DEMO_COMPLETED_RUN_ID,
     DEMO_DEAD_LETTER_ID,
+    DEMO_DRAFT_EMPLOYEE_ID,
     DEMO_EMAIL,
     DEMO_EMPLOYEE_ID,
     DEMO_MCP_SERVER_ID,
+    DEMO_MEMBER_EMAIL,
+    DEMO_MEMBER_MEMBERSHIP_ID,
+    DEMO_MEMBER_USER_ID,
+    DEMO_MEMBERSHIP_ID,
     DEMO_PASSWORD,
     DEMO_TENANT_ID,
     DEMO_TOOL_ID,
@@ -118,14 +127,16 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
     assert second.updated == 0
     assert second.unchanged == first.created
     assert second.email == DEMO_EMAIL
+    assert second.admin_email == DEMO_ADMIN_EMAIL
+    assert second.member_email == DEMO_MEMBER_EMAIL
     assert second.password == DEMO_PASSWORD
     assert second.workspace_name == DEMO_WORKSPACE_NAME
 
     async with session_factory() as session:
-        assert await _count(session, UserRecord) == 1
+        assert await _count(session, UserRecord) == 3
         assert await _count(session, TenantRecord) == 1
-        assert await _count(session, TenantMembershipRecord) == 1
-        assert await _count(session, EmployeeRecord) == 1
+        assert await _count(session, TenantMembershipRecord) == 3
+        assert await _count(session, EmployeeRecord) == 2
         assert await _count(session, EmployeeVersionRecord) == 1
         assert await _count(session, RunRecord) == 2
         assert await _count(session, RunEventRecord) == 6
@@ -136,18 +147,44 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert await _count(session, KnowledgeBaseRecord) == 0
 
         user = await session.get(UserRecord, DEMO_USER_ID)
+        admin = await session.get(UserRecord, DEMO_ADMIN_USER_ID)
+        member = await session.get(UserRecord, DEMO_MEMBER_USER_ID)
+        owner_membership = await session.get(TenantMembershipRecord, DEMO_MEMBERSHIP_ID)
+        admin_membership = await session.get(
+            TenantMembershipRecord, DEMO_ADMIN_MEMBERSHIP_ID
+        )
+        member_membership = await session.get(
+            TenantMembershipRecord, DEMO_MEMBER_MEMBERSHIP_ID
+        )
         tenant = await session.get(TenantRecord, DEMO_TENANT_ID)
         employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
+        draft_employee = await session.get(EmployeeRecord, DEMO_DRAFT_EMPLOYEE_ID)
         server = await session.get(McpServerRecord, DEMO_MCP_SERVER_ID)
         tool = await session.get(ToolRecord, DEMO_TOOL_ID)
         dead_letter = await session.get(RunDeadLetterRecord, DEMO_DEAD_LETTER_ID)
         assert user is not None and user.email == DEMO_EMAIL
         assert Argon2PasswordHasher().verify(DEMO_PASSWORD, user.password_hash)
+        assert admin is not None and admin.email == DEMO_ADMIN_EMAIL
+        assert Argon2PasswordHasher().verify(DEMO_PASSWORD, admin.password_hash)
+        assert member is not None and member.email == DEMO_MEMBER_EMAIL
+        assert Argon2PasswordHasher().verify(DEMO_PASSWORD, member.password_hash)
+        assert owner_membership is not None and owner_membership.role == "owner"
+        assert admin_membership is not None and admin_membership.role == "admin"
+        assert member_membership is not None and member_membership.role == "member"
+        assert {
+            owner_membership.tenant_id,
+            admin_membership.tenant_id,
+            member_membership.tenant_id,
+        } == {DEMO_TENANT_ID}
         assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
         assert employee is not None and employee.published_version == 1
         assert employee.skill_ids == []
         assert employee.tool_ids == []
         assert employee.knowledge_base_ids == []
+        assert draft_employee is not None
+        assert draft_employee.status == "draft"
+        assert draft_employee.visibility == "private"
+        assert draft_employee.published_version is None
         assert server is not None and server.enabled is False
         assert tool is not None and tool.enabled is False
         assert dead_letter is not None
@@ -161,6 +198,9 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
 
         statuses = set((await session.scalars(select(RunRecord.status))).all())
         assert statuses == {RunStatus.COMPLETED.value, RunStatus.FAILED.value}
+        completed_run = await session.get(RunRecord, DEMO_COMPLETED_RUN_ID)
+        assert completed_run is not None
+        assert completed_run.created_by == DEMO_MEMBER_USER_ID
 
         employee.name = "被本地修改的名称"
         await session.commit()

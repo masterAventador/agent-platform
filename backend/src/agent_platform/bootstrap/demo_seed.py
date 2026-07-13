@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -37,14 +38,21 @@ from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tools.entities import McpTransport, ToolRiskLevel
 
 DEMO_EMAIL = "demo@example.com"
+DEMO_ADMIN_EMAIL = "demo.admin@example.com"
+DEMO_MEMBER_EMAIL = "demo.member@example.com"
 DEMO_PASSWORD = "agent-platform-demo"
 DEMO_WORKSPACE_NAME = "Agent Platform 演示工作区"
 
 _DEMO_NAMESPACE = UUID("6934bbce-08a3-4d77-a49c-cfbe395d20b0")
 DEMO_USER_ID = uuid5(_DEMO_NAMESPACE, "user")
+DEMO_ADMIN_USER_ID = uuid5(_DEMO_NAMESPACE, "admin-user")
+DEMO_MEMBER_USER_ID = uuid5(_DEMO_NAMESPACE, "member-user")
 DEMO_TENANT_ID = uuid5(_DEMO_NAMESPACE, "tenant")
 DEMO_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "membership")
+DEMO_ADMIN_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "admin-membership")
+DEMO_MEMBER_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "member-membership")
 DEMO_EMPLOYEE_ID = uuid5(_DEMO_NAMESPACE, "employee")
+DEMO_DRAFT_EMPLOYEE_ID = uuid5(_DEMO_NAMESPACE, "private-draft-employee")
 DEMO_EMPLOYEE_VERSION_ID = uuid5(_DEMO_NAMESPACE, "employee-version-1")
 DEMO_COMPLETED_RUN_ID = uuid5(_DEMO_NAMESPACE, "completed-run")
 DEMO_FAILED_RUN_ID = uuid5(_DEMO_NAMESPACE, "failed-run")
@@ -71,6 +79,8 @@ class DemoSeedConflict(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class DemoSeedSummary:
     email: str
+    admin_email: str
+    member_email: str
     password: str
     workspace_name: str
     created: int
@@ -125,8 +135,8 @@ async def seed_demo_data(
     unchanged = 0
 
     async with session_factory() as session:
-        password_hash = await _demo_password_hash(session, hasher)
-        for desired, mutable_fields in _demo_records(password_hash):
+        password_hashes = await _demo_password_hashes(session, hasher)
+        for desired, mutable_fields in _demo_records(password_hashes):
             was_created, was_updated = await _upsert_record(
                 session,
                 desired=desired,
@@ -146,6 +156,8 @@ async def seed_demo_data(
 
     return DemoSeedSummary(
         email=DEMO_EMAIL,
+        admin_email=DEMO_ADMIN_EMAIL,
+        member_email=DEMO_MEMBER_EMAIL,
         password=DEMO_PASSWORD,
         workspace_name=DEMO_WORKSPACE_NAME,
         created=created,
@@ -154,11 +166,17 @@ async def seed_demo_data(
     )
 
 
-async def _demo_password_hash(session: AsyncSession, hasher: Argon2PasswordHasher) -> str:
-    existing = await session.get(UserRecord, DEMO_USER_ID)
-    if existing is not None and hasher.verify(DEMO_PASSWORD, existing.password_hash):
-        return existing.password_hash
-    return hasher.hash(DEMO_PASSWORD)
+async def _demo_password_hashes(
+    session: AsyncSession, hasher: Argon2PasswordHasher
+) -> dict[UUID, str]:
+    hashes: dict[UUID, str] = {}
+    for user_id in (DEMO_USER_ID, DEMO_ADMIN_USER_ID, DEMO_MEMBER_USER_ID):
+        existing = await session.get(UserRecord, user_id)
+        if existing is not None and hasher.verify(DEMO_PASSWORD, existing.password_hash):
+            hashes[user_id] = existing.password_hash
+        else:
+            hashes[user_id] = hasher.hash(DEMO_PASSWORD)
+    return hashes
 
 
 async def _upsert_record(
@@ -189,7 +207,9 @@ def _seed_values_equal(existing: object, desired: object) -> bool:
     return existing == desired
 
 
-def _demo_records(password_hash: str) -> list[tuple[DemoRecord, tuple[str, ...]]]:
+def _demo_records(
+    password_hashes: Mapping[UUID, str],
+) -> list[tuple[DemoRecord, tuple[str, ...]]]:
     employee_definition: dict[str, object] = {
         "name": "演示研究助理",
         "avatar_url": None,
@@ -216,7 +236,27 @@ def _demo_records(password_hash: str) -> list[tuple[DemoRecord, tuple[str, ...]]
             UserRecord(
                 id=DEMO_USER_ID,
                 email=DEMO_EMAIL,
-                password_hash=password_hash,
+                password_hash=password_hashes[DEMO_USER_ID],
+                email_verified=False,
+                created_at=_DEMO_CREATED_AT,
+            ),
+            ("email", "password_hash", "email_verified"),
+        ),
+        (
+            UserRecord(
+                id=DEMO_ADMIN_USER_ID,
+                email=DEMO_ADMIN_EMAIL,
+                password_hash=password_hashes[DEMO_ADMIN_USER_ID],
+                email_verified=False,
+                created_at=_DEMO_CREATED_AT,
+            ),
+            ("email", "password_hash", "email_verified"),
+        ),
+        (
+            UserRecord(
+                id=DEMO_MEMBER_USER_ID,
+                email=DEMO_MEMBER_EMAIL,
+                password_hash=password_hashes[DEMO_MEMBER_USER_ID],
                 email_verified=False,
                 created_at=_DEMO_CREATED_AT,
             ),
@@ -237,6 +277,26 @@ def _demo_records(password_hash: str) -> list[tuple[DemoRecord, tuple[str, ...]]
                 tenant_id=DEMO_TENANT_ID,
                 user_id=DEMO_USER_ID,
                 role=TenantRole.OWNER.value,
+                created_at=_DEMO_CREATED_AT,
+            ),
+            ("tenant_id", "user_id", "role"),
+        ),
+        (
+            TenantMembershipRecord(
+                id=DEMO_ADMIN_MEMBERSHIP_ID,
+                tenant_id=DEMO_TENANT_ID,
+                user_id=DEMO_ADMIN_USER_ID,
+                role=TenantRole.ADMIN.value,
+                created_at=_DEMO_CREATED_AT,
+            ),
+            ("tenant_id", "user_id", "role"),
+        ),
+        (
+            TenantMembershipRecord(
+                id=DEMO_MEMBER_MEMBERSHIP_ID,
+                tenant_id=DEMO_TENANT_ID,
+                user_id=DEMO_MEMBER_USER_ID,
+                role=TenantRole.MEMBER.value,
                 created_at=_DEMO_CREATED_AT,
             ),
             ("tenant_id", "user_id", "role"),
@@ -303,6 +363,57 @@ def _demo_records(password_hash: str) -> list[tuple[DemoRecord, tuple[str, ...]]
                 published_at=_DEMO_CREATED_AT,
             ),
             ("employee_id", "tenant_id", "version", "definition", "published_by"),
+        ),
+        (
+            EmployeeRecord(
+                id=DEMO_DRAFT_EMPLOYEE_ID,
+                tenant_id=DEMO_TENANT_ID,
+                created_by=DEMO_ADMIN_USER_ID,
+                name="演示私有草稿员工",
+                avatar_url=None,
+                role_description="用于演示管理员可见、普通成员隐藏的草稿资源。",
+                visibility=EmployeeVisibility.PRIVATE.value,
+                runtime_type=RuntimeType.AUTONOMOUS.value,
+                system_prompt="这是本地权限演示草稿，不会执行任务。",
+                model_settings={"provider": "demo", "name": "disabled"},
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+                capabilities={
+                    "conversation": False,
+                    "scheduled_tasks": False,
+                    "file_upload": False,
+                },
+                skill_ids=[],
+                tool_ids=[],
+                knowledge_base_ids=[],
+                approval_policy={},
+                release_strategy={"mode": "all"},
+                status=EmployeeStatus.DRAFT.value,
+                published_version=None,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            (
+                "tenant_id",
+                "created_by",
+                "name",
+                "avatar_url",
+                "role_description",
+                "visibility",
+                "runtime_type",
+                "system_prompt",
+                "model_settings",
+                "input_schema",
+                "output_schema",
+                "capabilities",
+                "skill_ids",
+                "tool_ids",
+                "knowledge_base_ids",
+                "approval_policy",
+                "release_strategy",
+                "status",
+                "published_version",
+            ),
         ),
         *_demo_run_records(),
         (
@@ -434,7 +545,7 @@ def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
                 tenant_id=DEMO_TENANT_ID,
                 employee_id=DEMO_EMPLOYEE_ID,
                 employee_version=1,
-                created_by=DEMO_USER_ID,
+                created_by=DEMO_MEMBER_USER_ID,
                 thread_id=str(DEMO_COMPLETED_RUN_ID),
                 input_data={"topic": "企业级 AI Agent 平台演示"},
                 status=RunStatus.COMPLETED.value,
@@ -507,8 +618,10 @@ def _format_summary(summary: DemoSeedSummary) -> str:
     return "\n".join(
         (
             "Demo Seed 完成",
-            f"账号: {summary.email}",
-            f"密码: {summary.password}",
+            f"Owner 账号: {summary.email}",
+            f"Admin 账号: {summary.admin_email}",
+            f"Member 账号: {summary.member_email}",
+            f"统一密码: {summary.password}",
             f"工作区: {summary.workspace_name}",
             (
                 "幂等摘要: "

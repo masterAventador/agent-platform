@@ -64,33 +64,33 @@ vi.mock('../tools/api/queries', () => ({
   useSetToolEnabled: vi.fn(() => ({ isPending: false, mutate: vi.fn() })),
 }))
 
-describe('workspace owner write permissions', () => {
+describe('workspace action-specific write permissions', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('member/admin can read employees but cannot create them', () => {
-    render(<MemoryRouter><EmployeesPage canManageWorkspace={false} /></MemoryRouter>)
+  it('without employees.manage the employee list stays read-only', () => {
+    render(<MemoryRouter><EmployeesPage canManageEmployees={false} /></MemoryRouter>)
 
     expect(screen.getByRole('heading', { name: '数字员工' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '创建数字员工' })).not.toBeInTheDocument()
   })
 
-  it('member/admin can read skills and versions but see no skill write controls', () => {
+  it('without skills.manage the skill pages show no write controls', () => {
     const { unmount } = render(
-      <MemoryRouter><SkillsPage canManageWorkspace={false} /></MemoryRouter>,
+      <MemoryRouter><SkillsPage canManageSkills={false} /></MemoryRouter>,
     )
     expect(screen.getByRole('heading', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '上传 Skill' })).not.toBeInTheDocument()
     unmount()
 
-    render(<MemoryRouter><SkillDetailPage canManageWorkspace={false} /></MemoryRouter>)
+    render(<MemoryRouter><SkillDetailPage canManageSkills={false} /></MemoryRouter>)
     expect(screen.getByText('readable skill')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '查看版本 1' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '上传新版本' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '发布版本 1' })).not.toBeInTheDocument()
   })
 
-  it('member/admin can inspect servers/tools but see no registry mutations', () => {
-    render(<ToolsPage canManageWorkspace={false} />)
+  it('without tools.manage the registry component exposes no mutations', () => {
+    render(<ToolsPage canManageTools={false} />)
 
     expect(screen.getAllByText('Server One').length).toBeGreaterThan(0)
     expect(screen.getByText('Search')).toBeInTheDocument()
@@ -98,5 +98,16 @@ describe('workspace owner write permissions', () => {
     expect(screen.queryByRole('button', { name: '登记 Tool' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '禁用' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '启用' })).not.toBeInTheDocument()
+  })
+
+  it('does not couple one feature grant to another feature write surface', () => {
+    const { unmount } = render(
+      <MemoryRouter><SkillsPage canManageSkills /></MemoryRouter>,
+    )
+    expect(screen.getByRole('button', { name: '上传 Skill' })).toBeInTheDocument()
+    unmount()
+
+    render(<ToolsPage canManageTools={false} />)
+    expect(screen.queryByRole('button', { name: '注册 MCP Server' })).not.toBeInTheDocument()
   })
 })

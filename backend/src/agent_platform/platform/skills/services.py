@@ -97,6 +97,18 @@ class SkillService:
     async def list_all(self, *, tenant_id: UUID) -> list[Skill]:
         return await self._repository.list_all(tenant_id=tenant_id)
 
+    async def required_version(
+        self, *, tenant_id: UUID, skill_id: UUID, version: int
+    ) -> SkillVersion:
+        value = await self._repository.get_version(
+            tenant_id=tenant_id,
+            skill_id=skill_id,
+            version=version,
+        )
+        if value is None:
+            raise SkillVersionNotFound
+        return value
+
     async def list_versions(self, *, tenant_id: UUID, skill_id: UUID) -> list[SkillVersion]:
         await self.required_skill(tenant_id=tenant_id, skill_id=skill_id)
         return await self._repository.list_versions(tenant_id=tenant_id, skill_id=skill_id)

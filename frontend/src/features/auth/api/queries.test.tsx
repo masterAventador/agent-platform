@@ -32,6 +32,7 @@ const workspace = {
   name: 'Shared workspace',
   slug: 'shared-workspace',
   role: 'owner' as const,
+  permissions: [],
 }
 const oldUser: CurrentUser = {
   id: 'old-user',

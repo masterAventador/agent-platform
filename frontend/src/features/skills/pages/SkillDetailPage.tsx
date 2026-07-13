@@ -12,7 +12,7 @@ import {
 } from '../api/queries'
 import './skills.css'
 
-export function SkillDetailPage({ canManageWorkspace }: { canManageWorkspace: boolean }) {
+export function SkillDetailPage({ canManageSkills }: { canManageSkills: boolean }) {
   const { skillId = '' } = useParams()
   const skill = useSkill(skillId)
   const versions = useSkillVersions(skillId)
@@ -37,7 +37,7 @@ export function SkillDetailPage({ canManageWorkspace }: { canManageWorkspace: bo
   }, [selectedVersion, versions.data])
 
   const upload = async () => {
-    if (!file) return
+    if (!canManageSkills || !file) return
     try {
       const version = await addVersion.mutateAsync(file)
       setSelectedVersion(version.version)
@@ -72,7 +72,7 @@ export function SkillDetailPage({ canManageWorkspace }: { canManageWorkspace: bo
             <Typography.Text>已发布版本 {skill.data.published_version}</Typography.Text>
           )}
         </div>
-        {canManageWorkspace && (
+        {canManageSkills && (
           <Button type="primary" onClick={() => setUploadOpen(true)}>上传新版本</Button>
         )}
       </Flex>
@@ -97,10 +97,10 @@ export function SkillDetailPage({ canManageWorkspace }: { canManageWorkspace: bo
                 </Button>
                 {skill.data.published_version === version.version ? (
                   <Tag color="success">已发布</Tag>
-                ) : canManageWorkspace ? (
+                ) : canManageSkills ? (
                   <Button
                     loading={publish.isPending && publish.variables === version.version}
-                    onClick={() => publish.mutate(version.version)}
+                    onClick={() => canManageSkills && publish.mutate(version.version)}
                   >
                     发布版本 {version.version}
                   </Button>

@@ -167,12 +167,18 @@ class SqlAlchemyRunRepository:
         record.error_message = run.error_message
         await self._session.flush()
 
-    async def list(self, *, tenant_id: UUID, limit: int = 100) -> list[Run]:
+    async def list(
+        self,
+        *,
+        tenant_id: UUID,
+        limit: int = 100,
+        created_by: UUID | None = None,
+    ) -> list[Run]:
+        query = select(RunRecord).where(RunRecord.tenant_id == tenant_id)
+        if created_by is not None:
+            query = query.where(RunRecord.created_by == created_by)
         result = await self._session.execute(
-            select(RunRecord)
-            .where(RunRecord.tenant_id == tenant_id)
-            .order_by(RunRecord.created_at.desc())
-            .limit(limit)
+            query.order_by(RunRecord.created_at.desc()).limit(limit)
         )
         return [self._to_entity(record) for record in result.scalars()]
 

@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { useActiveWorkspaceId } from '../../workspaces/store'
+import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import { runKeys, useControlRun, useRun, useRunEvents } from '../api/queries'
 import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
 import './runs.css'
@@ -15,7 +16,13 @@ const streamEvents = [
   'run.completed', 'run.failed', 'run.cancelled',
 ]
 
-export function RunDetailPage() {
+export function RunDetailPage({
+  canExecuteRuns,
+  canManageRuns,
+}: {
+  canExecuteRuns: boolean
+  canManageRuns: boolean
+}) {
   const { runId } = useParams()
   const run = useRun(runId)
   const events = useRunEvents(runId)
@@ -38,8 +45,11 @@ export function RunDetailPage() {
     return () => source.close()
   }, [queryClient, runId, runStatus, tenantId])
 
-  if (run.isPending || !run.data) {
+  if (run.isPending) {
     return <Flex className="run-loading" justify="center"><Spin /></Flex>
+  }
+  if (run.isError || !run.data) {
+    return <ResourceAccessError error={run.error} resourceName="任务" />
   }
   const data = run.data
   const status = runStatusLabels[data.status]
@@ -60,39 +70,41 @@ export function RunDetailPage() {
           <Tag color={status.color}>{status.text}</Tag>
         </Space>
         <Space>
-          {data.status === 'waiting_for_input' && (
+          {canExecuteRuns && data.status === 'waiting_for_input' && (
             <Button
               type="primary"
               loading={control.isPending}
-              onClick={() => control.mutate({ action: 'resume' })}
+              onClick={() => canExecuteRuns && control.mutate({ action: 'resume' })}
             >
               继续执行
             </Button>
           )}
-          {data.status === 'waiting_for_approval' && typeof approvalId === 'string' && (
+          {canManageRuns
+            && data.status === 'waiting_for_approval'
+            && typeof approvalId === 'string' && (
             <>
               <Button
                 type="primary"
                 loading={control.isPending}
-                onClick={() => control.mutate({ action: 'approve', approvalId })}
+                onClick={() => canManageRuns && control.mutate({ action: 'approve', approvalId })}
               >
                 批准
               </Button>
               <Button
                 danger
                 loading={control.isPending}
-                onClick={() => control.mutate({ action: 'reject', approvalId })}
+                onClick={() => canManageRuns && control.mutate({ action: 'reject', approvalId })}
               >
                 拒绝
               </Button>
             </>
           )}
-          {cancellable && (
+          {canExecuteRuns && cancellable && (
             <Button
               danger
               loading={control.isPending}
               disabled={cancelRequested}
-              onClick={() => control.mutate({ action: 'cancel' })}
+              onClick={() => canExecuteRuns && control.mutate({ action: 'cancel' })}
             >
               {cancelRequested ? '取消处理中' : '取消任务'}
             </Button>
