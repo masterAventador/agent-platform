@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['runtime.spec.ts', 'runtime-recovery.spec.ts'],
+  testIgnore: ['demo-seed.spec.ts', 'runtime.spec.ts', 'runtime-recovery.spec.ts'],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
   fullyParallel: true,

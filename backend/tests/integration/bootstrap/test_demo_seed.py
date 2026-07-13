@@ -1,0 +1,182 @@
+from collections.abc import AsyncIterator
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from agent_platform.api.routes.auth import CredentialsRequest
+from agent_platform.bootstrap.demo_seed import (
+    DEMO_DEAD_LETTER_ID,
+    DEMO_EMAIL,
+    DEMO_EMPLOYEE_ID,
+    DEMO_MCP_SERVER_ID,
+    DEMO_PASSWORD,
+    DEMO_TENANT_ID,
+    DEMO_TOOL_ID,
+    DEMO_USER_ID,
+    DEMO_WORKSPACE_NAME,
+    DemoSeedSafetyError,
+    seed_demo_data,
+    validate_demo_database_url,
+)
+from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.auth import UserRecord
+from agent_platform.infrastructure.database.repositories.dead_letters import RunDeadLetterRecord
+from agent_platform.infrastructure.database.repositories.employees import (
+    EmployeeRecord,
+    EmployeeVersionRecord,
+)
+from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
+from agent_platform.infrastructure.database.repositories.skills import SkillRecord
+from agent_platform.infrastructure.database.repositories.tenants import (
+    TenantMembershipRecord,
+    TenantRecord,
+)
+from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
+from agent_platform.platform.runs.entities import RunStatus
+
+ALLOWED_DEMO_DATABASE_URL = (
+    "postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform_demo"
+)
+
+
+def test_demo_credentials_are_accepted_by_the_login_contract() -> None:
+    credentials = CredentialsRequest(email=DEMO_EMAIL, password=DEMO_PASSWORD)
+
+    assert str(credentials.email) == DEMO_EMAIL
+
+
+@pytest_asyncio.fixture
+async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    load_database_models()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.execute(text("PRAGMA foreign_keys=ON"))
+        await connection.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://demo:secret@localhost:5432/agent_platform",
+        "postgresql+asyncpg://demo:secret@localhost:5432/agent_platform_dev",
+        "postgresql+asyncpg://demo:secret@127.0.0.1:5432/demo",
+        "postgresql+asyncpg://demo:secret@[::1]:5432/agent_platform_e2e",
+    ],
+)
+def test_demo_seed_allows_only_explicit_local_demo_databases(database_url: str) -> None:
+    validate_demo_database_url(database_url, environment="development")
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://demo:secret@database.internal:5432/agent_platform_demo",
+        (
+            "postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform"
+            "?host=database.internal"
+        ),
+        "postgresql+asyncpg://demo:secret@localhost:5432/postgres",
+        "postgresql+asyncpg://demo:secret@127.0.0.1:5432/template1",
+        "sqlite+aiosqlite:///agent_platform_demo.db",
+    ],
+)
+def test_demo_seed_refuses_remote_or_non_demo_databases(database_url: str) -> None:
+    with pytest.raises(DemoSeedSafetyError, match="refused"):
+        validate_demo_database_url(database_url, environment="development")
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", "test"])
+def test_demo_seed_refuses_non_development_environments(environment: str) -> None:
+    with pytest.raises(DemoSeedSafetyError, match="refused"):
+        validate_demo_database_url(ALLOWED_DEMO_DATABASE_URL, environment=environment)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_dangling_data(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    first = await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+    )
+    second = await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+    )
+
+    assert first.created > 0
+    assert second.created == 0
+    assert second.updated == 0
+    assert second.unchanged == first.created
+    assert second.email == DEMO_EMAIL
+    assert second.password == DEMO_PASSWORD
+    assert second.workspace_name == DEMO_WORKSPACE_NAME
+
+    async with session_factory() as session:
+        assert await _count(session, UserRecord) == 1
+        assert await _count(session, TenantRecord) == 1
+        assert await _count(session, TenantMembershipRecord) == 1
+        assert await _count(session, EmployeeRecord) == 1
+        assert await _count(session, EmployeeVersionRecord) == 1
+        assert await _count(session, RunRecord) == 2
+        assert await _count(session, RunEventRecord) == 6
+        assert await _count(session, McpServerRecord) == 1
+        assert await _count(session, ToolRecord) == 1
+        assert await _count(session, RunDeadLetterRecord) == 1
+        assert await _count(session, SkillRecord) == 0
+        assert await _count(session, KnowledgeBaseRecord) == 0
+
+        user = await session.get(UserRecord, DEMO_USER_ID)
+        tenant = await session.get(TenantRecord, DEMO_TENANT_ID)
+        employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
+        server = await session.get(McpServerRecord, DEMO_MCP_SERVER_ID)
+        tool = await session.get(ToolRecord, DEMO_TOOL_ID)
+        dead_letter = await session.get(RunDeadLetterRecord, DEMO_DEAD_LETTER_ID)
+        assert user is not None and user.email == DEMO_EMAIL
+        assert Argon2PasswordHasher().verify(DEMO_PASSWORD, user.password_hash)
+        assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
+        assert employee is not None and employee.published_version == 1
+        assert employee.skill_ids == []
+        assert employee.tool_ids == []
+        assert employee.knowledge_base_ids == []
+        assert server is not None and server.enabled is False
+        assert tool is not None and tool.enabled is False
+        assert dead_letter is not None
+        assert dead_letter.raw_fields_summary == {
+            "known_field_keys": [],
+            "unknown_fields": [],
+            "field_count": 0,
+            "total_bytes": 0,
+            "sha256": None,
+        }
+
+        statuses = set((await session.scalars(select(RunRecord.status))).all())
+        assert statuses == {RunStatus.COMPLETED.value, RunStatus.FAILED.value}
+
+        employee.name = "被本地修改的名称"
+        await session.commit()
+
+    repaired = await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+    )
+    assert repaired.created == 0
+    assert repaired.updated == 1
+
+    async with session_factory() as session:
+        employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
+        assert employee is not None and employee.name == "演示研究助理"
+
+
+async def _count(session: AsyncSession, model: type[Base]) -> int:
+    return int(await session.scalar(select(func.count()).select_from(model)) or 0)

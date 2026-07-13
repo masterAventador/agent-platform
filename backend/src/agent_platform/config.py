@@ -9,6 +9,9 @@ class AppSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="AGENT_PLATFORM_", extra="ignore")
 
+    app_environment: Literal["local", "development", "test", "staging", "production"] = (
+        "development"
+    )
     database_url: str = (
         "postgresql+asyncpg://agent_platform:agent-platform-local-postgres"
         "@127.0.0.1:5432/agent_platform"
