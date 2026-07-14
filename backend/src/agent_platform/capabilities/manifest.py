@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
+
+from agent_platform.core_contract import CORE_API_ROUTE_ROOTS, CORE_RESOURCE_NAMESPACES
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 
 _CAPABILITY_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_RESOURCE_NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _SEMANTIC_VERSION_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 _PROTOCOL_ID_PATTERN = re.compile(r"^core\.[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*$")
 _PROTOCOL_VERSION_PATTERN = re.compile(r"^[1-9][0-9]*\.(?:0|[1-9][0-9]*)$")
-_LOGICAL_MIGRATION_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.schema\.v[1-9][0-9]*$")
+_RESOURCE_DECLARATION_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_ROUTE_SEGMENT_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 
 
 class ManifestValidationError(ValueError):
@@ -37,6 +42,7 @@ class CapabilityManifest:
     schema_version: str
     capability_id: str
     capability_version: str
+    resource_namespace: str
     backend_routes: tuple[str, ...]
     worker_handlers: tuple[str, ...]
     permissions: tuple[str, ...]
@@ -52,8 +58,16 @@ class CapabilityManifest:
             raise ManifestValidationError("invalid manifest schema version")
         if not _matches_pattern(_CAPABILITY_ID_PATTERN, self.capability_id):
             raise ManifestValidationError("invalid capability id")
+        if self.capability_id in CORE_API_ROUTE_ROOTS:
+            raise ManifestValidationError("reserved core API route root")
         if not _matches_pattern(_SEMANTIC_VERSION_PATTERN, self.capability_version):
             raise ManifestValidationError("invalid capability version")
+        if (
+            not _matches_pattern(_RESOURCE_NAMESPACE_PATTERN, self.resource_namespace)
+            or self.resource_namespace in CORE_RESOURCE_NAMESPACES
+            or self.resource_namespace != self.capability_id.partition("-")[0]
+        ):
+            raise ManifestValidationError("invalid resource namespace")
 
         required_declarations = (
             self.backend_routes,
@@ -68,10 +82,33 @@ class CapabilityManifest:
             _validate_declarations(declarations, required=True)
         _validate_declarations(self.desktop_components, required=False)
 
-        if any(not route.startswith("/api/v1/") for route in self.backend_routes):
+        route_root = f"/api/v1/{self.capability_id}"
+        route_pattern = re.compile(rf"^{re.escape(route_root)}(?:/{_ROUTE_SEGMENT_PATTERN})*$")
+        if any(route_pattern.fullmatch(route) is None for route in self.backend_routes):
             raise ManifestValidationError("invalid backend route declaration")
+
+        resource_declarations = (
+            self.worker_handlers,
+            self.permissions,
+            self.events,
+            self.frontend_entries,
+            self.migrations,
+            self.health_checks,
+            self.desktop_components,
+        )
         if any(
-            not _LOGICAL_MIGRATION_PATTERN.fullmatch(migration) for migration in self.migrations
+            _RESOURCE_DECLARATION_PATTERN.fullmatch(declaration) is None
+            or declaration.partition(".")[0] != self.resource_namespace
+            for declarations in resource_declarations
+            for declaration in declarations
+        ):
+            raise ManifestValidationError("invalid resource declaration")
+
+        logical_migration_pattern = re.compile(
+            rf"^{re.escape(self.resource_namespace)}\.schema\.v[1-9][0-9]*$"
+        )
+        if any(
+            logical_migration_pattern.fullmatch(migration) is None for migration in self.migrations
         ):
             raise ManifestValidationError("invalid logical migration declaration")
         if not isinstance(self.core_dependencies, tuple) or not self.core_dependencies:
@@ -89,6 +126,7 @@ class CapabilityManifest:
         """Return namespaced exclusive claims used by a host conflict gate."""
 
         declaration_groups = (
+            ("resource_namespace", (self.resource_namespace,)),
             ("backend_route", self.backend_routes),
             ("worker_handler", self.worker_handlers),
             ("permission", self.permissions),
@@ -113,6 +151,7 @@ def _validate_declarations(values: tuple[str, ...], *, required: bool) -> None:
         or not value
         or value != value.strip()
         or any(character.isspace() for character in value)
+        or any(unicodedata.category(character).startswith("C") for character in value)
         for value in values
     ):
         raise ManifestValidationError("invalid manifest declaration")
