@@ -1,0 +1,33 @@
+{
+  "protocol_version": "1.0",
+  "message_type": "task.request",
+  "message_id": "00000000-0000-4000-8000-000000000100",
+  "sent_at": "2026-07-15T04:00:00Z",
+  "identity": {
+    "task_id": "00000000-0000-4000-8000-000000000101",
+    "correlation_id": "00000000-0000-4000-8000-000000000102",
+    "tenant_id": "00000000-0000-4000-8000-000000000103",
+    "capability_id": "social-operations",
+    "target_device_id": "00000000-0000-4000-8000-000000000104"
+  },
+  "governance": {
+    "audit_correlation_id": "00000000-0000-4000-8000-000000000105",
+    "approval_id": "00000000-0000-4000-8000-000000000107"
+  },
+  "idempotency_key": "social-task:00000000-0000-4000-8000-000000000101:attempt:1",
+  "deadline_at": "2026-07-15T04:05:00Z",
+  "task_type": "social.publish.video",
+  "input": {
+    "title": "Contract fixture",
+    "dry_run": true
+  },
+  "artifact_refs": [
+    {
+      "artifact_id": "00000000-0000-4000-8000-000000000106",
+      "usage": "input"
+    }
+  ],
+  "extensions": {
+    "social.protocol.test_marker": "fixture"
+  }
+}
