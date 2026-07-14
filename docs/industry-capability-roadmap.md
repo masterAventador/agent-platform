@@ -92,20 +92,20 @@ deployment_installed && tenant_entitled && user_permitted
 
 ## 3. Video Studio 功能清单
 
-竞品视频链路主要采用阿里云 OSS + Timeline + IMS/ICE 云剪辑，不是本地完整 FFmpeg 渲染。我们第一阶段遵循同类云端 Provider 架构，同时保留未来本地 Provider 扩展点。
+竞品视频链路主要采用阿里云 OSS + Timeline + IMS/ICE 云剪辑，不是本地完整 FFmpeg 渲染；这是竞品事实。本项目目标供应商已确定为腾讯云，第一阶段采用 LighthouseCOS/COS + 自研 Timeline/预览 + MPS 云端渲染，并保留未来本地 Provider 扩展点。具体部署基线见 [`tencent-cloud-mvp-deployment.md`](tencent-cloud-mvp-deployment.md)。
 
 | 功能域 | 功能清单 | 竞品证据 | 我们的实现边界 |
 | --- | --- | --- | --- |
-| 素材库 | 视频、图片、音乐等素材上传、列表、选择和管理 | 已证实 | 复用 Core Artifact/MinIO 元数据，业务素材进入独立命名空间 |
+| 素材库 | 视频、图片、音乐等素材上传、列表、选择和管理 | 已证实 | 复用 Core Artifact，腾讯 LighthouseCOS/COS 保存业务对象 |
 | 下载任务 | 素材或成片下载队列、进度、成功/失败记录 | 高可信 | 使用平台任务和产物协议，不建立旁路状态 |
-| OSS 上传 | 服务端签发限定目录、短有效期 STS，客户端直传 OSS | 已证实 | AccessKey 只在服务端，客户端不得持有长期密钥 |
+| 对象存储直传 | 竞品使用 OSS STS，客户端直传对象存储 | 已证实 | 我们使用腾讯云 CAM/STS + LighthouseCOS/COS，永久密钥只在服务端 |
 | Timeline | 创建、解析、保存剪辑时间线 | 已证实 | 业务模型使用供应商无关 Timeline DTO |
-| App 内预览 | 加载阿里云 Web SDK、播放器、转场和时间线预览 | 已证实 | SDK 经前端适配层加载，页面不直接散落全局对象调用 |
+| App 内预览 | 竞品加载阿里云 Web SDK、播放器、转场和时间线预览 | 已证实 | 我们自研 Timeline 编辑器，使用 HTML5 Video/Canvas 和低清代理素材预览 |
 | 一键剪辑 | 依据素材和规则创建云端剪辑任务 | 已证实 | 通过 `VideoRenderProvider` 提交 |
 | 模板剪辑 | 选择模板、替换素材、生成多个成片 | 已证实 | 模板版本固定，输入输出可追溯 |
 | 批量剪辑 | 批量导入素材、批量创建任务和结果管理 | 已证实 | 配额、并发、幂等和失败隔离由平台统一治理 |
 | 剪辑任务 | 创建、排队、运行、轮询、取消、失败重试 | 已证实 | 映射到 Core Run/Event，不复制任务中心 |
-| 云端渲染 | IMS/ICE 异步 Job、进度、结果、费用和错误 | 高可信 | 第一阶段 `AliyunIceProvider`，服务端调用官方 OpenAPI |
+| 云端渲染 | 竞品使用 IMS/ICE 异步 Job、进度、结果、费用和错误 | 高可信 | 第一阶段 `TencentMpsProvider`，服务端调用 MPS `EditMedia` 等官方 API |
 | 成片管理 | 获取成片、下载、预览、删除、保留策略 | 已证实 | 成片作为 Core Artifact，具备租户权限与生命周期 |
 | 发布衔接 | 成片进入账号、标题、话题和多平台发布流程 | 已证实 | 只通过稳定 Artifact ID 交给 Social Operations |
 | 本地 FFmpeg | 离线、隐私或成本敏感场景的本地渲染 | 规划增强 | 后续 `LocalFfmpegProvider`，不作为第一阶段竞品复刻目标 |
@@ -159,6 +159,10 @@ deployment_installed && tenant_entitled && user_permitted
 
 ### 4.3 微信私域运营
 
+- Windows 执行器使用 UI Automation；macOS 执行器使用 Accessibility/AX API；
+- macOS 通过 ScreenCaptureKit 获取授权窗口画面，并使用本地 Vision OCR 作为无障碍树不足时的兜底；
+- 两个平台复用会话、任务、审批、审计和人工接管协议，但分别维护定位器、权限诊断和客户端版本矩阵；
+- macOS 微信没有入口或尚未动态验证的功能必须返回明确能力状态，不得假设与 Windows 客户端完全等价；
 - PC 微信进程、版本、窗口、分辨率、DPI 和锁屏诊断；
 - 激活并置前微信窗口；
 - UI Automation 定位联系人列表、会话区和输入区；
@@ -265,7 +269,7 @@ deployment_installed && tenant_entitled && user_permitted
 
 - 建立视频、图片、音乐素材及文件夹/标签管理；
 - 支持导入、上传、预览、删除、引用关系和生命周期；
-- 服务端签发 OSS 限定目录、短有效期 STS；
+- 服务端签发 LighthouseCOS/COS 限定目录、短有效期 STS；
 - 支持素材/成片下载任务、进度、断点、失败和重试；
 - 素材复用 Core Artifact 权限和审计；
 - 大文件、跨租户、STS 过期和失败清理测试通过。
@@ -279,9 +283,9 @@ deployment_installed && tenant_entitled && user_permitted
 完成定义：
 
 - 定义供应商无关 Timeline、轨道、素材、时间区间、转场和模板引用；
-- 封装阿里云视频剪辑 Web SDK 和 `AliyunTimelinePlayer`；
+- 自研 Timeline 编辑器，以 HTML5 Video/Canvas 和低清代理素材实现 App 内预览；
 - 支持 Timeline 创建、保存、版本、解析和预览错误；
-- 页面不直接持有阿里云长期密钥或拼装 OpenAPI 签名；
+- 页面不直接持有腾讯云长期密钥或拼装 OpenAPI 签名；
 - Timeline 与员工、任务、素材和客户模板稳定关联；
 - 组件、协议和真实素材预览 E2E 通过。
 
@@ -293,12 +297,12 @@ deployment_installed && tenant_entitled && user_permitted
 
 完成定义：
 
-- 建立 `VideoRenderProvider` 和第一阶段 `AliyunIceProvider`；
+- 建立 `VideoRenderProvider` 和第一阶段 `TencentMpsProvider`；
 - 支持一键剪辑、模板替换、批量提交和幂等 Job；
 - 支持排队、轮询、进度、取消、失败重试、费用和供应商错误映射；
 - 成片进入 Core Artifact，可预览、下载、删除和交给发布流程；
 - App 关闭后云端任务继续，重开后恢复真实状态；
-- Stub 协议、真实 IMS/ICE 小样和批量隔离测试通过。
+- Stub 协议、真实 MPS `EditMedia` 小样、LighthouseCOS/COS 成片回写和批量隔离测试通过。
 
 ### B07 多平台聚合发布、批量发布与发布记录
 
@@ -360,7 +364,7 @@ deployment_installed && tenant_entitled && user_permitted
 - 证据不足的平台入站私信能力只有动态验证通过后才能接入；
 - 跟进时序、并发、退订和真实账号 E2E 通过。
 
-### B11 PC 微信环境诊断、UIA 与 OCR 基线
+### B11 桌面微信环境诊断、Windows UIA、macOS AX 与 OCR 基线
 
 **所属：Social Operations**
 
@@ -368,12 +372,13 @@ deployment_installed && tenant_entitled && user_permitted
 
 完成定义：
 
-- 仅在 Windows 启用 PC 微信 Sidecar，其他平台返回明确能力状态；
-- 检查微信进程、版本、窗口、分辨率、DPI、锁屏和遮挡；
-- UI Automation 优先定位，OCR 只识别必要区域；
+- Windows 使用 UI Automation；macOS 使用 Accessibility/AX API，并分别完成权限探测；
+- 检查微信进程、版本、窗口、分辨率、DPI/缩放、锁屏、遮挡和前台状态；
+- macOS Screen Recording 和 Accessibility 权限必须由用户明确授予，缺失时提供可操作诊断；
+- 结构化无障碍树优先定位；Windows 使用本地 OCR，macOS 使用 ScreenCaptureKit + Vision OCR，只识别必要区域；
 - 建立脱敏截图、识别置信度、重试和人工校准；
 - 微信升级或布局变化时安全失败，不误点、误发；
-- 支持版本矩阵和专用测试账号的诊断 E2E 通过。
+- 建立 Windows/macOS 独立功能与版本矩阵；专用测试账号的诊断 E2E 通过。
 
 ### B12 微信未读识别、上下文读取与 AI 回复
 
@@ -388,7 +393,7 @@ deployment_installed && tenant_entitled && user_permitted
 - 第一阶段默认人工确认，自动发送按企业风险策略灰度；
 - 支持成功、失败、重试、重复消息去重和会话接管；
 - 聊天、截图和日志按隐私规则处理，不进入安装包；
-- 多联系人、窗口异常、锁屏和真实微信测试账号 E2E 通过。
+- Windows/macOS 在各自已支持功能范围完成多联系人、窗口异常、锁屏和真实微信测试账号 E2E。
 
 ### B13 微信好友、主动激活与个性化群发
 

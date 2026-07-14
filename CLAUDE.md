@@ -4,6 +4,8 @@
 
 每个新会话首次进入本项目时，必须完整阅读一次 `docs/project-structure.md`、`docs/backend-architecture.md` 和 `docs/frontend-architecture.md`，同一会话内无需在每次设计、实现或修改前重复读取。仅当对应文档在会话期间发生变化，或当前上下文中已无法确认其内容时，才需要重新读取。这三份文档分别是整体工程结构、后端架构和前端架构的权威说明；如果代码、临时方案或其他文档与其冲突，应先向用户说明并确认是否修改架构基线，禁止自行引入另一套技术体系。
 
+每个新会话还必须主动读取 `docs/core-capability-roadmap.md`、`docs/industry-capability-roadmap.md` 和 `docs/tencent-cloud-mvp-deployment.md`，确认 Core、行业能力包和腾讯云部署的最新状态、当前条目与依赖关系。完成任何会改变任务状态、验证基线、功能范围、供应商方案、部署资源或验收证据的工作时，必须在同一个任务和同一个提交中更新对应文档并标记状态；不得只完成代码而遗漏执行台账。竞品功能或证据发生变化时，还必须同步核对 `docs/dt-ai-helper-competitive-analysis.md`。
+
 ### 整体工程结构
 
 - 项目采用单一 Git 仓库，前端和后端必须分别位于根目录 `frontend/` 与 `backend/`；
@@ -183,7 +185,7 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 ### 可插拔行业能力包
 
 - 视频剪辑和自动运营不进入 AI 中台 Core，分别作为独立能力包维护；
-- 视频能力包可以包含素材库、OSS、Timeline、IMS/ICE、模板、剪辑任务和成片；
+- 视频能力包可以包含素材库、LighthouseCOS/COS、自研 Timeline、腾讯云 MPS、模板、剪辑任务和成片；
 - 自动运营能力包可以包含平台账号、Playwright、本地 RPA、微信、朋友圈、私信、发布和曝光；
 - 能力包只能依赖 Core 的公开协议和服务，Core 禁止导入能力包内部实现；
 - 能力包之间禁止互相导入内部代码，跨包协作必须通过公开接口、平台事件、稳定 ID 或工作流；
@@ -213,6 +215,15 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 - Tauri 对 Playwright、OCR、FFmpeg 等大体积组件采用受签名、版本锁定的可选打包或按需下载策略；
 - 所有客户组合必须纳入测试矩阵，至少覆盖 Core-only、Core+视频、Core+自动运营以及目标客户实际组合；
 - 能力关闭后，Core 登录、数字员工、任务、知识、Skill、Tool、审批和审计流程必须保持可用。
+
+### 腾讯云 MVP 基线
+
+- [`docs/tencent-cloud-mvp-deployment.md`](docs/tencent-cloud-mvp-deployment.md) 是当前腾讯云资源、最小采购、单机部署、对象存储、视频云服务、RAGFlow 延后方案和扩容条件的权威基线；涉及腾讯云采购、部署或 Provider 选择前必须先完整阅读；
+- 本项目自己的目标供应商统一为 TokenHub、LighthouseCOS/COS 和 MPS；竞品分析中保留的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 只描述竞品事实，不得作为本项目默认实现；
+- 当前无 RAGFlow MVP 复用已有北京 4C4G Lighthouse；在 C07 前不得为了展示提前采购 RAGFlow 或其 MySQL、Redis、Elasticsearch、MinIO 托管服务；
+- 现有 4C4G 只承载低并发演示，不运行本地大模型、完整 FFmpeg 批量渲染、RAGFlow 或重型观测栈；素材和成片必须直传对象存储；
+- 开发到 C07 时，RAGFlow 最小使用独立 4C16G、100GiB 节点，先通过官方 Docker Compose 同机运行其依赖，并保持独立网络、Volume、凭据和端口；
+- 采购、扩容和远程部署都必须由用户明确指示；本文档描述目标状态，不构成自动部署授权。
 
 ## AI 中台 Core 路线图执行规范（强制）
 

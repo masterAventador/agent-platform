@@ -49,7 +49,7 @@
 - Skill 注册、版本、发布、对象存储和运行时物化；
 - MCP Server、Tool Registry、Tool Gateway、风险审批和工具调用审计；
 - 本机 Docker Sandbox Controller、租约清理和安全资源限制；
-- LiteLLM 官方镜像、稳定模型别名和阿里百炼真实推理调用；
+- LiteLLM 官方镜像、稳定模型别名和阿里百炼历史真实推理调用；目标供应商已改为腾讯云 TokenHub，迁移烟测尚未完成；
 - OpenTelemetry Trace 和本机 Compose 基础设施；
 - React Web 的认证、工作区切换、员工、任务、知识、Skill、Tool 和死信页面。
 
@@ -111,9 +111,9 @@
 
 完成定义：
 
-- 一次启动 PostgreSQL、Redis、MinIO、RAGFlow、LiteLLM、API、Dispatcher、Worker、Sandbox 和客户端；
-- 完整经过注册、登录、发布员工、发起任务、百炼推理、事件持久化和 UI 终态；
-- 正式自动化回归使用本地 Stub，另保留显式启用的真实百炼最小烟测；
+- MVP Profile 一次启动 PostgreSQL、Redis、MinIO、LiteLLM、API、Dispatcher、Worker、Sandbox 和客户端；RAGFlow 在 C07 的 Knowledge Profile 单独启用；
+- 完整经过注册、登录、发布员工、发起任务、TokenHub 推理、事件持久化和 UI 终态；
+- 正式自动化回归使用本地 Stub，另保留显式启用的真实 TokenHub 最小烟测；
 - 工作台展示员工、任务、失败状态和系统健康等当前阶段已有的真实数据；C04、C13、C16 完成时再分别增加最近产物、待审批和模型用量卡片；
 - Tauri 内完成核心流程，不要求用户切回浏览器；
 - 完整 Playwright 和真实运行时 E2E 通过，测试结束自动清理本轮服务。
@@ -125,7 +125,7 @@
 完成定义：
 
 - 建立文件、任务附件和 Artifact 领域模型、迁移、仓储与 API；
-- MinIO 保存原始文件和产物，数据库只保存稳定元数据与权限关系；
+- 建立供应商无关 `ArtifactStorageProvider`；MinIO 用于本地开发，腾讯云 `TencentCosArtifactProvider` 兼容 LighthouseCOS，数据库只保存稳定元数据与权限关系；
 - 员工任务支持文件输入，沙箱可在授权范围读取，Agent 可创建产物；
 - `EmployeeRuntime.get_artifacts()` 返回真实数据；
 - 客户端支持选择、上传、预览、下载、定位和删除；
@@ -348,11 +348,13 @@
 
 C01-C20 全部完成后，才进入以下能力包：
 
-1. `video-studio`：素材、OSS、Timeline、IMS/ICE、模板、剪辑任务和成片；
+1. `video-studio`：LighthouseCOS/COS 素材、自研 Timeline、腾讯云 MPS、模板、剪辑任务和成片；
 2. `social-operations`：平台账号、浏览器自动化、本地 RPA、微信、朋友圈、私信、发布和曝光；
 3. 客户解决方案包：AI 角色、工作流、提示词、知识绑定、审批规则、品牌和业务参数。
 
 视频剪辑与自动运营的完整功能清单、证据等级、B01-B17 实施顺序和完成状态，统一维护在 [`industry-capability-roadmap.md`](industry-capability-roadmap.md)。
+
+腾讯云最小成本部署、当前 Lighthouse 实测资源、RAGFlow 延后方案和扩容门槛，统一维护在 [`tencent-cloud-mvp-deployment.md`](tencent-cloud-mvp-deployment.md)。
 
 能力包必须复用 Core 的用户、权限、任务、审批、产物、模型、知识、Skill、Tool、审计和客户端骨架，不得复制底座。
 
@@ -369,7 +371,8 @@ C01-C20 全部完成后，才进入以下能力包：
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
-| 百炼最小真实请求 | `qwen-plus` 成功，12 Token |
+| 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
+| TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
 | 完整本机栈 E2E | 本轮未执行，纳入 C03 |
 | macOS/Windows Tauri 构建 | 未实现，纳入 C02/C20 |
 
