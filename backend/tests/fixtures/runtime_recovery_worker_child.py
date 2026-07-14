@@ -52,7 +52,9 @@ def _messages() -> Iterator[AIMessage | str]:
 async def _main() -> None:
     settings = AppSettings()
     resolver = PlatformModelResolver(
-        injected_models={("openai", "gpt-5"): ToolBindingRecoveryModel(messages=_messages())}
+        injected_models={
+            "general-purpose": ToolBindingRecoveryModel(messages=_messages())
+        }
     )
     await run_worker_service(settings=settings, model_resolver=resolver, ready_file=READY_FILE)
 

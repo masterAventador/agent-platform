@@ -178,6 +178,9 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         } == {DEMO_TENANT_ID}
         assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
         assert employee is not None and employee.published_version == 1
+        assert "Seed 本身不调用模型" in employee.role_description
+        assert "手动发起任务" in employee.role_description
+        assert "可能产生上游费用" in employee.role_description
         assert employee.skill_ids == []
         assert employee.tool_ids == []
         assert employee.knowledge_base_ids == []

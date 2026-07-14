@@ -224,7 +224,7 @@ async def test_employee_can_only_bind_enabled_tools_from_enabled_tenant_server(
         "role_description": "查询客户资料并提供服务",
         "work_mode": "autonomous",
         "system_prompt": "只使用已授权工具处理客户请求。",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {

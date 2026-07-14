@@ -71,7 +71,7 @@ async def _create_original_run(client: AsyncClient, tenant_id: str) -> dict[str,
                 "role_description": "验证死信重放契约",
                 "work_mode": "autonomous",
                 "system_prompt": "恢复任务。",
-                "model": {"provider": "openai", "name": "gpt-5"},
+                "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                 "input_schema": {"type": "object"},
                 "output_schema": {"type": "object"},
                 "capabilities": {

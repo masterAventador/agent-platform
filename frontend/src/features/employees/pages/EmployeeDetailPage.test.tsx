@@ -31,7 +31,7 @@ const employee: Employee = {
     visibility: 'tenant',
     work_mode: 'autonomous',
     system_prompt: '完成用户交付的研究任务',
-    model: { provider: 'openai', name: 'gpt-5' },
+    model: { kind: 'gateway_alias', alias: 'general-purpose' },
     input_schema: { type: 'object' },
     output_schema: { type: 'object' },
     capabilities: { conversation: true, scheduled_tasks: false, file_upload: false },
@@ -143,6 +143,9 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     expect(screen.getByRole('button', { name: '发起任务' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '发布员工' })).not.toBeInTheDocument()
+    expect(screen.getByText('网关模型')).toBeInTheDocument()
+    expect(screen.getByText('general-purpose')).toBeInTheDocument()
+    expect(screen.queryByText(/LiteLLM|openai/i)).not.toBeInTheDocument()
     expect(screen.getByText('完成用户交付的研究任务')).toBeInTheDocument()
   })
 

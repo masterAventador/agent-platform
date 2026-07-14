@@ -105,8 +105,8 @@ export function EmployeeDetailPage({
           <Descriptions.Item label="发布版本">
             {data.published_version ? `版本 ${data.published_version}` : '尚未发布'}
           </Descriptions.Item>
-          <Descriptions.Item label="模型">
-            {data.definition.model.provider} / {data.definition.model.name}
+          <Descriptions.Item label="网关模型">
+            {data.definition.model.alias}
           </Descriptions.Item>
           <Descriptions.Item label="可见范围">企业成员</Descriptions.Item>
         </Descriptions>

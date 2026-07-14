@@ -12,6 +12,8 @@ from agent_platform.workers import main as worker_main_module
 from agent_platform.workers.main import (
     WorkerConfigurationError,
     WorkerHealth,
+    _assert_model_gateway_ready,
+    _build_runtime_resolver,
     main,
     run_worker_service,
     serve,
@@ -39,6 +41,14 @@ class RecordingWorker:
 
     async def aclose(self) -> None:
         self.close_calls += 1
+
+
+class RecordingGatewayReadiness:
+    def __init__(self) -> None:
+        self.aliases: frozenset[str] | None = None
+
+    async def assert_ready(self, aliases: frozenset[str]) -> None:
+        self.aliases = aliases
 
 
 class FailingOnceWorker:
@@ -243,7 +253,81 @@ async def test_startup_stays_not_ready_and_retries_sanitized_transient_recovery(
 @pytest.mark.asyncio
 async def test_service_fails_fast_when_builtin_sandbox_is_not_configured() -> None:
     with pytest.raises(WorkerConfigurationError, match="builtin runtime adapters"):
+        await run_worker_service(
+            runtime_resolver=None,
+            settings=AppSettings(llm_gateway_api_key="internal-test-key"),
+            gateway_readiness=RecordingGatewayReadiness(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_service_fails_fast_when_model_gateway_is_not_configured() -> None:
+    with pytest.raises(WorkerConfigurationError, match="model gateway") as captured:
         await run_worker_service(runtime_resolver=None)
+
+    assert "key" not in str(captured.value)
+
+
+def test_worker_configuration_error_never_leaks_the_gateway_url() -> None:
+    sensitive_url = "https://user:password@litellm.example/v1?token=gateway-url-secret"
+    settings = AppSettings(
+        llm_gateway_url=sensitive_url,
+        llm_gateway_api_key="internal-gateway-key",
+    )
+
+    with pytest.raises(WorkerConfigurationError) as captured:
+        _build_runtime_resolver(
+            settings=settings,
+            session_factory=object(),  # type: ignore[arg-type]
+        )
+
+    rendered_errors = []
+    error: BaseException | None = captured.value
+    while error is not None:
+        rendered_errors.append(f"{error!r}\n{error}")
+        error = error.__cause__
+    rendered_error = "\n".join(rendered_errors)
+    assert "password" not in rendered_error
+    assert "gateway-url-secret" not in rendered_error
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_readiness_uses_the_configured_alias_allowlist() -> None:
+    readiness = RecordingGatewayReadiness()
+    settings = AppSettings(
+        llm_gateway_api_key="internal-gateway-key",
+        llm_gateway_allowed_aliases=frozenset({"general-purpose", "test-alias"}),
+    )
+
+    await _assert_model_gateway_ready(settings=settings, readiness=readiness)
+
+    assert readiness.aliases == frozenset({"general-purpose", "test-alias"})
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_readiness_uses_the_short_readiness_timeout(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    readiness = RecordingGatewayReadiness()
+
+    def build_probe(**kwargs):
+        captured.update(kwargs)
+        return readiness
+
+    monkeypatch.setattr(
+        worker_main_module,
+        "LiteLLMGatewayReadinessProbe",
+        build_probe,
+    )
+    settings = AppSettings(
+        llm_gateway_api_key="internal-gateway-key",
+        llm_gateway_readiness_timeout_seconds=7,
+    )
+
+    await _assert_model_gateway_ready(settings=settings)
+
+    assert captured["timeout_seconds"] == 7
 
 
 @pytest.mark.asyncio

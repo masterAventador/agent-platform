@@ -1,7 +1,12 @@
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from agent_platform.platform.models import (
+    DEFAULT_MODEL_ALIASES,
+    validate_gateway_alias,
+)
 
 
 class AppSettings(BaseSettings):
@@ -27,6 +32,12 @@ class AppSettings(BaseSettings):
     runtime_heartbeat_seconds: float = Field(default=10.0, ge=1, le=100)
     runtime_cancel_poll_initial_seconds: float = Field(default=0.25, ge=0.01, le=5)
     runtime_cancel_poll_max_seconds: float = Field(default=2.0, ge=0.01, le=10)
+    llm_gateway_url: SecretStr = SecretStr("http://127.0.0.1:4000/v1")
+    llm_gateway_api_key: SecretStr = SecretStr("")
+    llm_gateway_request_timeout_seconds: float = Field(default=120, gt=0, le=3_600)
+    llm_gateway_readiness_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    llm_gateway_max_retries: int = Field(default=2, ge=0, le=10)
+    llm_gateway_allowed_aliases: frozenset[str] = DEFAULT_MODEL_ALIASES
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"
@@ -54,6 +65,22 @@ class AppSettings(BaseSettings):
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
+
+    @field_validator("llm_gateway_allowed_aliases")
+    @classmethod
+    def validate_llm_gateway_allowed_aliases(
+        cls, aliases: frozenset[str]
+    ) -> frozenset[str]:
+        if not aliases:
+            raise ValueError("model gateway alias allowlist must not be empty")
+        for alias in aliases:
+            try:
+                validate_gateway_alias(alias)
+            except ValueError:
+                raise ValueError(
+                    "model gateway alias allowlist contains an invalid alias"
+                ) from None
+        return aliases
 
     @model_validator(mode="after")
     def validate_runtime_heartbeat(self) -> "AppSettings":

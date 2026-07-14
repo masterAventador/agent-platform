@@ -16,12 +16,11 @@ from agent_platform.sandbox.ports import RunExecutionEnvironment
 from agent_platform.workers import runtime_composition as runtime_composition_module
 from agent_platform.workers.runtime_composition import (
     ComposedRuntimeResolver,
-    ModelProviderAdapterMissing,
+    ModelGatewayUnavailable,
     PlatformModelResolver,
     PlatformRuntimeSelector,
     PublishedModel,
     PublishedRuntimeCapabilities,
-    UnsupportedModelProvider,
     UntrustedRuntimeDefinition,
     extend_runtime_definition,
 )
@@ -129,11 +128,19 @@ async def session_factory():
 def autonomous_definition(**changes: object) -> dict[str, object]:
     return {
         "work_mode": "autonomous",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "skill_ids": [],
         "tool_ids": [],
         **changes,
     }
+
+
+def injected_model_resolver() -> tuple[PlatformModelResolver, GenericFakeChatModel]:
+    model = GenericFakeChatModel(messages=iter(["ok"]))
+    return (
+        PlatformModelResolver(injected_models={"general-purpose": model}),
+        model,
+    )
 
 
 def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> None:
@@ -148,7 +155,9 @@ def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> N
         )
     )
 
-    assert capabilities.model == PublishedModel(provider="openai", name="gpt-5")
+    assert capabilities.model == PublishedModel(
+        kind="gateway_alias", alias="general-purpose"
+    )
     assert capabilities.skill_ids == (skill_id,)
     assert capabilities.tool_ids == (tool_id,)
 
@@ -184,26 +193,38 @@ def test_all_invalid_published_fields_are_permanent_preparation_errors(
         PublishedRuntimeCapabilities.from_definition(definition)
 
 
-def test_model_resolver_is_allowlisted_and_supports_host_side_injection() -> None:
+def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
     fake_model = GenericFakeChatModel(messages=iter(["ok"]))
-    resolver = PlatformModelResolver(injected_models={("openai", "gpt-5"): fake_model})
+    resolver = PlatformModelResolver(injected_models={"general-purpose": fake_model})
 
-    assert resolver.resolve(PublishedModel(provider="openai", name="gpt-5")) is fake_model
     assert (
-        PlatformModelResolver().resolve(
-            PublishedModel(provider="anthropic", name="claude-sonnet-4-5")
+        resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose")
         )
-        == "anthropic:claude-sonnet-4-5"
+        is fake_model
     )
-    with pytest.raises(UnsupportedModelProvider):
-        resolver.resolve(PublishedModel(provider="untrusted", name="remote-model"))
 
 
-def test_model_resolver_fails_fast_when_official_provider_adapter_is_missing() -> None:
-    resolver = PlatformModelResolver(module_finder=lambda _: None)
+def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
+    resolver = PlatformModelResolver()
 
-    with pytest.raises(ModelProviderAdapterMissing, match="openai"):
-        resolver.resolve(PublishedModel(provider="openai", name="gpt-5"))
+    with pytest.raises(ModelGatewayUnavailable, match="gateway"):
+        resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose")
+        )
+
+
+def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
+    factory_calls: list[str] = []
+    model = GenericFakeChatModel(messages=iter(["ok"]))
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias: factory_calls.append(alias) or model
+    )
+
+    with pytest.raises(ModelGatewayUnavailable, match="allowlist"):
+        resolver.resolve(PublishedModel(kind="gateway_alias", alias="unconfigured-alias"))
+
+    assert factory_calls == []
 
 
 def test_prepare_layer_is_the_only_source_of_runtime_skill_paths() -> None:
@@ -231,12 +252,14 @@ async def test_composed_resolver_uses_one_environment_for_skills_and_runtime(
     )
     manager = RecordingSandboxManager()
     selector = RecordingSelector()
+    model_resolver, model = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
         runtime_selector=selector,
+        model_resolver=model_resolver,
     )
 
     prepared = await resolver.resolve(run, autonomous_definition())
@@ -252,7 +275,7 @@ async def test_composed_resolver_uses_one_environment_for_skills_and_runtime(
     assert isinstance(environment, RunExecutionEnvironment)
     assert environment.workspace is manager.workspace
     assert environment.backend is manager.backend
-    assert selector.selection["model"] == "openai:gpt-5"
+    assert selector.selection["model"] is model
     assert prepared.employee_definition["skill_paths"] == []
 
     await prepared.close()
@@ -273,12 +296,14 @@ async def test_composed_resolver_recovers_the_existing_sandbox_without_acquiring
     )
     manager = RecordingSandboxManager()
     selector = RecordingSelector()
+    model_resolver, _ = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
         runtime_selector=selector,
+        model_resolver=model_resolver,
     )
 
     prepared = await resolver.recover(run, autonomous_definition())
@@ -306,12 +331,14 @@ async def test_initial_transient_preparation_detaches_without_deleting_environme
         input_data={},
     )
     manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
         runtime_selector=RecordingSelector(fail=True),
+        model_resolver=model_resolver,
     )
 
     with pytest.raises(RuntimeError, match="selection failed"):
@@ -333,6 +360,7 @@ async def test_initial_permanent_preparation_defers_delete_until_failure_is_pers
         input_data={},
     )
     manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
@@ -341,6 +369,7 @@ async def test_initial_permanent_preparation_defers_delete_until_failure_is_pers
         runtime_selector=RecordingSelector(
             error=UntrustedRuntimeDefinition("permanent")
         ),
+        model_resolver=model_resolver,
     )
 
     with pytest.raises(UntrustedRuntimeDefinition) as captured:
@@ -363,12 +392,14 @@ async def test_transient_recovery_composition_detaches_without_deleting_and_can_
         input_data={},
     )
     manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
         runtime_selector=RecordingSelector(fail=True),
+        model_resolver=model_resolver,
     )
 
     with pytest.raises(RuntimeRecoveryTransient):
@@ -395,12 +426,14 @@ async def test_transient_preparation_error_detaches_without_deleting_sandbox(
         input_data={},
     )
     manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
         runtime_selector=RecordingSelector(fail=True),
+        model_resolver=model_resolver,
     )
 
     with pytest.raises(RuntimeError, match="selection failed"):
@@ -467,15 +500,16 @@ def test_selector_routes_only_published_workflow_references() -> None:
             "workflow_version": 3,
         }
     )
+    model = GenericFakeChatModel(messages=iter(["ok"]))
 
     selector.select(
-        capabilities=autonomous, tools=[], environment=environment, model="openai:gpt-5"
+        capabilities=autonomous, tools=[], environment=environment, model=model
     )
-    selector.select(capabilities=workflow, tools=[], environment=environment, model="openai:gpt-5")
+    selector.select(capabilities=workflow, tools=[], environment=environment, model=model)
 
     assert calls == [
-        ("deep-agent", environment, "openai:gpt-5"),
-        (workflow_id, 3, environment, "openai:gpt-5"),
+        ("deep-agent", environment, model),
+        (workflow_id, 3, environment, model),
     ]
 
 
@@ -509,12 +543,13 @@ def test_default_autonomous_selector_injects_durable_checkpointer(monkeypatch) -
         workspace=manager.workspace,
         backend=manager.backend,
     )
+    model = GenericFakeChatModel(messages=iter(["ok"]))
 
     selector.select(
         capabilities=PublishedRuntimeCapabilities.from_definition(autonomous_definition()),
         tools=[],
         environment=environment,
-        model="openai:gpt-5",
+        model=model,
     )
 
-    assert calls == [(environment, "openai:gpt-5", checkpointer)]
+    assert calls == [(environment, model, checkpointer)]

@@ -128,8 +128,8 @@ async def _main() -> None:
     slow_model = ToolBindingCancellableSlowChatModel()
     resolver = PlatformModelResolver(
         injected_models={
-            ("openai", "gpt-5"): model,
-            ("openai", "slow-cancel"): slow_model,
+            "general-purpose": model,
+            "slow-cancel": slow_model,
         },
     )
     await run_worker_service(

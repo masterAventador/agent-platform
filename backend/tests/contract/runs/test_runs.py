@@ -93,7 +93,7 @@ async def _create_cancel_requested_run(client: AsyncClient, tenant_id: str) -> d
                 "role_description": "验证多工作区流隔离",
                 "work_mode": "autonomous",
                 "system_prompt": "按输入执行任务。",
-                "model": {"provider": "openai", "name": "gpt-5"},
+                "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                 "input_schema": {"type": "object"},
                 "output_schema": {"type": "object"},
                 "capabilities": {
@@ -139,7 +139,7 @@ async def test_create_and_read_queued_run_for_published_employee(run_client: Asy
         "role_description": "用于任务契约验证",
         "work_mode": "autonomous",
         "system_prompt": "按输入执行任务。",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
@@ -217,7 +217,7 @@ async def test_member_run_access_is_owner_scoped_and_admin_can_manage_any_run(
                 "role_description": "验证任务所有权",
                 "work_mode": "autonomous",
                 "system_prompt": "只验证任务权限。",
-                "model": {"provider": "openai", "name": "gpt-5"},
+                "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                 "input_schema": {"type": "object"},
                 "output_schema": {"type": "object"},
                 "capabilities": {
@@ -342,7 +342,7 @@ async def test_member_cannot_probe_draft_employee_when_creating_run(
                 "role_description": "验证运行创建的资源防枚举",
                 "work_mode": "autonomous",
                 "system_prompt": "仅用于权限测试。",
-                "model": {"provider": "openai", "name": "gpt-5"},
+                "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                 "input_schema": {"type": "object"},
                 "output_schema": {"type": "object"},
                 "capabilities": {

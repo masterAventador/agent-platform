@@ -1,0 +1,20 @@
+model_list:
+  - model_name: general-purpose
+    litellm_params:
+      model: openai/primary-test
+      api_key: os.environ/LITELLM_UPSTREAM_API_KEY
+      api_base: http://openai-stub:4010/primary/v1
+  - model_name: general-purpose-fallback
+    litellm_params:
+      model: openai/fallback-test
+      api_key: os.environ/LITELLM_UPSTREAM_API_KEY
+      api_base: http://openai-stub:4010/fallback/v1
+
+router_settings:
+  num_retries: 1
+  fallbacks:
+    - general-purpose:
+        - general-purpose-fallback
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

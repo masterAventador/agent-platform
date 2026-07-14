@@ -25,6 +25,13 @@ from agent_platform.infrastructure.database.repositories.runtime_ownership impor
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
+from agent_platform.infrastructure.llm.litellm import (
+    LiteLLMChatModelFactory,
+    LiteLLMGatewayReadinessProbe,
+    ModelGatewayConfigurationError,
+    ModelGatewayReadiness,
+    ModelGatewayReadinessError,
+)
 from agent_platform.infrastructure.mcp.executor import MCPToolExecutor
 from agent_platform.infrastructure.mcp.resolver import DatabaseMCPClientResolver
 from agent_platform.infrastructure.object_storage.minio import (
@@ -176,6 +183,7 @@ async def run_worker_service(
     consumer_name: str | None = None,
     replicas: int = 1,
     model_resolver: PlatformModelResolver | None = None,
+    gateway_readiness: ModelGatewayReadiness | None = None,
     ready_file: Path = WORKER_READY_FILE,
 ) -> None:
     if replicas != 1:
@@ -185,6 +193,11 @@ async def run_worker_service(
 
     initialize_database_metadata()
     app_settings = settings or AppSettings()
+    if runtime_resolver is None and model_resolver is None:
+        await _assert_model_gateway_ready(
+            settings=app_settings,
+            readiness=gateway_readiness,
+        )
     engine = create_async_engine(app_settings.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     redis = Redis.from_url(app_settings.redis_url, decode_responses=True)
@@ -315,6 +328,19 @@ def _build_runtime_resolver(
     model_resolver: PlatformModelResolver | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> RuntimeResolver:
+    if model_resolver is None:
+        try:
+            model_resolver = PlatformModelResolver(
+                model_factory=LiteLLMChatModelFactory(
+                    base_url=settings.llm_gateway_url,
+                    api_key=settings.llm_gateway_api_key,
+                    timeout_seconds=settings.llm_gateway_request_timeout_seconds,
+                    max_retries=settings.llm_gateway_max_retries,
+                ),
+                allowed_aliases=settings.llm_gateway_allowed_aliases,
+            )
+        except ModelGatewayConfigurationError as error:
+            raise WorkerConfigurationError("model gateway is not configured") from error
     adapters = _load_runtime_adapters(settings, session_factory=session_factory)
     tool_reader = _SessionToolReader(session_factory)
     gateway = ToolGateway(
@@ -345,6 +371,22 @@ def _build_runtime_resolver(
         close_callback=adapters.aclose,
         model_resolver=model_resolver,
     )
+
+
+async def _assert_model_gateway_ready(
+    *,
+    settings: AppSettings,
+    readiness: ModelGatewayReadiness | None = None,
+) -> None:
+    try:
+        probe = readiness or LiteLLMGatewayReadinessProbe(
+            base_url=settings.llm_gateway_url,
+            api_key=settings.llm_gateway_api_key,
+            timeout_seconds=settings.llm_gateway_readiness_timeout_seconds,
+        )
+        await probe.assert_ready(settings.llm_gateway_allowed_aliases)
+    except (ModelGatewayConfigurationError, ModelGatewayReadinessError) as error:
+        raise WorkerConfigurationError("model gateway is not ready") from error
 
 
 def _checkpoint_url(database_url: str) -> str:

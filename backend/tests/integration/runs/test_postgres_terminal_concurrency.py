@@ -170,7 +170,7 @@ async def _create_active_run(
                 "role_description": "验证终态并发串行化",
                 "work_mode": "autonomous",
                 "system_prompt": "按固定流程执行。",
-                "model": {"provider": "openai", "name": "gpt-5"},
+                "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                 "input_schema": {"type": "object"},
                 "output_schema": {"type": "object"},
                 "capabilities": {

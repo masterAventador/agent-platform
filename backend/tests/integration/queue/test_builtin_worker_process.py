@@ -12,6 +12,7 @@ def test_worker_process_builds_builtin_adapters_without_external_module(tmp_path
         "AGENT_PLATFORM_SANDBOX_CONTROLLER_SECRET": "process-controller-secret",
         "AGENT_PLATFORM_SANDBOX_CONTROLLER_URL": "http://sandbox-controller:8090",
         "AGENT_PLATFORM_LOCAL_CREDENTIALS_REPOSITORY_ROOT": str(tmp_path),
+        "AGENT_PLATFORM_LLM_GATEWAY_API_KEY": "process-gateway-key",
     }
     environment.pop("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", None)
 

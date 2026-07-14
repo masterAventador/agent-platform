@@ -1,0 +1,11 @@
+model_list:
+  - model_name: general-purpose
+    litellm_params:
+      model: os.environ/LITELLM_UPSTREAM_MODEL
+      api_key: os.environ/LITELLM_UPSTREAM_API_KEY
+      # In v1.86.2, an empty value is resolved as ""; the documented
+      # DashScope/Volcengine chat adapters treat it as unset and use their defaults.
+      api_base: os.environ/LITELLM_UPSTREAM_API_BASE
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

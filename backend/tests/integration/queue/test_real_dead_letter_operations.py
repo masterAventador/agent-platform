@@ -83,7 +83,7 @@ async def test_real_postgres_dead_letter_service_and_api(postgres_url: str) -> N
                     "role_description": "验证 PostgreSQL 死信恢复",
                     "work_mode": "autonomous",
                     "system_prompt": "恢复任务。",
-                    "model": {"provider": "openai", "name": "gpt-5"},
+                    "model": {"kind": "gateway_alias", "alias": "general-purpose"},
                     "input_schema": {"type": "object"},
                     "output_schema": {"type": "object"},
                     "capabilities": {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.config import AppSettings
@@ -91,6 +92,7 @@ def test_builtin_adapter_bundle_fails_fast_without_controller_secret(tmp_path) -
 
 def test_unregistered_workflow_fails_closed() -> None:
     factory = RegisteredWorkflowFactory()
+    model = GenericFakeChatModel(messages=iter(["ok"]))
 
     with pytest.raises(WorkflowNotRegistered, match="not registered"):
-        factory(uuid4(), 1, [], object(), "openai:gpt-5")
+        factory(uuid4(), 1, [], object(), model)

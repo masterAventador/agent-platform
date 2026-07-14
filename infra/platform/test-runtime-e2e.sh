@@ -69,8 +69,6 @@ fi
 
 cd "${ROOT_DIR}/frontend"
 PLAYWRIGHT_RUNTIME_BASE_URL="http://127.0.0.1:15174" \
-PLAYWRIGHT_RUNTIME_MODEL_PROVIDER="openai" \
-PLAYWRIGHT_RUNTIME_MODEL_NAME="gpt-5" \
 PLAYWRIGHT_RUNTIME_EXPECTED_OUTPUT="Runtime E2E completed in the real worker." \
 PLAYWRIGHT_RUNTIME_EXPECTED_SCHEMA_VERSION="${HEAD_REVISION}" \
 pnpm exec playwright test --config playwright.runtime.config.ts

@@ -52,7 +52,7 @@ def _employee(
             visibility=EmployeeVisibility.TENANT,
             runtime_type=RuntimeType.AUTONOMOUS,
             system_prompt="仅用于隔离 Playwright E2E 验收。",
-            model_settings={"provider": "openai", "name": "gpt-5"},
+            model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
             input_schema={"type": "object"},
             output_schema={"type": "object"},
             capabilities={

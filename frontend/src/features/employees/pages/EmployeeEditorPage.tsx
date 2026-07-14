@@ -15,8 +15,7 @@ interface EmployeeFormValues {
   roleDescription: string
   workMode: WorkMode
   systemPrompt: string
-  modelProvider: string
-  modelName: string
+  modelAlias: 'general-purpose'
   conversation: boolean
   fileUpload: boolean
   scheduledTasks: boolean
@@ -29,8 +28,7 @@ const defaultValues: EmployeeFormValues = {
   roleDescription: '',
   workMode: 'autonomous',
   systemPrompt: '',
-  modelProvider: 'openai',
-  modelName: 'gpt-5',
+  modelAlias: 'general-purpose',
   conversation: true,
   fileUpload: false,
   scheduledTasks: false,
@@ -65,8 +63,7 @@ export function EmployeeEditorPage() {
       roleDescription: employee.definition.role_description,
       workMode: employee.definition.work_mode,
       systemPrompt: employee.definition.system_prompt,
-      modelProvider: employee.definition.model.provider,
-      modelName: employee.definition.model.name,
+      modelAlias: 'general-purpose',
       conversation: employee.definition.capabilities.conversation,
       fileUpload: false,
       scheduledTasks: false,
@@ -91,7 +88,7 @@ export function EmployeeEditorPage() {
       visibility: existing?.visibility ?? 'tenant',
       work_mode: 'autonomous',
       system_prompt: values.systemPrompt,
-      model: { provider: values.modelProvider, name: values.modelName },
+      model: { kind: 'gateway_alias', alias: 'general-purpose' },
       input_schema: existing?.input_schema ?? { type: 'object' },
       output_schema: existing?.output_schema ?? { type: 'object' },
       capabilities: {
@@ -181,14 +178,16 @@ export function EmployeeEditorPage() {
           <Form.Item label="系统指令" name="systemPrompt" rules={[{ required: true }]}>
             <Input.TextArea rows={6} />
           </Form.Item>
-          <Space className="employee-model-row" align="start" size="middle">
-            <Form.Item label="模型供应商" name="modelProvider" rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item label="模型名称" name="modelName" rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-          </Space>
+          <Form.Item label="平台模型" name="modelAlias">
+            <Select
+              disabled
+              virtual={false}
+              options={[{ value: 'general-purpose', label: 'general-purpose' }]}
+            />
+          </Form.Item>
+          <Typography.Paragraph type="secondary">
+            当前仅开放平台默认模型，供应商与实际模型路由由平台统一管理。
+          </Typography.Paragraph>
           <Form.Item label="能力">
             <Space wrap>
               <Form.Item name="conversation" valuePropName="checked" noStyle>

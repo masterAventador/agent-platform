@@ -1,0 +1,91 @@
+services:
+  litellm:
+    environment:
+      LITELLM_UPSTREAM_MODEL: openai/local-test
+      LITELLM_UPSTREAM_API_KEY: stub-not-a-provider-key
+      LITELLM_UPSTREAM_API_BASE: http://openai-stub:4010/v1
+    depends_on:
+      openai-stub:
+        condition: service_healthy
+    volumes:
+      - ../litellm/config.stub.yaml:/app/config.yaml:ro
+
+  openai-stub:
+    image: ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb
+    entrypoint: ["python3"]
+    command: ["/stub/openai_stub.py"]
+    expose:
+      - "4010"
+    volumes:
+      - ../litellm/openai_stub.py:/stub/openai_stub.py:ro
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:4010/health', timeout=3).read()
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,uid=65534,gid=65534
+    security_opt:
+      - no-new-privileges:true
+    networks: [database]
+    restart: "no"
+
+  legacy-worker-key-seed:
+    profiles: ["worker-e2e"]
+    image: ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb
+    entrypoint: ["python3"]
+    command: ["/seed/seed_legacy_key.py"]
+    environment:
+      LITELLM_BOOTSTRAP_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      LITELLM_WORKER_API_KEY: ${LITELLM_WORKER_API_KEY:?set LITELLM_WORKER_API_KEY}
+    volumes:
+      - ../litellm/seed_legacy_key.py:/seed/seed_legacy_key.py:ro
+    networks: [database]
+    depends_on:
+      litellm:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,uid=65534,gid=65534
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  worker-gateway-probe:
+    profiles: ["worker-e2e"]
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    image: agent-platform-backend:litellm-probe
+    entrypoint: ["python", "/probe/worker_gateway_probe.py"]
+    command: ["readiness"]
+    environment:
+      AGENT_PLATFORM_LLM_GATEWAY_URL: http://litellm:4000/v1
+      AGENT_PLATFORM_LLM_GATEWAY_API_KEY: ${LITELLM_WORKER_API_KEY:?set LITELLM_WORKER_API_KEY}
+    volumes:
+      - ../litellm/worker_gateway_probe.py:/probe/worker_gateway_probe.py:ro
+    networks: [llm]
+    depends_on:
+      litellm:
+        condition: service_healthy
+      worker-key-bootstrap:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"

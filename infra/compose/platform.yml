@@ -97,10 +97,10 @@ services:
       AGENT_PLATFORM_SANDBOX_CONTROLLER_SECRET: ${SANDBOX_CONTROLLER_BEARER_SECRET:?set SANDBOX_CONTROLLER_BEARER_SECRET}
       AGENT_PLATFORM_SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS: ${SANDBOX_CONTROLLER_REQUEST_TIMEOUT_SECONDS:-130}
       AGENT_PLATFORM_SANDBOX_TTL_SECONDS: ${SANDBOX_TTL_SECONDS:-3600}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_PLATFORM_LLM_GATEWAY_URL: ${AGENT_PLATFORM_LLM_GATEWAY_URL:-http://litellm:4000/v1}
+      AGENT_PLATFORM_LLM_GATEWAY_API_KEY: ${AGENT_PLATFORM_LLM_GATEWAY_API_KEY:?set AGENT_PLATFORM_LLM_GATEWAY_API_KEY}
     extra_hosts: *host-gateway
-    networks: [core, sandbox-control]
+    networks: [core, sandbox-control, llm]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -198,3 +198,6 @@ networks:
     name: agent-platform_default
   sandbox-control:
     internal: true
+  llm:
+    external: true
+    name: agent-platform-llm

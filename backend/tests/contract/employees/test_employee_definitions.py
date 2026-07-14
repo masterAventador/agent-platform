@@ -110,7 +110,7 @@ def employee_definition(
         "role_description": "验证当前可运行配置",
         "work_mode": work_mode,
         "system_prompt": "仅使用当前可运行能力。",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
@@ -129,7 +129,7 @@ def legacy_draft(*, name: str, work_mode: RuntimeType = RuntimeType.WORKFLOW) ->
         visibility=EmployeeVisibility.TENANT,
         runtime_type=work_mode,
         system_prompt="历史配置只允许读取。",
-        model_settings={"provider": "openai", "name": "gpt-5"},
+        model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
         input_schema={"type": "object"},
         output_schema={"type": "object"},
         capabilities={
@@ -164,7 +164,7 @@ async def test_create_update_publish_and_list_employee_versions(
             "visibility": "tenant",
             "work_mode": "autonomous",
             "system_prompt": "先核实信息来源，再形成结构化报告。",
-            "model": {"provider": "openai", "name": "gpt-5"},
+            "model": {"kind": "gateway_alias", "alias": "general-purpose"},
             "input_schema": {"type": "object", "required": ["topic"]},
             "output_schema": {"type": "object", "required": ["report"]},
             "capabilities": {
@@ -255,7 +255,7 @@ async def test_employee_is_not_visible_across_tenants(
             "role_description": "仅属于租户一",
             "work_mode": "autonomous",
             "system_prompt": "按固定步骤执行。",
-            "model": {"provider": "openai", "name": "gpt-5"},
+            "model": {"kind": "gateway_alias", "alias": "general-purpose"},
             "input_schema": {"type": "object"},
             "output_schema": {"type": "object"},
             "capabilities": {
@@ -595,3 +595,104 @@ async def test_admin_manages_employees_while_member_only_sees_published_tenant_e
             headers=headers,
         )
     ).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_employee_model_is_strictly_a_provider_neutral_gateway_alias(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+) -> None:
+    owner, _ = employee_clients
+    current_user = await register_and_login(owner, "model-contract-owner@example.com")
+    headers = {"X-Tenant-ID": current_user["workspaces"][0]["id"]}
+
+    invalid_models = [
+        {"provider": "openai", "name": "gpt-5"},
+        {"provider": "dashscope", "name": "qwen-plus"},
+        {"kind": "gateway_alias", "alias": "dashscope/qwen-plus"},
+        {"kind": "gateway_alias", "alias": "volcengine:doubao"},
+        {"kind": "gateway_alias", "alias": "UpperCase"},
+        {"kind": "gateway_alias", "alias": "-leading-separator"},
+        {"kind": "gateway_alias", "alias": "a" * 65},
+        {"kind": "gateway_alias", "alias": "unconfigured-alias"},
+        {"kind": "direct_provider", "alias": "general-purpose"},
+        {"kind": "gateway_alias", "alias": "general-purpose", "api_key": "secret"},
+        {"kind": "gateway_alias", "alias": "general-purpose", "base_url": "https://llm"},
+    ]
+    for index, model in enumerate(invalid_models):
+        response = await owner.post(
+            "/api/v1/employees",
+            headers=headers,
+            json={**employee_definition(name=f"非法模型 {index}"), "model": model},
+        )
+        assert response.status_code == 422
+
+    valid = await owner.post(
+        "/api/v1/employees",
+        headers=headers,
+        json={
+            **employee_definition(name="网关别名员工"),
+            "model": {"kind": "gateway_alias", "alias": "general-purpose"},
+        },
+    )
+    assert valid.status_code == 201
+    assert valid.json()["definition"]["model"] == {
+        "kind": "gateway_alias",
+        "alias": "general-purpose",
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_allowlist_does_not_bypass_authentication(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+) -> None:
+    _, unauthenticated = employee_clients
+
+    response = await unauthenticated.post(
+        "/api/v1/employees",
+        json={
+            **employee_definition(name="未认证模型探测"),
+            "model": {"kind": "gateway_alias", "alias": "unconfigured-alias"},
+        },
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_model_alias_allowlist_is_authoritative_for_update_and_publish(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    app, _, owner = employee_api
+    current_user = await register_and_login(owner, "model-allowlist-owner@example.com")
+    headers = {"X-Tenant-ID": current_user["workspaces"][0]["id"]}
+    created = await owner.post(
+        "/api/v1/employees",
+        headers=headers,
+        json=employee_definition(name="模型白名单员工"),
+    )
+    assert created.status_code == 201
+    employee_id = created.json()["id"]
+
+    rejected_update = await owner.put(
+        f"/api/v1/employees/{employee_id}",
+        headers=headers,
+        json={
+            **employee_definition(name="模型白名单员工"),
+            "model": {"kind": "gateway_alias", "alias": "unconfigured-alias"},
+        },
+    )
+    assert rejected_update.status_code == 422
+    assert rejected_update.json()["detail"] == {
+        "code": "employee_model_alias_unavailable",
+        "message": "所选模型当前未由平台启用",
+    }
+
+    app.state.settings.llm_gateway_allowed_aliases = frozenset({"temporary-test"})
+    rejected_publish = await owner.post(
+        f"/api/v1/employees/{employee_id}/publish",
+        headers=headers,
+    )
+    assert rejected_publish.status_code == 422
+    assert rejected_publish.json()["detail"]["code"] == (
+        "employee_model_alias_unavailable"
+    )

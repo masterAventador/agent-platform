@@ -7,8 +7,6 @@ import { registerAndLogin } from './helpers/auth'
 import { queryRuntimeDatabase } from './helpers/runtime-infra'
 
 
-const modelProvider = process.env.PLAYWRIGHT_RUNTIME_MODEL_PROVIDER ?? 'openai'
-const modelName = process.env.PLAYWRIGHT_RUNTIME_MODEL_NAME ?? 'gpt-5'
 const expectedOutput = process.env.PLAYWRIGHT_RUNTIME_EXPECTED_OUTPUT
   ?? 'Runtime E2E completed in the real worker.'
 const slowModelStartedFile = '/tmp/agent-platform-runtime-e2e-slow-model-started'
@@ -23,8 +21,6 @@ test('用户可以通过真实 Worker 完成自主员工任务并看到模型输
   await page.getByLabel('员工名称').fill('运行时验收专员')
   await page.getByLabel('岗位说明').fill('验证数字员工真实运行链路')
   await page.getByLabel('系统指令').fill(`无论用户输入什么，只回复：${expectedOutput}`)
-  await page.getByLabel('模型供应商').fill(modelProvider)
-  await page.getByLabel('模型名称').fill(modelName)
   await page.getByRole('button', { name: '保存草稿' }).click()
 
   await expect(page).toHaveURL(/\/employees\/[0-9a-f-]+$/)
@@ -66,13 +62,28 @@ test('用户可以通过真实 Worker 完成自主员工任务并看到模型输
 test('用户可以取消正在调用模型的真实 Worker 任务且运行停止', async ({ page }) => {
   await registerAndLogin(page)
 
+  // slow-cancel 是 Worker 夹具专用 alias，不通过只开放平台模型的生产 UI 暴露。
+  await page.route(/\/api\/v1\/employees$/, async (route) => {
+    const request = route.request()
+    if (request.method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const payload = request.postDataJSON() as Record<string, unknown>
+    await route.continue({
+      headers: { ...request.headers(), 'content-type': 'application/json' },
+      postData: JSON.stringify({
+        ...payload,
+        model: { kind: 'gateway_alias', alias: 'slow-cancel' },
+      }),
+    })
+  })
+
   await page.getByRole('link', { name: '数字员工' }).click()
   await page.getByRole('button', { name: '创建数字员工' }).click()
   await page.getByLabel('员工名称').fill('取消验收专员')
   await page.getByLabel('岗位说明').fill('验证真实 Worker 的取消链路')
   await page.getByLabel('系统指令').fill('等待模型回复，除非用户取消任务。')
-  await page.getByLabel('模型供应商').fill('openai')
-  await page.getByLabel('模型名称').fill('slow-cancel')
   await page.getByRole('button', { name: '保存草稿' }).click()
   await page.getByRole('button', { name: '发布员工' }).click()
   await expect(page.getByText('已发布', { exact: true })).toBeVisible()

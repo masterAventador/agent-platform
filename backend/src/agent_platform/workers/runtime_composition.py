@@ -4,14 +4,13 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from importlib.util import find_spec
 from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, field_validator
+from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.runs import (
@@ -23,6 +22,10 @@ from agent_platform.infrastructure.database.repositories.skills import (
 )
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
+)
+from agent_platform.platform.models import (
+    DEFAULT_MODEL_ALIASES,
+    GatewayModelReference,
 )
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
@@ -55,13 +58,8 @@ from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.sandbox.ports import RunExecutionEnvironment
 
 RuntimeWorkMode = Literal["autonomous", "workflow", "hybrid"]
-ResolvedModel = str | BaseChatModel
+ResolvedModel = BaseChatModel
 DEFAULT_RUN_SANDBOX_TTL = timedelta(hours=1)
-DEFAULT_MODEL_PROVIDERS = frozenset({"anthropic", "openai"})
-MODEL_PROVIDER_MODULES = {
-    "anthropic": "langchain_anthropic",
-    "openai": "langchain_openai",
-}
 logger = logging.getLogger(__name__)
 
 
@@ -121,31 +119,14 @@ class UntrustedRuntimeDefinition(PermanentRuntimePreparationError):
     code = "invalid_runtime_definition"
 
 
-class UnsupportedModelProvider(PermanentRuntimePreparationError):
-    """发布定义请求了平台未启用的模型供应商。"""
+class ModelGatewayUnavailable(PermanentRuntimePreparationError):
+    """宿主进程没有可用的内部模型网关客户端。"""
 
-    code = "unsupported_model_provider"
-
-
-class ModelProviderAdapterMissing(PermanentRuntimePreparationError):
-    """平台允许了供应商，但宿主进程没有安装对应官方适配器。"""
-
-    code = "model_provider_unavailable"
+    code = "model_gateway_unavailable"
 
 
-class PublishedModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    provider: str
-    name: str
-
-    @field_validator("provider", "name")
-    @classmethod
-    def validate_component(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized or normalized != value or ":" in normalized:
-            raise ValueError("model provider and name must be non-empty canonical components")
-        return normalized
+class PublishedModel(GatewayModelReference):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,29 +184,28 @@ class PublishedRuntimeCapabilities:
 
 
 class PlatformModelResolver:
-    """只解析平台允许的发布模型；凭据始终留在宿主进程环境。"""
+    """只解析 provider-neutral alias；凭据与路由留在宿主进程。"""
 
     def __init__(
         self,
         *,
-        allowed_providers: frozenset[str] = DEFAULT_MODEL_PROVIDERS,
-        injected_models: Mapping[tuple[str, str], BaseChatModel] | None = None,
-        module_finder: Callable[[str], object | None] = find_spec,
+        injected_models: Mapping[str, BaseChatModel] | None = None,
+        model_factory: Callable[[str], BaseChatModel] | None = None,
+        allowed_aliases: frozenset[str] = DEFAULT_MODEL_ALIASES,
     ) -> None:
-        self._allowed_providers = allowed_providers
         self._injected_models = dict(injected_models or {})
-        self._module_finder = module_finder
+        self._model_factory = model_factory
+        self._allowed_aliases = allowed_aliases | self._injected_models.keys()
 
     def resolve(self, model: PublishedModel) -> ResolvedModel:
-        if model.provider not in self._allowed_providers:
-            raise UnsupportedModelProvider(model.provider)
-        injected = self._injected_models.get((model.provider, model.name))
+        if model.alias not in self._allowed_aliases:
+            raise ModelGatewayUnavailable("model alias is outside the platform allowlist")
+        injected = self._injected_models.get(model.alias)
         if injected is not None:
             return injected
-        module_name = MODEL_PROVIDER_MODULES.get(model.provider)
-        if module_name is None or self._module_finder(module_name) is None:
-            raise ModelProviderAdapterMissing(model.provider)
-        return f"{model.provider}:{model.name}"
+        if self._model_factory is None:
+            raise ModelGatewayUnavailable("model gateway factory is unavailable")
+        return self._model_factory(model.alias)
 
 
 AutonomousRuntimeFactory = Callable[

@@ -36,7 +36,7 @@ def _legacy_draft(*, name: str, runtime_type: RuntimeType) -> EmployeeDraft:
         visibility=EmployeeVisibility.TENANT,
         runtime_type=runtime_type,
         system_prompt="历史配置不可运行。",
-        model_settings={"provider": "openai", "name": "gpt-5"},
+        model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
         input_schema={"type": "object"},
         output_schema={"type": "object"},
         capabilities={
@@ -89,7 +89,7 @@ async def test_employee_lifecycle_on_postgres(
         "role_description": "验证真实 PostgreSQL 员工生命周期",
         "work_mode": "autonomous",
         "system_prompt": "完成真实数据库验证。",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {

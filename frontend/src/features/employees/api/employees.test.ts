@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 
 import { apiClient } from '../../../api/client'
-import type { EmployeeDefinition, EmployeeWriteDefinition } from './employees'
+import type {
+  EmployeeDefinition,
+  EmployeeWriteDefinition,
+  GatewayModelReference,
+} from './employees'
 import { createEmployee, updateEmployee } from './employees'
 
 
@@ -19,7 +23,7 @@ const definition: EmployeeWriteDefinition = {
   visibility: 'tenant',
   work_mode: 'autonomous',
   system_prompt: '完成用户交付的研究任务',
-  model: { provider: 'openai', name: 'gpt-5' },
+  model: { kind: 'gateway_alias', alias: 'general-purpose' },
   input_schema: { type: 'object' },
   output_schema: { type: 'object' },
   capabilities: {
@@ -42,6 +46,16 @@ describe('employee write boundary', () => {
   it('keeps legacy read definitions wider than the supported write contract', () => {
     expectTypeOf<EmployeeWriteDefinition>().toExtend<EmployeeDefinition>()
     expectTypeOf<EmployeeDefinition>().not.toExtend<EmployeeWriteDefinition>()
+    expectTypeOf<GatewayModelReference['alias']>().toEqualTypeOf<string>()
+  })
+
+  it('keeps the API model reference wide enough for configured backend aliases', () => {
+    const configuredModel: GatewayModelReference = {
+      kind: 'gateway_alias',
+      alias: 'future-configured-model',
+    }
+
+    expect(configuredModel.alias).toBe('future-configured-model')
   })
 
   it.each([

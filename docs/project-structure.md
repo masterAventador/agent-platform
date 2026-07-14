@@ -96,6 +96,7 @@ backend/
 │       ├── infrastructure/        # 技术基础设施实现
 │       │   ├── database/
 │       │   ├── cache/
+│       │   ├── llm/               # LiteLLM 公开 HTTP 协议的宿主侧 Adapter
 │       │   ├── object_storage/
 │       │   ├── queue/
 │       │   └── secrets/
@@ -143,6 +144,7 @@ workers ───────────┤
 - `knowledge/`、`tools/`、`memory/` 和 `sandbox/` 通过清晰接口被运行时调用；
 - `infrastructure/` 实现数据库、缓存、存储、队列和密钥等技术接口，不能承载业务决策；
 - API 和 Worker 共用同一个 Python 包与数据库模型，不拆成两套仓库或复制两套领域模型。
+- 数字员工只保存 provider-neutral 模型 alias；供应商模型和密钥只进入独立 LiteLLM 配置，Worker 通过 `infrastructure/llm/` 访问网关。
 
 ### 3.2 后端进程
 

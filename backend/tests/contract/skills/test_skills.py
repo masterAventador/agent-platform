@@ -183,7 +183,7 @@ async def test_employee_can_only_bind_published_tenant_skills(skill_client) -> N
         "role_description": "根据资料编写报告",
         "work_mode": "autonomous",
         "system_prompt": "使用已绑定 Skill 完成报告。",
-        "model": {"provider": "openai", "name": "gpt-5"},
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {

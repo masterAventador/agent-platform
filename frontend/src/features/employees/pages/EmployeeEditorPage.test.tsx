@@ -38,7 +38,7 @@ const employee: Employee = {
     visibility: 'tenant',
     work_mode: 'autonomous',
     system_prompt: '完成用户交付的研究任务',
-    model: { provider: 'openai', name: 'gpt-5' },
+    model: { kind: 'gateway_alias', alias: 'general-purpose' },
     input_schema: { type: 'object' },
     output_schema: { type: 'object' },
     capabilities: {
@@ -123,18 +123,31 @@ describe('EmployeeEditorPage configuration availability', () => {
     await user.type(screen.getByRole('textbox', { name: '员工名称' }), '研究专员')
     await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '负责研究任务')
     await user.type(screen.getByRole('textbox', { name: '系统指令' }), '完成研究任务')
+    expect(screen.queryByRole('textbox', { name: '模型供应商' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: '模型别名' })).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '平台模型' })).toBeDisabled()
+    expect(screen.getByText('general-purpose')).toBeInTheDocument()
     await user.click(screen.getByRole('checkbox', { name: '支持对话' }))
     await user.click(screen.getByRole('button', { name: '保存草稿' }))
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
     expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
       work_mode: 'autonomous',
+      model: { kind: 'gateway_alias', alias: 'general-purpose' },
       capabilities: {
         conversation: false,
         scheduled_tasks: false,
         file_upload: false,
       },
     }))
+  })
+
+  it('does not expose an interaction that can submit another model alias', () => {
+    renderEditor()
+
+    expect(screen.getAllByRole('combobox', { name: '平台模型' })).toHaveLength(1)
+    expect(screen.getByRole('combobox', { name: '平台模型' })).toBeDisabled()
+    expect(screen.queryByRole('textbox', { name: /模型/ })).not.toBeInTheDocument()
   })
 
   it('requires an explicit repair before a legacy employee can be saved', async () => {
@@ -190,5 +203,43 @@ describe('EmployeeEditorPage configuration availability', () => {
     renderEditor()
 
     expect(screen.getByText(/切换为自主执行并关闭未接通能力后重试/)).toBeInTheDocument()
+  })
+
+  it('maps a disabled platform model code to an actionable message', () => {
+    vi.mocked(useCreateEmployee).mockReturnValue(mutation({
+      isError: true,
+      error: {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: { detail: { code: 'employee_model_alias_unavailable' } },
+        },
+      },
+    }) as never)
+    renderEditor()
+
+    expect(screen.getByText(/该平台模型未启用.*联系管理员.*可用模型/)).toBeInTheDocument()
+  })
+
+  it('maps a backend model-alias 422 response to an actionable message', () => {
+    vi.mocked(useCreateEmployee).mockReturnValue(mutation({
+      isError: true,
+      error: {
+        isAxiosError: true,
+        response: {
+          status: 422,
+          data: {
+            detail: [{
+              type: 'string_pattern_mismatch',
+              loc: ['body', 'model', 'alias'],
+              msg: 'String should match pattern',
+            }],
+          },
+        },
+      },
+    }) as never)
+    renderEditor()
+
+    expect(screen.getByText(/模型别名无效.*小写字母或数字开头/)).toBeInTheDocument()
   })
 })

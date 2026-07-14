@@ -1,9 +1,15 @@
+import json
 import sqlite3
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import ModuleType
+from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy.dialects import postgresql
 
 BACKEND_ROOT = Path(__file__).parents[3]
 
@@ -187,4 +193,206 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260713_0015"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260714_0016"
+
+
+def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "model-gateway-alias.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "20260713_0015")
+
+    tenant_id = uuid4().hex
+    user_id = uuid4().hex
+    employee_id = uuid4().hex
+    now = "2026-07-14 00:00:00.000000"
+    old_model = {"provider": "dashscope", "name": "qwen-plus"}
+    definition = {
+        "name": "历史员工",
+        "work_mode": "autonomous",
+        "model": old_model,
+    }
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+            (tenant_id, "历史租户", "legacy-model-tenant", now),
+        )
+        connection.execute(
+            "INSERT INTO users "
+            "(id, email, password_hash, email_verified, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, "legacy@example.com", "hash", 0, now),
+        )
+        connection.execute(
+            "INSERT INTO employees "
+            "(id, tenant_id, created_by, name, avatar_url, role_description, visibility, "
+            "runtime_type, system_prompt, model_settings, input_schema, output_schema, "
+            "capabilities, skill_ids, tool_ids, knowledge_base_ids, approval_policy, "
+            "release_strategy, status, published_version, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                employee_id,
+                tenant_id,
+                user_id,
+                "历史员工",
+                None,
+                "迁移测试",
+                "tenant",
+                "autonomous",
+                "迁移测试",
+                json.dumps(old_model),
+                "{}",
+                "{}",
+                json.dumps({"conversation": True}),
+                "[]",
+                "[]",
+                "[]",
+                "{}",
+                json.dumps({"mode": "all"}),
+                "published",
+                1,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO employee_versions "
+            "(id, employee_id, tenant_id, version, definition, published_by, published_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uuid4().hex, employee_id, tenant_id, 1, json.dumps(definition), user_id, now),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        migrated_draft = json.loads(
+            connection.execute(
+                "SELECT model_settings FROM employees WHERE id = ?", (employee_id,)
+            ).fetchone()[0]
+        )
+        migrated_definition = json.loads(
+            connection.execute(
+                "SELECT definition FROM employee_versions WHERE employee_id = ?",
+                (employee_id,),
+            ).fetchone()[0]
+        )
+        backups = [
+            (kind, entity_id, json.loads(original_model))
+            for kind, entity_id, original_model in connection.execute(
+                "SELECT entity_kind, entity_id, original_model "
+                "FROM employee_model_migration_backups ORDER BY entity_kind"
+            ).fetchall()
+        ]
+    expected = {"kind": "gateway_alias", "alias": "general-purpose"}
+    assert migrated_draft == expected
+    assert migrated_definition["model"] == expected
+    assert [(kind, model) for kind, _, model in backups] == [
+        ("draft", old_model),
+        ("version", old_model),
+    ]
+
+    new_employee_id = uuid4().hex
+    new_version_id = uuid4().hex
+    new_model = {"kind": "gateway_alias", "alias": "general-purpose"}
+    new_definition = {**definition, "name": "迁移后员工", "model": new_model}
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO employees "
+            "(id, tenant_id, created_by, name, avatar_url, role_description, visibility, "
+            "runtime_type, system_prompt, model_settings, input_schema, output_schema, "
+            "capabilities, skill_ids, tool_ids, knowledge_base_ids, approval_policy, "
+            "release_strategy, status, published_version, created_at, updated_at) "
+            "SELECT ?, tenant_id, created_by, ?, avatar_url, role_description, visibility, "
+            "runtime_type, system_prompt, ?, input_schema, output_schema, capabilities, "
+            "skill_ids, tool_ids, knowledge_base_ids, approval_policy, release_strategy, "
+            "status, published_version, created_at, updated_at FROM employees WHERE id = ?",
+            (
+                new_employee_id,
+                "迁移后员工",
+                json.dumps(new_model),
+                employee_id,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO employee_versions "
+            "(id, employee_id, tenant_id, version, definition, published_by, published_at) "
+            "SELECT ?, ?, tenant_id, version, ?, published_by, published_at "
+            "FROM employee_versions WHERE employee_id = ?",
+            (
+                new_version_id,
+                new_employee_id,
+                json.dumps(new_definition),
+                employee_id,
+            ),
+        )
+        connection.commit()
+
+    command.downgrade(config, "20260713_0015")
+
+    with sqlite3.connect(database_path) as connection:
+        restored_draft = json.loads(
+            connection.execute(
+                "SELECT model_settings FROM employees WHERE id = ?", (employee_id,)
+            ).fetchone()[0]
+        )
+        restored_definition = json.loads(
+            connection.execute(
+                "SELECT definition FROM employee_versions WHERE employee_id = ?",
+                (employee_id,),
+            ).fetchone()[0]
+        )
+        backup_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'employee_model_migration_backups'"
+        ).fetchone()
+        downgraded_new_draft = json.loads(
+            connection.execute(
+                "SELECT model_settings FROM employees WHERE id = ?",
+                (new_employee_id,),
+            ).fetchone()[0]
+        )
+        downgraded_new_definition = json.loads(
+            connection.execute(
+                "SELECT definition FROM employee_versions WHERE id = ?",
+                (new_version_id,),
+            ).fetchone()[0]
+        )
+    assert restored_draft == old_model
+    assert restored_definition["model"] == old_model
+    legacy_fallback = {"provider": "openai", "name": "gpt-5"}
+    assert downgraded_new_draft == legacy_fallback
+    assert downgraded_new_definition["model"] == legacy_fallback
+    assert backup_table is None
+
+
+def test_model_gateway_alias_migration_uses_uuid_binds_for_postgres() -> None:
+    migration = _load_model_gateway_migration()
+    employees = migration._employees_table()
+    employee_id = uuid4()
+    statement = (
+        sa.update(employees)
+        .where(employees.c.id == employee_id)
+        .values(model_settings={"kind": "gateway_alias", "alias": "general-purpose"})
+    )
+
+    compiled = statement.compile(dialect=postgresql.dialect())
+    id_bind = compiled.binds["id_1"]
+
+    assert isinstance(id_bind.type, sa.Uuid)
+    assert id_bind.type.python_type is UUID
+
+
+def _load_model_gateway_migration() -> ModuleType:
+    path = (
+        BACKEND_ROOT
+        / "migrations"
+        / "versions"
+        / "20260714_0016_migrate_model_gateway_alias.py"
+    )
+    spec = spec_from_file_location("model_gateway_alias_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

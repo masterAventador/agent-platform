@@ -188,6 +188,24 @@ get_artifacts()
 - 是否支持对话、定时任务和文件上传；
 - 当前版本、发布状态和灰度策略。
 
+### 4.4 模型网关与模型引用
+
+数字员工定义只保存 provider-neutral 的稳定模型引用：
+
+```json
+{
+  "kind": "gateway_alias",
+  "alias": "general-purpose"
+}
+```
+
+- 业务领域、API、客户端和已发布版本不得保存供应商名称、真实模型名、API Base URL 或供应商密钥；
+- alias 必须是规范化的小写稳定标识；供应商切换、模型升级、fallback 和路由策略只在独立 LiteLLM 配置中完成；
+- Worker 通过平台自研 OpenAI-compatible Adapter 访问 LiteLLM，并向 Deep Agents/LangGraph 注入 `BaseChatModel`，不得让运行时绕过网关直连供应商；
+- API 与普通业务进程不持有供应商密钥；Worker 只持有 LiteLLM 内部地址和内部网关密钥，LiteLLM 单独持有上游凭据；
+- LiteLLM 作为独立基础设施运行，平台不得依赖其内部 Python 类型、数据库模型或私有 API；
+- 测试可以在宿主侧注入假的 `BaseChatModel`，但不得把测试模型或假供应商配置写入生产领域契约。
+
 ## 5. 统一 API 与事件
 
 ### 5.1 核心 API

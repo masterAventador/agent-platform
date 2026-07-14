@@ -26,6 +26,61 @@ bash infra/compose/test.sh config
 
 该入口要求 Docker Compose `>= 2.20.0`；Docker Compose 缺失或版本过低时会明确失败。脚本按自身路径解析仓库根目录，因此用绝对路径调用时可从任意 cwd 执行，例如 `bash /path/to/ai-agent/infra/compose/test.sh config`。
 
+## LiteLLM 本机模型网关
+
+LiteLLM 使用独立的 `agent-platform-litellm` Compose project，包含官方 Proxy、仅内部可见的 PostgreSQL 和一次性 scoped-key bootstrap。它不依赖 core、RAGFlow 或 observability；Proxy 与平台 Worker 通过显式外部 bridge 网络 `agent-platform-llm` 互通。停止模型网关不会把其他栈识别为 orphan，也不会删除该外部网络。宿主机端口固定绑定 `127.0.0.1`，宿主机默认地址为 `http://127.0.0.1:4000`；容器内 Worker 默认使用服务 DNS `http://litellm:4000/v1`，不能用指向 Worker 自身的 `127.0.0.1`。
+
+LiteLLM 镜像固定为官方非 root 变体 `ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb`，PostgreSQL 固定为 `postgres:17.10-alpine3.23@sha256:8189a1f6e40904781fc9e2612687877791d21679866db58b1de996b31fc312e4`；禁止改为 `latest`、RC、私有 Fork或本地修改的上游源码。LiteLLM 的固定 OCI image index 已确认同时包含 `linux/amd64` 和 `linux/arm64`，镜像 config 的默认 UID/GID 为 65534。仓库只通过 LiteLLM 官方 CLI、公开 YAML 配置和 HTTP API 使用它。
+
+先幂等创建跨 project 网络，再准备只存于本机的环境文件。示例不包含可用 provider key；`LITELLM_MASTER_KEY`、`LITELLM_WORKER_API_KEY` 和数据库密码中的 `CHANGE_ME` 都必须替换。两个 `sk-...` 值必须分别在本机生成、足够随机且互不相同：master 只供 Proxy 和 bootstrap 管理使用，Worker 只持有 scoped virtual key。
+
+```bash
+bash infra/litellm/network.sh ensure
+cp infra/compose/.env.litellm.example infra/compose/.env.litellm
+export LITELLM_ENV_FILE="$PWD/infra/compose/.env.litellm"
+```
+
+bootstrap 会幂等创建或收敛 `agent-platform-worker` virtual key，只允许 `general-purpose` 模型以及 chat completions、models/readiness 路由。该 key 的 metadata 明确标记为本地共享 Worker 应用凭据；当前只能做应用级归因，不代表已实现租户级凭据隔离。每租户动态 key、预算、轮换和撤销需要后续单独实现。
+
+业务侧只使用稳定模型 alias `general-purpose`。真实 provider 和模型由环境变量选择，避免 OpenAI、Anthropic、DashScope 或 Volcengine 等厂商名称进入平台业务配置：
+
+```dotenv
+# DashScope
+LITELLM_UPSTREAM_MODEL=dashscope/qwen-plus
+LITELLM_UPSTREAM_API_KEY=<your-local-dashscope-key>
+LITELLM_UPSTREAM_API_BASE=
+
+# Volcengine：把 endpoint-id 替换为火山方舟推理接入点 ID
+LITELLM_UPSTREAM_MODEL=volcengine/<endpoint-id>
+LITELLM_UPSTREAM_API_KEY=<your-local-volcengine-key>
+LITELLM_UPSTREAM_API_BASE=
+```
+
+`LITELLM_UPSTREAM_API_BASE` 对以上两个示例可留空，只在自定义或 OpenAI-compatible 端点要求显式 base URL 时设置。该行为已经按固定版本 v1.86.2 的官方源码审计：环境变量空值被解析为 `""`，DashScope chat adapter 和 Volcengine adapter 都用 truthy fallback 回退各自默认 endpoint，因此空字符串不会覆盖默认地址；升级 LiteLLM 或换用其他 provider 时必须重新审计，不能直接泛化。密钥只能写入被 Git 忽略的本机 `.env.litellm` 或部署密钥服务；不得提交真实值。健康检查只访问 `/health/liveliness`，不会调用上游模型或产生费用。
+
+启动和停止只影响 LiteLLM project。PostgreSQL 不发布宿主机端口，数据保存在该 project 的命名 volume 中：
+
+```bash
+docker compose --env-file "$LITELLM_ENV_FILE" -f infra/compose/litellm.yml up -d --wait
+docker compose --env-file "$LITELLM_ENV_FILE" -f infra/compose/litellm.yml down
+```
+
+可重复验收分为离线配置契约、远端镜像架构清单、真实短启健康检查、本地 stub completion、锁定 backend 宿主环境的 scoped-key readiness、正式 Worker 镜像 ChatOpenAI 链路和协议矩阵。每次动态验收都生成唯一的 `agent-platform-litellm-test-*` project、唯一 external 测试网络、随机回环端口、随机 master/worker/数据库凭据和独立 volume；退出 trap 会 `down -v` 本轮测试 project，再按严格名称 guard 删除本轮唯一测试网络，绝不会删除生产 `agent-platform-llm` 网络，也不会停止或污染用户正在运行的真实网关与数据库：
+
+```bash
+bash infra/litellm/test.sh config
+bash infra/litellm/test.sh image-platform
+bash infra/litellm/test.sh start-health
+bash infra/litellm/test.sh stub-completion
+bash infra/litellm/test.sh worker-readiness
+bash infra/litellm/test.sh worker-chat
+bash infra/litellm/test.sh stub-matrix
+```
+
+`config` 校验精确官方镜像 tag+index digest、Compose project 独立性、回环端口、只读配置挂载、CLI/健康端点、单一 `general-purpose` alias、外部网络、内部数据库、scoped-key bootstrap 和 env-only 凭据。`image-platform` 需要访问 GHCR，并要求镜像 manifest 同时含 `linux/amd64` 与 `linux/arm64`；`start-health` 会拉取当前主机架构镜像并验证真实 HTTP 健康端点，但不会发送模型请求。`worker-readiness` 和 `stub-matrix` 在 backend 锁定的宿主环境运行同一个 probe，经随机回环端口访问真实 LiteLLM：前者验证 scoped key 的精确模型/路由权限，后者覆盖 streaming、tool calls、structured output、retry/fallback 和 usage 字段。`worker-chat` 是唯一构建正式 backend Worker 镜像的测试，它从镜像导入生产 `LiteLLMChatModelFactory`，经 ChatOpenAI、LiteLLM 和本地 stub 完成调用。stub 的 usage 只证明协议字段透传，不代表真实 provider 成本或账单；这些测试也不验证 DashScope/Volcengine 的真实凭据、网络、配额或计费 API。
+
+Proxy 使用镜像默认非 root 用户，并显式启用只读根文件系统、`cap_drop: ALL` 和 `no-new-privileges`；只有 `/tmp` 与 migration workspace 是 UID 65534、容量受限且 `noexec` 的 tmpfs。选择官方 `litellm-non_root` 变体是数据库运行时要求：同版本标准镜像与 `litellm-database` 镜像都把生成的 Prisma query-engine 路径固定在 `/root/.cache`，强制覆盖为非 root UID 后 migration CLI 虽可成功，runtime query-engine 却不可遍历；禁止通过强制 USER、root init、host bind cache 或修改上游绕过。非 root 变体把预生成 engine 放在默认用户可执行的 `/app/.cache`，并启用 Prisma offline mode。升级镜像必须重新核对默认 USER、生成路径并执行真实数据库迁移验收，不能只看静态 Compose。
+
 ## 本机链路追踪
 
 观测栈由独立 Compose project 提供，可与核心依赖并行启动，停止观测栈不会把 PostgreSQL、Redis 或 MinIO 当成 orphan 清理。它只接收 OTLP traces；metrics 和 logs 尚未配置导出。
@@ -99,10 +154,9 @@ bash infra/platform/test.sh start
 bash infra/platform/test.sh health
 ```
 
-Worker 默认不启动。仓库内置正式 runtime adapter bundle，直接组合 SQLAlchemy 沙盒租约、Local Controller、Deep Agents 公共 Sandbox 校验、Tool 审计和本机凭据解析，不再要求用户提供 `module:attribute` 外部工厂。workflow/hybrid 只有命中平台已注册的 workflow ID+version 才能运行，空注册表明确失败关闭，不会伪造固定流程。启动 Worker 前必须配置 controller bearer secret；真实模型提供商密钥只注入 Worker，示例文件不会伪造模型密钥：
+Worker 默认不启动。仓库内置正式 runtime adapter bundle，直接组合 SQLAlchemy 沙盒租约、Local Controller、Deep Agents 公共 Sandbox 校验、Tool 审计和本机凭据解析，不再要求用户提供 `module:attribute` 外部工厂。workflow/hybrid 只有命中平台已注册的 workflow ID+version 才能运行，空注册表明确失败关闭，不会伪造固定流程。启动 Worker 前必须配置 controller bearer secret，并先启动独立 LiteLLM 网关。Worker 不接收 OpenAI/Anthropic 等 provider key，也绝不能接收 LiteLLM master key；它只接收 provider-neutral 的网关 URL 与 scoped gateway key。请让 `.env.litellm` 的 `LITELLM_WORKER_API_KEY` 与 `.env.platform` 的 `AGENT_PLATFORM_LLM_GATEWAY_API_KEY` 使用同一个随机 `sk-...` 值，并确保两者都不同于 `.env.litellm` 的 `LITELLM_MASTER_KEY`。`--env-file` 不会把变量导出到当前 shell，因此不要用未显式导出的变量覆盖 platform 配置：
 
 ```bash
-export ANTHROPIC_API_KEY='replace-with-local-secret'
 docker compose --env-file "$PLATFORM_ENV_FILE" \
   -f infra/compose/platform.yml --profile worker up -d sandbox-controller sandbox-janitor worker
 ```

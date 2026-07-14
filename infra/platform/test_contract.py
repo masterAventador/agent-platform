@@ -90,13 +90,42 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("AGENT_PLATFORM_DATABASE_URL", compose)
         self.assertIn("AGENT_PLATFORM_REDIS_URL", compose)
         self.assertIn("AGENT_PLATFORM_MINIO_ENDPOINT", compose)
+        self.assertIn("name: agent-platform-llm", compose)
+        self.assertRegex(compose, r"llm:\s*\n\s+external:\s*true")
 
     def test_examples_do_not_contain_real_secrets(self) -> None:
         env_example = self.read("infra/compose/.env.platform.example")
         self.assertIn("CHANGE_ME", env_example)
-        self.assertNotRegex(env_example, r"(?m)^ANTHROPIC_API_KEY=\S+")
-        self.assertNotRegex(env_example, r"(?m)^OPENAI_API_KEY=\S+")
+        self.assertNotIn("ANTHROPIC_API_KEY", env_example)
+        self.assertNotIn("OPENAI_API_KEY", env_example)
+        self.assertIn(
+            "AGENT_PLATFORM_LLM_GATEWAY_URL=http://litellm:4000/v1",
+            env_example,
+        )
+        self.assertIn(
+            "AGENT_PLATFORM_LLM_GATEWAY_API_KEY=sk-CHANGE_ME_LITELLM_WORKER_KEY",
+            env_example,
+        )
+        self.assertNotRegex(env_example, r"(?m)^LITELLM_MASTER_KEY=")
         self.assertNotIn("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", env_example)
+
+    def test_worker_only_receives_provider_neutral_llm_gateway_configuration(self) -> None:
+        compose = self.read("infra/compose/platform.yml")
+        worker = compose.split("\n  worker:\n", 1)[1].split("\n  sandbox-janitor:\n", 1)[0]
+        self.assertNotIn("ANTHROPIC_API_KEY", worker)
+        self.assertNotIn("OPENAI_API_KEY", worker)
+        self.assertIn(
+            "AGENT_PLATFORM_LLM_GATEWAY_URL: "
+            "${AGENT_PLATFORM_LLM_GATEWAY_URL:-http://litellm:4000/v1}",
+            worker,
+        )
+        self.assertIn(
+            "AGENT_PLATFORM_LLM_GATEWAY_API_KEY: "
+            "${AGENT_PLATFORM_LLM_GATEWAY_API_KEY:?set AGENT_PLATFORM_LLM_GATEWAY_API_KEY}",
+            worker,
+        )
+        self.assertIn("networks: [core, sandbox-control, llm]", worker)
+        self.assertNotIn("LITELLM_MASTER_KEY", worker)
 
 
 if __name__ == "__main__":

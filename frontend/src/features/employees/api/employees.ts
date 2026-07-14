@@ -18,6 +18,11 @@ export interface EmployeeWriteCapabilities {
   file_upload: false
 }
 
+export interface GatewayModelReference {
+  kind: 'gateway_alias'
+  alias: string
+}
+
 export interface EmployeeDefinition {
   name: string
   avatar_url?: string | null
@@ -25,7 +30,7 @@ export interface EmployeeDefinition {
   visibility: 'private' | 'tenant'
   work_mode: WorkMode
   system_prompt: string
-  model: { provider: string; name: string }
+  model: GatewayModelReference
   input_schema: Record<string, unknown>
   output_schema: Record<string, unknown>
   capabilities: EmployeeCapabilities

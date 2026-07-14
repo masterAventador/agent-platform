@@ -66,6 +66,10 @@ _DEMO_FINISHED_AT = datetime(2026, 7, 1, 8, 2, tzinfo=UTC)
 _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _ALLOWED_ENVIRONMENTS = frozenset({"local", "development"})
 _SYSTEM_DATABASES = frozenset({"postgres", "template0", "template1"})
+_DEMO_MODEL_DISCLOSURE = (
+    "Seed 本身不调用模型；用户手动发起任务会使用本机已配置网关，"
+    "并可能产生上游费用。"
+)
 
 
 class DemoSeedSafetyError(RuntimeError):
@@ -213,11 +217,11 @@ def _demo_records(
     employee_definition: dict[str, object] = {
         "name": "演示研究助理",
         "avatar_url": None,
-        "role_description": "展示数字员工定义与历史任务，不触发外部模型调用。",
+        "role_description": f"展示数字员工定义与历史任务。{_DEMO_MODEL_DISCLOSURE}",
         "visibility": EmployeeVisibility.TENANT.value,
         "work_mode": RuntimeType.AUTONOMOUS.value,
-        "system_prompt": "这是本地演示员工，仅用于查看平台能力。",
-        "model": {"provider": "demo", "name": "disabled"},
+        "system_prompt": f"这是 Seed 预置的本地演示员工。{_DEMO_MODEL_DISCLOSURE}",
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
@@ -308,11 +312,13 @@ def _demo_records(
                 created_by=DEMO_USER_ID,
                 name="演示研究助理",
                 avatar_url=None,
-                role_description="展示数字员工定义与历史任务，不触发外部模型调用。",
+                role_description=(
+                    f"展示数字员工定义与历史任务。{_DEMO_MODEL_DISCLOSURE}"
+                ),
                 visibility=EmployeeVisibility.TENANT.value,
                 runtime_type=RuntimeType.AUTONOMOUS.value,
-                system_prompt="这是本地演示员工，仅用于查看平台能力。",
-                model_settings={"provider": "demo", "name": "disabled"},
+                system_prompt=f"这是 Seed 预置的本地演示员工。{_DEMO_MODEL_DISCLOSURE}",
+                model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 capabilities={
@@ -375,7 +381,7 @@ def _demo_records(
                 visibility=EmployeeVisibility.PRIVATE.value,
                 runtime_type=RuntimeType.AUTONOMOUS.value,
                 system_prompt="这是本地权限演示草稿，不会执行任务。",
-                model_settings={"provider": "demo", "name": "disabled"},
+                model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 capabilities={
@@ -580,7 +586,11 @@ def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
     ]
     completed_events = (
         (1, EventType.RUN_STARTED, {"status": "running"}),
-        (2, EventType.MESSAGE_OUTPUT, {"content": "演示任务已完成，未调用外部模型。"}),
+        (
+            2,
+            EventType.MESSAGE_OUTPUT,
+            {"content": "这是 Seed 预置的历史任务结果；Seed 本身未调用模型。"},
+        ),
         (3, EventType.RUN_COMPLETED, {"status": "completed"}),
     )
     failed_events = (

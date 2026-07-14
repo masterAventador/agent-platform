@@ -28,6 +28,7 @@ from agent_platform.platform.employees.errors import (
     EmployeeToolNotBindable,
 )
 from agent_platform.platform.employees.services import EmployeeService
+from agent_platform.platform.models import GatewayModelReference
 from agent_platform.platform.tenants.permissions import (
     TenantPermission,
     role_has_permission,
@@ -40,11 +41,8 @@ def _default_release_strategy() -> dict[str, object]:
     return {"mode": "all"}
 
 
-class ModelSettings(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    provider: Annotated[str, Field(min_length=1, max_length=100)]
-    name: Annotated[str, Field(min_length=1, max_length=200)]
+class ModelSettings(GatewayModelReference):
+    pass
 
 
 class EmployeeCapabilities(BaseModel):
@@ -196,6 +194,17 @@ def _is_member_visible(employee: Employee) -> bool:
     )
 
 
+def _ensure_model_alias_allowed(*, request: Request, alias: str) -> None:
+    if alias not in request.app.state.settings.llm_gateway_allowed_aliases:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "employee_model_alias_unavailable",
+                "message": "所选模型当前未由平台启用",
+            },
+        )
+
+
 @router.post("", response_model=EmployeeResponse, status_code=status.HTTP_201_CREATED)
 async def create_employee(
     payload: EmployeeDefinitionRequest,
@@ -209,6 +218,7 @@ async def create_employee(
             tenant_id=tenant_id,
             required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
+        _ensure_model_alias_allowed(request=request, alias=payload.model.alias)
         try:
             employee = await _service(database_session).create(
                 tenant_id=access.tenant.id,
@@ -288,6 +298,7 @@ async def update_employee(
             tenant_id=tenant_id,
             required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
+        _ensure_model_alias_allowed(request=request, alias=payload.model.alias)
         try:
             employee = await _service(database_session).update(
                 tenant_id=access.tenant.id,
@@ -320,6 +331,12 @@ async def publish_employee(
             required_permission=TenantPermission.EMPLOYEES_MANAGE,
         )
         try:
+            draft = await _service(database_session).get(
+                tenant_id=access.tenant.id,
+                employee_id=employee_id,
+            )
+            model_alias = ModelSettings.model_validate(draft.draft.model_settings).alias
+            _ensure_model_alias_allowed(request=request, alias=model_alias)
             employee = await _service(database_session).publish(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,

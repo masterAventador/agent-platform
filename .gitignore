@@ -6,6 +6,7 @@
 .env.*
 !.env.example
 !infra/compose/.env.platform.example
+!infra/compose/.env.litellm.example
 
 .local/
 
