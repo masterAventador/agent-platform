@@ -1,8 +1,8 @@
 # 视频剪辑与自动运营能力包路线图
 
-> 文档性质：行业能力包功能清单、严格实施顺序与完成状态的唯一执行台账
+> 文档性质：行业能力包功能清单、依赖实施顺序与完成状态的唯一执行台账
 > 建立日期：2026-07-14
-> 当前阶段：等待 AI 中台 Core 完成
+> 当前阶段：允许与 AI 中台 Core 隔离并行；尚未启动 B01
 > 适用范围：`video-studio`、`social-operations` 及两者的组合工作流
 > 主要证据：[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md)
 
@@ -16,12 +16,12 @@
 deployment_installed && tenant_entitled && user_permitted
 ```
 
-正式开发入口：
+并行开发入口：
 
-- [`core-capability-roadmap.md`](core-capability-roadmap.md) 的 C01-C20 必须全部为 `✅ 已完成`；
-- Core-only 全量回归通过；
-- 视频和自动运营能力包的模块注册、授权和组合测试机制可用；
-- 用户明确要求提前调整顺序时，必须同时更新两份路线图并记录原因和风险。
+- [`core-capability-roadmap.md`](core-capability-roadmap.md) 的 C01 已为 `✅ 已完成`，Core-only 质量基线通过；
+- 业务开发使用独立分支/工作树，不和 Core 主线共同堆积未提交改动；
+- 未完成 Core 依赖通过公开契约、Mock Host 或测试适配器隔离，不复制平台实现；
+- 生产集成和 `✅ 已完成`仍要求该条目依赖的 Core 能力、真实平台验收与组合回归全部通过。
 
 ## 2. 状态、证据与更新规则
 
@@ -30,7 +30,8 @@ deployment_installed && tenant_entitled && user_permitted
 | 状态 | 含义 |
 | --- | --- |
 | `⬜ 未开始` | 尚未进入实现 |
-| `🚧 进行中` | 当前唯一正在实施的业务条目 |
+| `🚧 进行中` | 当前工作流正在实施的业务条目 |
+| `🧪 待集成` | 自身实现与隔离测试已通过，等待明确记录的 Core 或真实平台门禁 |
 | `⛔ 受阻` | 存在已记录证据和解除条件的外部阻塞 |
 | `✅ 已完成` | 全部完成定义、自动化验证和真实平台验收通过 |
 
@@ -45,7 +46,7 @@ deployment_installed && tenant_entitled && user_permitted
 
 执行要求：
 
-1. 严格按照 B01 → B17 顺序实施，同一时间最多一个 `🚧 进行中`；
+1. 先实施 B01 公共协议；B01 形成稳定协议和 Mock Host 后，Video Studio 与 Social Operations 可作为两条工作流并行，各工作流同一时间最多一个 `🚧 进行中`；
 2. 每项开始前更新状态和开始日期，完成后在同一个任务提交中标记 `✅ 已完成`；
 3. 完成记录必须包含日期、提交标识、目标平台/版本、自动化验证和真实账号验收证据；
 4. 平台网页或桌面 UI 自动化必须在受控测试账号上完成真实验收，Mock 不能替代最终完成门禁；
@@ -56,7 +57,15 @@ deployment_installed && tenant_entitled && user_permitted
 9. 能力关闭后 Core-only 必须保持可用，能力包之间不得互相导入内部实现；
 10. 真实 Cookie、聊天、联系人、素材、截图和运行日志不得进入 Git。
 
-### 2.1 竞品可见菜单逐项映射
+### 2.1 多设备并行开发边界
+
+- Core、Video Studio、Social Operations 分别使用独立功能分支或 Git Worktree；每个完成任务仍需独立提交并立即推送；
+- 行业能力分支主要修改自身模块、Sidecar、Adapter、测试和本路线图；Core 路线图由 Core 主线维护；
+- 公共前端布局、Tauri 主壳、跨端契约、根依赖锁文件和数据库迁移编号属于高冲突区，未经协调不得由两台设备同时修改；
+- 未完成 Core 依赖可以使用版本化接口和 Mock 验证，但 Mock 结果只能支持 `🧪 待集成`，不能替代真实 Core、真实桌面或真实平台验收；
+- 合并前必须同步最新主线，运行 Core-only、目标能力组合和受影响平台回归；业务包关闭后 Core 行为必须不变。
+
+### 2.2 竞品可见菜单逐项映射
 
 下表逐项承接静态分析中发现的全部主要菜单。属于 AI 中台底座的菜单不在行业能力包重复实现，但仍标明其 Core 或解决方案归属，防止遗漏或重复建设。
 
@@ -213,7 +222,7 @@ deployment_installed && tenant_entitled && user_permitted
 - 账号、内容、员工、工作流和客户方案维度分析；
 - 所有指标基于平台事件和稳定业务 ID，不依赖 RPA 日志文本解析。
 
-## 5. 严格业务实施顺序
+## 5. 业务依赖实施顺序
 
 ### B01 能力包装配、桌面执行协议与组合门禁
 
@@ -226,8 +235,8 @@ deployment_installed && tenant_entitled && user_permitted
 - 两个能力包分别注册路由、Worker、权限、事件、前端入口、迁移和健康检查；
 - 建立设备、账号、本地任务、步骤、人工接管和诊断事件协议；
 - Tauri 通过受认证 IPC 管理本地 Sidecar，不开放无保护固定端口；
-- Core 禁用两个能力包后保持全量回归通过；
-- Core-only、Core+视频、Core+自动运营和 Core+两者组合测试通过。
+- 使用版本化协议和 Mock Host 验证两个能力包可独立装配、测试和关闭；
+- 真实 Core-only、Core+视频、Core+自动运营和 Core+两者组合测试统一在 B17 完成。
 
 ### B02 设备中心、本地执行器与平台账号中心
 
@@ -478,7 +487,7 @@ deployment_installed && tenant_entitled && user_permitted
 | --- | --- |
 | `video-studio` 源码模块 | 未创建 |
 | `social-operations` 源码模块 | 未创建 |
-| Core 前置条件 | C01-C20 尚未完成 |
+| Core 前置条件 | C01 已完成；C02-C20 继续串行，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
 | 我们的真实平台账号 E2E | 尚未开始 |
@@ -488,6 +497,6 @@ deployment_installed && tenant_entitled && user_permitted
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 平台/版本 | 验证证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| B01-B17 | 尚未开始 | — | — | — | — | 等待 Core C01-C20 完成 |
+| B01-B17 | 尚未开始 | — | — | — | — | C01 已完成，可从 B01 公共协议开始隔离并行开发 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。
