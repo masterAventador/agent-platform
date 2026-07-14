@@ -103,6 +103,8 @@ deployment_installed && tenant_entitled && user_permitted
 
 竞品视频链路主要采用阿里云 OSS + Timeline + IMS/ICE 云剪辑，不是本地完整 FFmpeg 渲染；这是竞品事实。本项目目标供应商已确定为腾讯云，第一阶段采用 LighthouseCOS/COS + 自研 Timeline/预览 + MPS 云端渲染，并保留未来本地 Provider 扩展点。具体部署基线见 [`tencent-cloud-mvp-deployment.md`](tencent-cloud-mvp-deployment.md)。
 
+**第一期范围冻结：** 本地 FFmpeg 执行器不属于 B01-B17 的竞品对标交付范围，不采购、不随 App 打包、不按需下载，也不作为任何第一期任务的完成依赖。第一期只保留供应商无关 `VideoRenderProvider` 扩展边界，实际渲染使用腾讯云 MPS；只有用户后续明确启动离线、隐私或降本增强时，才单独建立 `LocalFfmpegProvider` 任务和验收标准。
+
 | 功能域 | 功能清单 | 竞品证据 | 我们的实现边界 |
 | --- | --- | --- | --- |
 | 素材库 | 视频、图片、音乐等素材上传、列表、选择和管理 | 已证实 | 复用 Core Artifact，腾讯 LighthouseCOS/COS 保存业务对象 |
