@@ -167,6 +167,7 @@ run_host_probe() {
 case "$1" in
   config)
     python3 "${ROOT_DIR}/infra/litellm/test_config.py"
+    python3 "${ROOT_DIR}/infra/litellm/test_openai_stub.py"
     compose config --quiet
     compose_stub config --quiet
     echo "LiteLLM compose and configuration contracts passed"

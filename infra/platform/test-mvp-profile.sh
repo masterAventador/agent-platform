@@ -176,6 +176,62 @@ AGENT_PLATFORM_LLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
   uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
     python "${ROOT_DIR}/infra/litellm/worker_gateway_probe.py" "chat"
 
+MVP_WEB_FLOW_RESULT_FILE="${RUNTIME_DIR}/mvp-web-flow-run-id"
+PLAYWRIGHT_BIN="${ROOT_DIR}/frontend/node_modules/.bin/playwright"
+if [[ ! -x "${PLAYWRIGHT_BIN}" ]]; then
+  printf 'MVP Web flow requires installed frontend dependencies; run pnpm install explicitly\n' >&2
+  exit 2
+fi
+rm -f "${MVP_WEB_FLOW_RESULT_FILE}"
+(
+  cd "${ROOT_DIR}/frontend"
+  PLAYWRIGHT_MVP_BASE_URL="http://127.0.0.1:${PLATFORM_WEB_PORT}" \
+    PLAYWRIGHT_MVP_RESULT_FILE="${MVP_WEB_FLOW_RESULT_FILE}" \
+    "${PLAYWRIGHT_BIN}" test --config playwright.mvp-profile.config.ts
+)
+if [[ ! -f "${MVP_WEB_FLOW_RESULT_FILE}" ]]; then
+  printf 'MVP Web flow did not record its run ID\n' >&2
+  exit 1
+fi
+MVP_WEB_FLOW_RUN_ID="$(sed -n '1p' "${MVP_WEB_FLOW_RESULT_FILE}")"
+if [[ ! "${MVP_WEB_FLOW_RUN_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  printf 'MVP Web flow recorded an invalid run ID\n' >&2
+  exit 1
+fi
+MVP_WEB_FLOW_DATABASE_STATE="$(docker compose -p "${PROFILE_NAME}-core" \
+  --env-file "${RUNTIME_DIR}/core.env" \
+  -f "${ROOT_DIR}/infra/compose/core.yml" \
+  exec -T postgres psql -U agent_platform -d agent_platform -At \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT r.status || '|' ||
+     EXISTS (
+       SELECT 1 FROM run_events e
+       WHERE e.run_id = r.id
+         AND e.event_type = 'message.output'
+         AND e.payload ->> 'content' = 'local stub completion'
+     )::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM run_events e
+       WHERE e.run_id = r.id AND e.event_type = 'run.completed'
+     )::text || '|' ||
+     COALESCE((
+       SELECT MIN(e.sequence) = 1
+         AND MAX(e.sequence) = COUNT(*)
+         AND COUNT(DISTINCT e.sequence) = COUNT(*)
+       FROM run_events e WHERE e.run_id = r.id
+     ), false)::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM run_commands c
+       WHERE c.run_id = r.id AND c.action = 'start'
+         AND c.dispatched_at IS NOT NULL AND c.processed_at IS NOT NULL
+     )::text
+   FROM runs r WHERE r.id = '${MVP_WEB_FLOW_RUN_ID}'::uuid")"
+if [[ "${MVP_WEB_FLOW_DATABASE_STATE}" != "completed|true|true|true|true" ]]; then
+  printf 'MVP Web flow persistence check failed: %s\n' "${MVP_WEB_FLOW_DATABASE_STATE}" >&2
+  exit 1
+fi
+printf 'MVP Web flow persisted terminal events through the production Worker and LiteLLM Stub\n'
+
 docker compose -p "${PROFILE_NAME}-litellm" \
   --env-file "${RUNTIME_DIR}/litellm.env" \
   -f "${ROOT_DIR}/infra/compose/litellm.yml" \

@@ -33,6 +33,11 @@ class PlatformContainerContractTest(unittest.TestCase):
         dockerfile = self.read("frontend/Dockerfile")
         self.assertGreaterEqual(len(re.findall(r"(?m)^FROM ", dockerfile)), 2)
         self.assertIn("pnpm-lock.yaml", dockerfile)
+        self.assertIn("pnpm-workspace.yaml", dockerfile)
+        self.assertLess(
+            dockerfile.index("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./"),
+            dockerfile.index("RUN pnpm install --frozen-lockfile"),
+        )
         self.assertRegex(dockerfile, r"pnpm install[^\n]*--frozen-lockfile")
         self.assertRegex(dockerfile, r"(?m)^USER (?!0$|root$).+$")
         self.assertNotRegex(dockerfile, r"(?im)^(?:ARG|ENV)\s+.*(?:SECRET|PASSWORD|API_KEY)")
@@ -49,7 +54,9 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertRegex(nginx, r"proxy_set_header\s+Connection\s+\$connection_upgrade;")
         self.assertNotIn('proxy_set_header Connection "upgrade"', nginx)
 
-    def test_compose_has_migration_gate_profiles_health_and_loopback_ports(self) -> None:
+    def test_compose_has_migration_gate_profiles_health_and_loopback_ports(
+        self,
+    ) -> None:
         compose = self.read("infra/compose/platform.yml")
         for service in (
             "migrate",
@@ -118,7 +125,9 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertNotRegex(env_example, r"(?m)^LITELLM_MASTER_KEY=")
         self.assertNotIn("AGENT_PLATFORM_RUNTIME_ADAPTER_FACTORY", env_example)
 
-    def test_worker_only_receives_provider_neutral_llm_gateway_configuration(self) -> None:
+    def test_worker_only_receives_provider_neutral_llm_gateway_configuration(
+        self,
+    ) -> None:
         compose = self.read("infra/compose/platform.yml")
         worker = compose.split("\n  worker:\n", 1)[1].split("\n  sandbox-janitor:\n", 1)[0]
         self.assertNotIn("ANTHROPIC_API_KEY", worker)
@@ -203,6 +212,25 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("openai-stub", acceptance)
         self.assertIn("worker_gateway_probe.py", acceptance)
         self.assertIn('"chat"', acceptance)
+        self.assertIn(
+            'PLAYWRIGHT_BIN="${ROOT_DIR}/frontend/node_modules/.bin/playwright"',
+            acceptance,
+        )
+        self.assertIn('if [[ ! -x "${PLAYWRIGHT_BIN}" ]]; then', acceptance)
+        self.assertIn(
+            '"${PLAYWRIGHT_BIN}" test --config playwright.mvp-profile.config.ts',
+            acceptance,
+        )
+        self.assertNotIn("pnpm exec playwright", acceptance)
+        self.assertNotIn(":'run_id'", acceptance)
+        uuid_guard = (
+            '[[ ! "${MVP_WEB_FLOW_RUN_ID}" =~ '
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]"
+        )
+        sql_run_id = "WHERE r.id = '${MVP_WEB_FLOW_RUN_ID}'::uuid"
+        self.assertIn(uuid_guard, acceptance)
+        self.assertIn(sql_run_id, acceptance)
+        self.assertLess(acceptance.index(uuid_guard), acceptance.index(sql_run_id))
         self.assertIn("sandbox-controller", acceptance)
         self.assertIn("sandbox-janitor", acceptance)
         self.assertIn("ragflow", acceptance.lower())
@@ -217,6 +245,14 @@ class PlatformContainerContractTest(unittest.TestCase):
             r'elif \[\[ "\$\{cleanup_exit\}" == "0" \]\]; then\s+rm -rf',
         )
         self.assertNotIn('source "${RUNTIME_DIR}/litellm.env"', acceptance)
+
+    def test_mvp_playwright_flow_is_excluded_from_default_e2e(self) -> None:
+        default_config = self.read("frontend/playwright.config.ts")
+        mvp_config = self.read("frontend/playwright.mvp-profile.config.ts")
+
+        self.assertIn("'mvp-profile.spec.ts'", default_config)
+        self.assertIn("testIgnore:", default_config)
+        self.assertIn("testMatch: 'mvp-profile.spec.ts'", mvp_config)
 
 
 class MvpProfileLifecycleBehaviorTest(unittest.TestCase):
@@ -601,7 +637,9 @@ class MvpProfileLifecycleBehaviorTest(unittest.TestCase):
             result.stderr,
         )
 
-    def test_stop_fails_closed_when_environment_is_missing_but_resources_exist(self) -> None:
+    def test_stop_fails_closed_when_environment_is_missing_but_resources_exist(
+        self,
+    ) -> None:
         result = self.run_profile(
             "stop",
             extra_env={"FAKE_PROFILE_CONTAINER": "1"},
@@ -813,7 +851,9 @@ class MvpProfileLifecycleBehaviorTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("MVP profile stopped", result.stdout)
 
-    def test_failed_start_reports_incomplete_when_volume_enumeration_fails(self) -> None:
+    def test_failed_start_reports_incomplete_when_volume_enumeration_fails(
+        self,
+    ) -> None:
         result = self.run_profile(
             "start",
             extra_env={
@@ -846,7 +886,9 @@ class MvpProfileLifecycleBehaviorTest(unittest.TestCase):
         self.assertTrue(any("-core" in call and " up " in f" {call} " for call in calls))
         self.assertFalse(any("-litellm" in call and " up " in f" {call} " for call in calls))
 
-    def test_preexisting_core_and_litellm_still_check_app_port_before_app_up(self) -> None:
+    def test_preexisting_core_and_litellm_still_check_app_port_before_app_up(
+        self,
+    ) -> None:
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", 0))

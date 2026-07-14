@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: './e2e',
   testIgnore: [
     'demo-seed.spec.ts',
+    'mvp-profile.spec.ts',
     'rbac.demo-seed.spec.ts',
     'runtime.spec.ts',
     'runtime-recovery.spec.ts',
