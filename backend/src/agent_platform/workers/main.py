@@ -50,6 +50,7 @@ from agent_platform.workers.runtime_adapters import (
     BuiltinRuntimeAdapters,
     RuntimeAdapterConfigurationError,
     create_runtime_adapters,
+    validate_runtime_adapter_configuration,
 )
 from agent_platform.workers.runtime_composition import (
     ComposedRuntimeResolver,
@@ -198,6 +199,8 @@ async def run_worker_service(
             settings=app_settings,
             readiness=gateway_readiness,
         )
+    if runtime_resolver is None:
+        _assert_runtime_adapters_configured(app_settings)
     engine = create_async_engine(app_settings.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     redis = Redis.from_url(app_settings.redis_url, decode_responses=True)
@@ -406,6 +409,13 @@ def _load_runtime_adapters(
             settings=settings,
             session_factory=session_factory,
         )
+    except (RuntimeAdapterConfigurationError, ValueError) as error:
+        raise WorkerConfigurationError("builtin runtime adapters are not configured") from error
+
+
+def _assert_runtime_adapters_configured(settings: AppSettings) -> None:
+    try:
+        validate_runtime_adapter_configuration(settings)
     except (RuntimeAdapterConfigurationError, ValueError) as error:
         raise WorkerConfigurationError("builtin runtime adapters are not configured") from error
 

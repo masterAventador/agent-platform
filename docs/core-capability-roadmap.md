@@ -57,7 +57,7 @@
 
 | 能力域 | 当前状态 | 主要缺口 | 对应任务 |
 | --- | --- | --- | --- |
-| 工程质量基线 | 部分完成 | 后端仍有 1 项单元测试失败，真实依赖测试存在跳过项 | C01 |
+| 工程质量基线 | 已完成 | 后端 0 失败；真实依赖跳过项均明确标注所需外部依赖 | C01 |
 | Tauri 桌面客户端 | 未实现 | 无 `src-tauri`、`PlatformAdapter`、安装包和桌面能力 | C02 |
 | 全栈真实验收与工作台 | 部分完成 | 尚未完成整栈真实闭环；工作台仍为占位内容 | C03 |
 | 文件与产物 | 未实现 | 文件上传关闭，运行时 `get_artifacts()` 返回空列表 | C04 |
@@ -82,7 +82,11 @@
 
 ### C01 工程质量基线归零
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-14**
+
+**完成日期：2026-07-14**
 
 完成定义：
 
@@ -364,7 +368,7 @@ C01-C20 全部完成后，才进入以下能力包：
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 519 项：483 通过、35 跳过、1 失败 |
+| 后端 Pytest | 519 项：484 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
 | Ruff | 通过 |
 | Mypy | 136 个源码文件通过 |
 | 前端 Vitest | 18 个测试文件、83 项测试通过 |
@@ -372,18 +376,18 @@ C01-C20 全部完成后，才进入以下能力包：
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
 | 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
+| 无付费模型默认回归 | LiteLLM 配置契约 16 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目 |
 | TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
 | 完整本机栈 E2E | 本轮未执行，纳入 C03 |
 | macOS/Windows Tauri 构建 | 未实现，纳入 C02/C20 |
 
-当前已知失败：
-
-- `backend/tests/unit/workers/test_main.py::test_service_fails_fast_when_builtin_sandbox_is_not_configured`：预期先返回内置运行时适配器配置错误，当前却先尝试连接 PostgreSQL。由 C01 修复。
+当前已知失败：无。
 
 ## 7. 完成记录
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 验证证据 |
 | --- | --- | --- | --- | --- | --- |
-| C01-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
+| C02-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

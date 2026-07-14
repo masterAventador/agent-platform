@@ -69,12 +69,7 @@ class BuiltinRuntimeAdapters:
         await self.sandbox_provider.aclose()
 
 
-def create_runtime_adapters(
-    *,
-    settings: AppSettings,
-    session_factory: async_sessionmaker[AsyncSession],
-    workflow_factories: Mapping[tuple[UUID, int], WorkflowRuntimeFactory] | None = None,
-) -> BuiltinRuntimeAdapters:
+def validate_runtime_adapter_configuration(settings: AppSettings) -> None:
     if settings.sandbox_provider != "local-controller":
         raise RuntimeAdapterConfigurationError("unsupported sandbox provider")
     secret = settings.sandbox_controller_secret.get_secret_value()
@@ -82,11 +77,24 @@ def create_runtime_adapters(
         raise RuntimeAdapterConfigurationError(
             "sandbox controller secret must be at least 16 characters"
         )
-    repository_root = settings.local_credentials_repository_root
-    if settings.local_credentials_file is not None and repository_root is None:
+    if (
+        settings.local_credentials_file is not None
+        and settings.local_credentials_repository_root is None
+    ):
         raise RuntimeAdapterConfigurationError(
             "local credentials repository root is required when credentials file is configured"
         )
+
+
+def create_runtime_adapters(
+    *,
+    settings: AppSettings,
+    session_factory: async_sessionmaker[AsyncSession],
+    workflow_factories: Mapping[tuple[UUID, int], WorkflowRuntimeFactory] | None = None,
+) -> BuiltinRuntimeAdapters:
+    validate_runtime_adapter_configuration(settings)
+    secret = settings.sandbox_controller_secret.get_secret_value()
+    repository_root = settings.local_credentials_repository_root
     provider = LocalControllerSandboxProvider(
         base_url=settings.sandbox_controller_url,
         bearer_secret=secret,
