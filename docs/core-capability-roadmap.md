@@ -98,7 +98,11 @@
 
 ### C02 Tauri 客户端骨架与 PlatformAdapter
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-14**
+
+**完成日期：2026-07-14**
 
 完成定义：
 
@@ -375,15 +379,19 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 后端 Pytest | 519 项：484 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
 | Ruff | 通过 |
 | Mypy | 136 个源码文件通过 |
-| 前端 Vitest | 18 个测试文件、83 项测试通过 |
+| 前端 Vitest | 20 个测试文件、89 项测试通过；含 PlatformAdapter 契约与架构边界测试 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
+| Playwright Web 业务回归 | 14 项通过；本机 Chrome 149 下以 `--trace=off` 规避既有 trace 收尾阻塞，测试服务与容器自动清理 |
+| Tauri Rust | 2 项凭据键校验集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
+| PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
+| Tauri 桌面 E2E | macOS 本机 2 项真实应用启动、IPC 与失败关闭冒烟通过；正式构建无 WebDriver 测试标记 |
 | 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
 | 无付费模型默认回归 | LiteLLM 配置契约 16 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目 |
 | TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
 | 完整本机栈 E2E | 本轮未执行，纳入 C03 |
-| macOS/Windows Tauri 构建 | 未实现，纳入 C02/C20 |
+| macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
 当前已知失败：无。
 
@@ -392,6 +400,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 验证证据 |
 | --- | --- | --- | --- | --- | --- |
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
-| C02-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
+| C03-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

@@ -9,6 +9,7 @@
 !infra/compose/.env.litellm.example
 
 .local/
+.pnpm-store/
 
 backend/.venv/
 backend/.mypy_cache/
@@ -23,5 +24,8 @@ frontend/dist/
 frontend/test-results/
 frontend/playwright-report/
 frontend/coverage/
+frontend/logs/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
 
 *.log

@@ -23,7 +23,7 @@ React Web 构建长期保留为自动化测试、内部调试和未来可选管�
 
 ## 3. 推荐目录与命令
 
-C02 实现时固定以下结构；确需调整名称时必须同步修改本文件、脚本和 CI：
+C02 已按以下结构落地；确需调整名称时必须同步修改本文件、脚本和 CI：
 
 ```text
 frontend/
@@ -40,7 +40,7 @@ frontend/
     └── tests/            # Rust 集成测试
 ```
 
-目标命令：
+已落地命令：
 
 ```bash
 cd frontend
@@ -54,7 +54,9 @@ pnpm build
 pnpm tauri build
 ```
 
-命令在 C02 中随脚手架落地；在命令尚不存在前，本文只定义目标门禁，不得伪造执行记录。
+macOS 与 Windows 桌面编译和真实冒烟由
+`.github/workflows/tauri-desktop.yml` 的双平台矩阵执行。测试构建通过
+`desktop-test` Rust Feature 和 `tauri.test.conf.json` 显式启用驱动，正式构建不启用该 Feature。
 
 ## 4. PlatformAdapter 验收
 

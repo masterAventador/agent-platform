@@ -1,0 +1,35 @@
+[package]
+name = "agent-platform-desktop"
+version = "0.1.0"
+description = "AI 数字员工平台桌面客户端"
+authors = ["Aventador"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "agent_platform_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+desktop-test = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-wdio = { version = "1", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native"] }

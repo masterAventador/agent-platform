@@ -214,13 +214,18 @@ frontend/
 │   ├── test/
 │   └── main.tsx
 ├── e2e/                           # Playwright 跨页面流程
+├── e2e-tauri/                     # WebdriverIO 真实桌面流程
 ├── public/
 ├── src-tauri/                     # Tauri 原生适配和打包
-│   ├── sidecars/                  # 受签名和版本控制的可选本地执行组件
-│   └── capabilities/              # Tauri 权限声明，不承载业务页面
+│   ├── src/                       # Rust Command 与系统原生适配
+│   ├── tests/                     # Rust 集成测试
+│   ├── capabilities/              # 正式最小权限声明，不承载业务页面
+│   ├── tauri.conf.json            # 正式桌面构建配置
+│   └── tauri.test.conf.json       # 仅供 desktop-test 的测试权限叠加配置
 ├── package.json
 ├── vite.config.ts
 ├── playwright.config.ts
+├── wdio.conf.ts
 ├── tsconfig.json
 ├── Dockerfile.web
 ├── .env.example
