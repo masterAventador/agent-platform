@@ -26,6 +26,11 @@ WORKTREE_IMAGE_ID="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.a
 PLATFORM_BACKEND_IMAGE="agent-platform-backend:mvp-${WORKTREE_IMAGE_ID}"
 PLATFORM_FRONTEND_IMAGE="agent-platform-frontend:mvp-${WORKTREE_IMAGE_ID}"
 PREEXISTING_VOLUME_NAMES=""
+PREEXISTING_CONTAINER_NAMES=""
+PREEXISTING_NETWORK_NAMES=""
+CORE_HAD_PREEXISTING_CONTAINERS=false
+LITELLM_HAD_PREEXISTING_CONTAINERS=false
+APP_HAD_PREEXISTING_CONTAINERS=false
 LOCK_HELD=false
 
 export CORE_NETWORK_NAME LITELLM_NETWORK_NAME PLATFORM_BACKEND_IMAGE PLATFORM_FRONTEND_IMAGE
@@ -419,61 +424,268 @@ app_compose() {
 }
 
 ensure_llm_network() {
-  local owner
-  if docker network inspect "${LITELLM_NETWORK_NAME}" >/dev/null 2>&1; then
-    owner="$(docker network inspect --format '{{ index .Labels "agent-platform.mvp-profile" }}' "${LITELLM_NETWORK_NAME}")"
-    if [[ "${owner}" != "${PROFILE_NAME}" ]]; then
-      printf 'refusing to reuse unmanaged network: %s\n' "${LITELLM_NETWORK_NAME}" >&2
-      return 1
-    fi
+  local existing_network owner
+  if ! existing_network="$(list_llm_network)"; then
+    return 2
+  fi
+  if [[ -z "${existing_network}" ]]; then
+    docker network create \
+      --label "agent-platform.mvp-profile=${PROFILE_NAME}" \
+      "${LITELLM_NETWORK_NAME}" >/dev/null
     return
   fi
-  docker network create \
-    --label "agent-platform.mvp-profile=${PROFILE_NAME}" \
-    "${LITELLM_NETWORK_NAME}" >/dev/null
+  if ! owner="$(docker network inspect --format '{{ index .Labels "agent-platform.mvp-profile" }}' "${LITELLM_NETWORK_NAME}")"; then
+    printf 'failed to inspect MVP LiteLLM network owner: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 2
+  fi
+  if [[ "${owner}" != "${PROFILE_NAME}" ]]; then
+    printf 'refusing to reuse unmanaged network: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 1
+  fi
+}
+
+list_project_volumes() {
+  local project="$1"
+  docker volume ls --quiet --filter "label=com.docker.compose.project=${project}"
+}
+
+list_project_containers() {
+  local project="$1"
+  docker ps --all --format '{{.Names}}' --filter "label=com.docker.compose.project=${project}"
+}
+
+list_project_networks() {
+  local project="$1"
+  docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=${project}"
+}
+
+list_profile_resources() {
+  local list_function="$1"
+  local project output resources=""
+  for project in "${CORE_PROJECT}" "${LITELLM_PROJECT}" "${APP_PROJECT}"; do
+    if ! output="$(${list_function} "${project}")"; then
+      printf 'failed to enumerate MVP profile resources for project: %s\n' "${project}" >&2
+      return 2
+    fi
+    if [[ -n "${output}" ]]; then
+      resources+="${output}"$'\n'
+    fi
+  done
+  printf '%s' "${resources}" | sort -u
 }
 
 list_profile_volumes() {
-  local project
-  for project in "${CORE_PROJECT}" "${LITELLM_PROJECT}" "${APP_PROJECT}"; do
-    docker volume ls --quiet --filter "label=com.docker.compose.project=${project}"
-  done | sort -u
+  list_profile_resources list_project_volumes
 }
 
-capture_preexisting_volumes() {
+list_profile_containers() {
+  list_profile_resources list_project_containers
+}
+
+list_profile_networks() {
+  list_profile_resources list_project_networks
+}
+
+list_llm_network() {
+  local network_names network_name
+  if ! network_names="$(docker network ls --format '{{.Name}}' --filter "name=^${LITELLM_NETWORK_NAME}$")"; then
+    printf 'failed to enumerate MVP LiteLLM network: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 2
+  fi
+  while IFS= read -r network_name; do
+    if [[ "${network_name}" == "${LITELLM_NETWORK_NAME}" ]]; then
+      printf '%s\n' "${network_name}"
+      return
+    fi
+  done <<<"${network_names}"
+}
+
+capture_preexisting_resources() {
+  local core_containers litellm_containers app_containers llm_network
+  core_containers="$(list_project_containers "${CORE_PROJECT}")"
+  litellm_containers="$(list_project_containers "${LITELLM_PROJECT}")"
+  app_containers="$(list_project_containers "${APP_PROJECT}")"
+  PREEXISTING_CONTAINER_NAMES="$({
+    printf '%s\n' "${core_containers}"
+    printf '%s\n' "${litellm_containers}"
+    printf '%s\n' "${app_containers}"
+  } | sed '/^$/d' | sort -u)"
   PREEXISTING_VOLUME_NAMES="$(list_profile_volumes)"
+  PREEXISTING_NETWORK_NAMES="$(list_profile_networks)"
+  llm_network="$(list_llm_network)"
+  if [[ -n "${llm_network}" ]]; then
+    PREEXISTING_NETWORK_NAMES="$({
+      printf '%s\n' "${PREEXISTING_NETWORK_NAMES}"
+      printf '%s\n' "${llm_network}"
+    } | sed '/^$/d' | sort -u)"
+  fi
+  if [[ -n "${core_containers}" ]]; then
+    CORE_HAD_PREEXISTING_CONTAINERS=true
+  fi
+  if [[ -n "${litellm_containers}" ]]; then
+    LITELLM_HAD_PREEXISTING_CONTAINERS=true
+  fi
+  if [[ -n "${app_containers}" ]]; then
+    APP_HAD_PREEXISTING_CONTAINERS=true
+  fi
 }
 
-volume_was_preexisting() {
-  local volume_name="$1"
-  printf '%s\n' "${PREEXISTING_VOLUME_NAMES}" | rg --fixed-strings --line-regexp --quiet "${volume_name}"
+resource_was_preexisting() {
+  local resource_names="$1"
+  local resource_name="$2"
+  local existing_resource
+  while IFS= read -r existing_resource; do
+    if [[ "${existing_resource}" == "${resource_name}" ]]; then
+      return 0
+    fi
+  done <<<"${resource_names}"
+  return 1
 }
 
-remove_new_volumes() {
+profile_resources_exist() {
+  local resource_names
+  if ! docker info >/dev/null 2>&1; then
+    printf 'cannot inspect MVP profile resources because Docker is unavailable\n' >&2
+    return 2
+  fi
+  resource_names="$(list_profile_containers)" || return 2
+  if [[ -n "${resource_names}" ]]; then
+    return 0
+  fi
+  resource_names="$(list_profile_volumes)" || return 2
+  if [[ -n "${resource_names}" ]]; then
+    return 0
+  fi
+  resource_names="$(list_profile_networks)" || return 2
+  if [[ -n "${resource_names}" ]]; then
+    return 0
+  fi
+  if ! resource_names="$(list_llm_network)"; then
+    return 2
+  fi
+  if [[ -n "${resource_names}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+validate_host_ports_available() {
+  python3 - "$@" <<'PY'
+import socket
+import sys
+
+arguments = sys.argv[1:]
+if len(arguments) % 2:
+    raise SystemExit("MVP port validation requires name/value pairs")
+
+listeners = []
+try:
+    for index in range(0, len(arguments), 2):
+        name, raw_port = arguments[index : index + 2]
+        listener = socket.socket()
+        try:
+            listener.bind(("127.0.0.1", int(raw_port)))
+        except OSError as error:
+            listener.close()
+            raise SystemExit(f"MVP host port is unavailable: {name}={raw_port} ({error})")
+        listeners.append(listener)
+finally:
+    for listener in listeners:
+        listener.close()
+PY
+}
+
+remove_new_resources() {
   local failed=false
-  local volume_name
+  local current_containers current_networks current_volumes llm_network
+  local container_name network_name volume_name owner
+  if ! current_containers="$(list_profile_containers)"; then
+    failed=true
+    current_containers=""
+  fi
+  if ! current_networks="$(list_profile_networks)"; then
+    failed=true
+    current_networks=""
+  fi
+  if ! llm_network="$(list_llm_network)"; then
+    failed=true
+    llm_network=""
+  elif [[ -n "${llm_network}" ]]; then
+    current_networks="$({
+      printf '%s\n' "${current_networks}"
+      printf '%s\n' "${llm_network}"
+    } | sed '/^$/d' | sort -u)"
+  fi
+  if ! current_volumes="$(list_profile_volumes)"; then
+    failed=true
+    current_volumes=""
+  fi
+
+  while IFS= read -r container_name; do
+    if [[ -z "${container_name}" ]] || resource_was_preexisting "${PREEXISTING_CONTAINER_NAMES}" "${container_name}"; then
+      continue
+    fi
+    if ! docker rm --force "${container_name}" >/dev/null; then
+      printf 'failed to remove newly created MVP container: %s\n' "${container_name}" >&2
+      failed=true
+    fi
+  done <<<"${current_containers}"
+
+  while IFS= read -r network_name; do
+    if [[ -z "${network_name}" ]] || resource_was_preexisting "${PREEXISTING_NETWORK_NAMES}" "${network_name}"; then
+      continue
+    fi
+    if [[ "${network_name}" == "${LITELLM_NETWORK_NAME}" ]]; then
+      if ! owner="$(docker network inspect --format '{{ index .Labels "agent-platform.mvp-profile" }}' "${network_name}")"; then
+        printf 'failed to verify newly created MVP network owner: %s\n' "${network_name}" >&2
+        failed=true
+        continue
+      fi
+      if [[ "${owner}" != "${PROFILE_NAME}" ]]; then
+        printf 'refusing to remove newly appeared unmanaged network: %s\n' "${network_name}" >&2
+        failed=true
+        continue
+      fi
+    fi
+    if ! docker network rm "${network_name}" >/dev/null; then
+      printf 'failed to remove newly created MVP network: %s\n' "${network_name}" >&2
+      failed=true
+    fi
+  done <<<"${current_networks}"
+
   while IFS= read -r volume_name; do
-    if [[ -z "${volume_name}" ]] || volume_was_preexisting "${volume_name}"; then
+    if [[ -z "${volume_name}" ]] || resource_was_preexisting "${PREEXISTING_VOLUME_NAMES}" "${volume_name}"; then
       continue
     fi
     if ! docker volume rm "${volume_name}" >/dev/null; then
       printf 'failed to remove newly created MVP volume: %s\n' "${volume_name}" >&2
       failed=true
     fi
-  done < <(list_profile_volumes)
+  done <<<"${current_volumes}"
   if [[ "${failed}" == "true" ]]; then
     return 1
   fi
 }
 
 remove_llm_network() {
-  local owner
-  if ! docker network inspect "${LITELLM_NETWORK_NAME}" >/dev/null 2>&1; then
+  local existing_network owner
+  if ! existing_network="$(list_llm_network)"; then
+    return 2
+  fi
+  if [[ -z "${existing_network}" ]]; then
     return
   fi
-  owner="$(docker network inspect --format '{{ index .Labels "agent-platform.mvp-profile" }}' "${LITELLM_NETWORK_NAME}")"
-  if [[ "${owner}" == "${PROFILE_NAME}" ]]; then
-    docker network rm "${LITELLM_NETWORK_NAME}" >/dev/null
+  if ! owner="$(docker network inspect --format '{{ index .Labels "agent-platform.mvp-profile" }}' "${LITELLM_NETWORK_NAME}")"; then
+    printf 'failed to inspect MVP LiteLLM network owner: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 2
+  fi
+  if [[ "${owner}" != "${PROFILE_NAME}" ]]; then
+    printf 'refusing to remove unmanaged network: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 1
+  fi
+  if ! docker network rm "${LITELLM_NETWORK_NAME}" >/dev/null; then
+    printf 'failed to remove managed MVP LiteLLM network: %s\n' "${LITELLM_NETWORK_NAME}" >&2
+    return 2
   fi
 }
 
@@ -506,12 +718,10 @@ stop_profile() {
 }
 
 cleanup_failed_start() {
-  local exit_code=$?
+  local exit_code="$1"
   local cleanup_failed=false
   trap - ERR INT TERM
-  if ! MVP_PROFILE_REMOVE_VOLUMES=false stop_profile; then
-    cleanup_failed=true
-  elif ! remove_new_volumes; then
+  if ! remove_new_resources; then
     cleanup_failed=true
   fi
   if [[ "${cleanup_failed}" == "true" ]]; then
@@ -526,18 +736,35 @@ cleanup_failed_start() {
 assert_service_healthy() {
   local stack="$1"
   local service="$2"
-  local container_id state
+  local compose_function container_id state command_status
   case "${stack}" in
-    core) container_id="$(core_compose ps --quiet "${service}")" ;;
-    litellm) container_id="$(litellm_compose ps --quiet "${service}")" ;;
-    app) container_id="$(app_compose ps --quiet "${service}")" ;;
+    core) compose_function=core_compose ;;
+    litellm) compose_function=litellm_compose ;;
+    app) compose_function=app_compose ;;
     *) printf 'unknown MVP stack: %s\n' "${stack}" >&2; return 2 ;;
   esac
+  if container_id="$(
+    trap - ERR
+    "${compose_function}" ps --quiet "${service}"
+  )"; then
+    :
+  else
+    command_status=$?
+    return "${command_status}"
+  fi
   if [[ -z "${container_id}" ]]; then
     printf '%s service is missing: %s\n' "${stack}" "${service}" >&2
     return 1
   fi
-  state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_id}")"
+  if state="$(
+    trap - ERR
+    docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_id}"
+  )"; then
+    :
+  else
+    command_status=$?
+    return "${command_status}"
+  fi
   if [[ "${state}" != "healthy" ]]; then
     printf '%s service is not healthy: %s (%s)\n' "${stack}" "${service}" "${state}" >&2
     return 1
@@ -562,22 +789,43 @@ health_profile() {
 }
 
 start_profile() {
-  capture_preexisting_volumes
-  trap cleanup_failed_start ERR INT TERM
+  local app_start_status
+  capture_preexisting_resources
+  trap 'cleanup_failed_start "$?"' ERR
+  trap 'cleanup_failed_start 130' INT
+  trap 'cleanup_failed_start 143' TERM
   core_compose config --quiet
   litellm_compose config --quiet
   app_compose config --quiet
   app_compose build migrate frontend
+  if [[ "${CORE_HAD_PREEXISTING_CONTAINERS}" != "true" ]]; then
+    validate_host_ports_available \
+      POSTGRES_PORT "${POSTGRES_PORT}" \
+      REDIS_PORT "${REDIS_PORT}" \
+      MINIO_API_PORT "${MINIO_API_PORT}" \
+      MINIO_CONSOLE_PORT "${MINIO_CONSOLE_PORT}"
+  fi
   ensure_llm_network
   core_compose up --detach --wait --wait-timeout 180 postgres redis minio
+  if [[ "${LITELLM_HAD_PREEXISTING_CONTAINERS}" != "true" ]]; then
+    validate_host_ports_available LITELLM_PORT "${LITELLM_PORT}"
+  fi
   litellm_compose up --detach --wait --wait-timeout 240 litellm openai-stub
   litellm_compose run --rm --no-deps worker-key-bootstrap
-  if ! app_compose up --detach --wait --wait-timeout 300 --no-build \
+  if [[ "${APP_HAD_PREEXISTING_CONTAINERS}" != "true" ]]; then
+    validate_host_ports_available \
+      PLATFORM_API_PORT "${PLATFORM_API_PORT}" \
+      PLATFORM_WEB_PORT "${PLATFORM_WEB_PORT}"
+  fi
+  if app_compose up --detach --wait --wait-timeout 300 --no-build \
     migrate api dispatcher sandbox-controller sandbox-janitor worker frontend; then
+    app_start_status=0
+  else
+    app_start_status=$?
     if ! app_compose logs --no-color --tail 80 worker sandbox-controller; then
       printf 'failed to collect MVP worker diagnostics\n' >&2
     fi
-    return 1
+    cleanup_failed_start "${app_start_status}"
   fi
   health_profile
   trap - ERR INT TERM
@@ -609,7 +857,17 @@ case "${1:-status}" in
       load_environment
       stop_profile
     else
-      printf 'MVP profile already stopped: %s\n' "${PROFILE_NAME}"
+      if profile_resources_exist; then
+        printf 'MVP profile environment is incomplete while resources still exist; refusing unsafe stop: %s\n' \
+          "${PROFILE_NAME}" >&2
+        exit 2
+      else
+        resource_status=$?
+        if [[ "${resource_status}" -ne 1 ]]; then
+          exit "${resource_status}"
+        fi
+        printf 'MVP profile already stopped: %s\n' "${PROFILE_NAME}"
+      fi
     fi
     ;;
   health)
