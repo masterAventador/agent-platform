@@ -1,0 +1,513 @@
+{
+  "$defs": {
+    "GovernanceReferences": {
+      "additionalProperties": false,
+      "description": "Opaque links to Core approval and audit records.",
+      "properties": {
+        "approval_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Approval Id"
+        },
+        "audit_correlation_id": {
+          "format": "uuid",
+          "title": "Audit Correlation Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "audit_correlation_id",
+        "approval_id"
+      ],
+      "title": "GovernanceReferences",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "LocalArtifactReference_Literal__input___": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "usage": {
+          "const": "input",
+          "title": "Usage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "usage"
+      ],
+      "title": "LocalArtifactReference[Literal['input']]",
+      "type": "object"
+    },
+    "LocalArtifactReference_Literal__output____evidence___": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "usage": {
+          "enum": [
+            "output",
+            "evidence"
+          ],
+          "title": "Usage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "usage"
+      ],
+      "title": "LocalArtifactReference[Literal['output', 'evidence']]",
+      "type": "object"
+    },
+    "LocalTaskCancel": {
+      "additionalProperties": false,
+      "properties": {
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "idempotency_key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "task.cancel",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "reason_code": {
+          "enum": [
+            "user_requested",
+            "entitlement_revoked",
+            "emergency_stop",
+            "deadline_expired"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "message_type",
+        "idempotency_key",
+        "reason_code"
+      ],
+      "title": "LocalTaskCancel",
+      "type": "object"
+    },
+    "LocalTaskError": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "retryable": {
+                "const": false
+              }
+            },
+            "required": [
+              "retryable"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_after_ms": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "invalid_request",
+            "authorization",
+            "deadline_exceeded",
+            "cancelled",
+            "unavailable",
+            "execution_failed",
+            "internal"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "executor_id": {
+          "format": "uuid",
+          "title": "Executor Id",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "task.error",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "retry_after_ms": {
+          "anyOf": [
+            {
+              "maximum": 86400000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retry After Ms"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "safe_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Safe Message",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "message_type",
+        "executor_id",
+        "category",
+        "code",
+        "safe_message",
+        "retryable"
+      ],
+      "title": "LocalTaskError",
+      "type": "object"
+    },
+    "LocalTaskIdentity": {
+      "additionalProperties": false,
+      "description": "Stable Core identities referenced by, but not redefined in, this protocol.",
+      "properties": {
+        "capability_id": {
+          "const": "social-operations",
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "correlation_id": {
+          "format": "uuid",
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "target_device_id": {
+          "format": "uuid",
+          "title": "Target Device Id",
+          "type": "string"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "tenant_id": {
+          "format": "uuid",
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "correlation_id",
+        "tenant_id",
+        "capability_id",
+        "target_device_id"
+      ],
+      "title": "LocalTaskIdentity",
+      "type": "object"
+    },
+    "LocalTaskRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/LocalArtifactReference_Literal__input___"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "deadline_at": {
+          "format": "date-time",
+          "title": "Deadline At",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "idempotency_key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "input": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Input",
+          "type": "object"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "task.request",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        },
+        "task_type": {
+          "pattern": "^social\\.[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "title": "Task Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "message_type",
+        "idempotency_key",
+        "deadline_at",
+        "task_type",
+        "input",
+        "artifact_refs"
+      ],
+      "title": "LocalTaskRequest",
+      "type": "object",
+      "x-semantic-validation-required": [
+        "deadline_at must be later than sent_at"
+      ]
+    },
+    "LocalTaskResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/LocalArtifactReference_Literal__output____evidence___"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "executor_id": {
+          "format": "uuid",
+          "title": "Executor Id",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "task.response",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "result": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Result",
+          "type": "object"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "running",
+            "completed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "message_type",
+        "executor_id",
+        "status",
+        "result",
+        "artifact_refs"
+      ],
+      "title": "LocalTaskResponse",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Discriminated, JSON-serializable Social Operations local executor frame.",
+  "discriminator": {
+    "mapping": {
+      "task.cancel": "#/$defs/LocalTaskCancel",
+      "task.error": "#/$defs/LocalTaskError",
+      "task.request": "#/$defs/LocalTaskRequest",
+      "task.response": "#/$defs/LocalTaskResponse"
+    },
+    "propertyName": "message_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/LocalTaskRequest"
+    },
+    {
+      "$ref": "#/$defs/LocalTaskCancel"
+    },
+    {
+      "$ref": "#/$defs/LocalTaskResponse"
+    },
+    {
+      "$ref": "#/$defs/LocalTaskError"
+    }
+  ],
+  "title": "LocalExecutorMessage"
+}

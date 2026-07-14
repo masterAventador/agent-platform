@@ -1,0 +1,21 @@
+{
+  "protocol_version": "1.0",
+  "message_type": "task.cancel",
+  "message_id": "00000000-0000-4000-8000-000000000150",
+  "sent_at": "2026-07-15T04:01:00Z",
+  "identity": {
+    "task_id": "00000000-0000-4000-8000-000000000101",
+    "correlation_id": "00000000-0000-4000-8000-000000000102",
+    "tenant_id": "00000000-0000-4000-8000-000000000103",
+    "capability_id": "social-operations",
+    "target_device_id": "00000000-0000-4000-8000-000000000104"
+  },
+  "governance": {
+    "audit_correlation_id": "00000000-0000-4000-8000-000000000151",
+    "approval_id": null
+  },
+  "idempotency_key": "social-task:00000000-0000-4000-8000-000000000101:cancel:1",
+  "reason_code": "user_requested",
+  "extensions": {},
+  "future_field": true
+}
