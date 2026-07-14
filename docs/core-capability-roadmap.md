@@ -400,7 +400,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 验证证据 |
 | --- | --- | --- | --- | --- | --- |
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
-| C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
+| C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

@@ -54,6 +54,12 @@ pnpm build
 pnpm tauri build
 ```
 
+前端依赖使用 pnpm 11 的工作区配置统一管理。`pnpm-workspace.yaml` 固定
+`@wdio/native-utils` 的兼容版本，并通过 `allowBuilds` 只允许 `esbuild`
+执行安装脚本；桌面浏览器驱动安装器不参与 Tauri WebdriverIO 链路，因此保持禁用。
+依赖安装门禁使用 `pnpm install --frozen-lockfile`，禁止通过放宽锁文件校验掩盖
+`package.json`、工作区配置与锁文件之间的漂移。
+
 macOS 与 Windows 桌面编译和真实冒烟由
 `.github/workflows/tauri-desktop.yml` 的双平台矩阵执行。测试构建通过
 `desktop-test` Rust Feature 和 `tauri.test.conf.json` 显式启用驱动，正式构建不启用该 Feature。
