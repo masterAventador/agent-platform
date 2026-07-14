@@ -14,6 +14,7 @@
 - Electron + React 提供完整桌面界面；
 - Node.js 侧使用 Playwright、Midscene、nut.js 等能力自动操作浏览器；
 - 内置 Python 程序通过 Windows UI 自动化、截图、OCR 等方式控制 PC 微信；
+- 视频素材上传阿里云 OSS，使用阿里云 Timeline Web SDK 预览，并通过服务端云任务完成剪辑合成；
 - 本机 HTTP、WebSocket 用于 Electron 与 Python 进程通信；
 - 云端服务负责账号授权、AI 能力、配置下发、任务协同和部分平台接口；
 - 本地数据库保存部分账号、任务和运行状态；
@@ -167,7 +168,61 @@
 
 运行日志中观察到了抖音真实发布成功链路：启动浏览器、进入发布页、上传视频、填写标题与话题、点击发布、确认成功、关闭浏览器。日志中也出现过创作者页面元素定位失败，说明该能力依赖网页结构，页面改版后需要持续维护选择器和识别策略。
 
-### 5.4 自动曝光与获客
+视频“剪辑”和视频“发布”使用两套不同机制：剪辑主要通过阿里云云端任务完成，发布则由本地浏览器 RPA 操作各平台创作者后台。
+
+### 5.4 视频剪辑专项结论
+
+进一步检查安装包后可以确认，竞品的主要视频剪辑链路不是在用户电脑运行完整 FFmpeg，而是使用阿里云 OSS 和智能媒体服务 IMS/ICE 的云剪辑体系。
+
+客户端侧已经证实的证据包括：
+
+- 主页面直接加载 `https://g.alicdn.com/thor-server/video-editing-websdk/4.13.4/player.js`；
+- 页面动态加载同版本 `player.css`；
+- 代码调用 `window.AliyunTimelinePlayer`；
+- 代码调用 `AliyunTimelinePlayer.parseTimeline` 解析剪辑时间线；
+- 转场预览资源来自 `ice-pub-media.myalicdn.com`；
+- 客户端通过 `/upload/token/sts` 获取临时凭据；
+- 客户端内置阿里云 OSS SDK，并使用 STS 将视频、图片和音乐素材上传 OSS；
+- 客户端向自己的服务端提交 `create_job`、`one_key_video` 和模板剪辑任务；
+- 客户端通过 `get_job_status` 轮询任务状态；
+- 成片通过下载任务接口获取，再进入多平台发布流程。
+
+观察到的关键业务接口包括：
+
+```text
+/upload/token/sts
+/video_creation/material_lib/upload
+/video_creation/preview/create_job
+/video_creation/preview/get_job_status
+/video_creation/editing_task/one_key_video
+/video_creation/editing_task/template-video/submit
+/video/download/task/get_download
+```
+
+安装包中没有发现可供该产品直接执行剪辑的 `ffmpeg.exe`、`ffprobe.exe`、`ffmpeg-static` 或 `fluent-ffmpeg`。包内的 `opencv_videoio_ffmpeg4110_64.dll` 属于 OpenCV 的视频读写组件，可用于读取视频帧，但不能据此认定产品在本地完成成片渲染。
+
+因此，客户端侧可以确认的流程是：
+
+```text
+选择本地素材
+→ 获取 STS 临时凭据
+→ 上传素材到阿里云 OSS
+→ 生成 Timeline 配置
+→ AliyunTimelinePlayer 在 App 内预览
+→ 提交炼刀服务端剪辑任务
+→ 轮询云端 Job 状态
+→ 获取成片并下载或发布
+```
+
+安装包不包含炼刀服务端代码，所以无法直接看到其最终调用的阿里云 OpenAPI 名称。理论上服务端也可能把 Timeline 转换后用自建渲染集群处理；但结合阿里云 Web SDK、`AliyunTimelinePlayer`、ICE 公共素材域名、OSS、Timeline 数据和异步 Job 模式，后端使用阿里云 IMS/ICE 完成合成的可信度很高。
+
+阿里云官方文档也说明，Web SDK 用于编辑和生成 Timeline，实际请求应先发送给业务服务端，再由服务端通过 AccessKey 调用阿里云 OpenAPI；合成任务可以通过 Job ID 查询状态。这与竞品实现高度一致：
+
+- [阿里云视频剪辑 Web SDK 接入说明](https://help.aliyun.com/zh/ims/developer-reference/access-the-video-clip-web-sdk)
+- [阿里云智能生产制作与任务查询](https://help.aliyun.com/zh/ims/getting-started/intelligent-production-production-quick-start)
+- [阿里云 Timeline 配置说明](https://help.aliyun.com/zh/ims/developer-reference/timeline-configuration-description)
+
+### 5.5 自动曝光与获客
 
 安装包中存在以下自动化模块或入口：
 
@@ -183,7 +238,7 @@
 
 “曝光”在这里并不是购买平台广告，而是由 RPA 模拟人工搜索内容或账号，再按配置点赞、评论、私信、访问主页等，以获得目标用户注意力。这类功能非常容易触发平台风控，必须设置频率、每日上限、随机等待、人工审批、账号熔断和完整审计。
 
-### 5.5 微信私域运营
+### 5.6 微信私域运营
 
 从 Python 模块、OCR 依赖和运行日志可以确认，PC 微信是这个程序最成熟的本地 RPA 场景之一，涵盖：
 
@@ -217,7 +272,7 @@
 ├───────────────────────┴─────────────────────────────────────┤
 │ 本机 HTTP :9000 / WebSocket :8765 / SQLite 或加密本地数据     │
 ├─────────────────────────────────────────────────────────────┤
-│ 云端 API / AI 模型 / 账号授权 / 配置 / 任务和状态同步           │
+│ 云端 API / AI 模型 / 阿里云 OSS 与 IMS/ICE / 任务和状态同步      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -316,6 +371,20 @@ target_exposure.xhs
 3. 对抖音客服等能力使用企业号、员工号或平台侧授权，再由云端接口和 WebSocket 协作。
 
 因此，“自动操作浏览器登录后台”是事实的一部分，但不是全部。正常产品不应偷偷获取用户主浏览器 Cookie；应在 App 管理的独立浏览器配置目录中完成用户可见的扫码登录，并明确展示账号状态、授权范围和注销入口。
+
+### 6.7 视频剪辑的云端分工
+
+视频模块由客户端、炼刀服务端和阿里云三部分协作：
+
+| 组成 | 职责 |
+| --- | --- |
+| Electron/React 客户端 | 选择素材、配置模板、构建 Timeline、预览、展示任务状态和下载成片 |
+| 阿里云 OSS | 存放源视频、图片、音乐、预览资源和成片 |
+| 炼刀服务端 | 签发受限 STS、保存剪辑任务、校验权限、提交云端 Job、记录状态和结果 |
+| 阿里云 IMS/ICE | 按 Timeline 执行转场、字幕、拼接、音频等云端合成，服务端调用属于高可信推断 |
+| 本地浏览器 RPA | 成片完成后进入抖音、小红书、快手或视频号后台发布 |
+
+`AliyunTimelinePlayer` 负责在 App 内按 Timeline 预览组合效果，并不等同于在本地编码输出最终 MP4。真正的成片生成是异步任务，所以客户端需要创建 Job、轮询状态并在成功后下载结果。
 
 ## 7. RPA 在本产品中的含义
 
@@ -641,7 +710,7 @@ RPA 软件采用设备绑定是合理且常见的，通常同时出于三个目�
                                │ HTTPS / SSE / WebSocket（出站连接）
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │ agent-platform 云端                                                   │
-│ 用户与企业 / AI 员工 / LangGraph / 审批 / 知识库 / 模型 / 任务 / 审计 │
+│ 用户与企业 / AI 员工 / LangGraph / 视频云剪辑 / 知识 / 任务 / 审计     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -728,6 +797,10 @@ task.failed
 | 业务界面 | 复用现有 React + TypeScript + Ant Design |
 | 云端 API | 现有 FastAPI |
 | AI 编排 | 现有 LangGraph / Deep Agents 适配层 |
+| 素材存储 | 阿里云 OSS，客户端仅获取限定目录、短有效期的 STS 临时凭据 |
+| 视频预览 | 阿里云 Timeline 预览组件，通过前端视频预览适配层封装 SDK 加载和错误 |
+| 视频渲染 | 第一阶段采用阿里云 IMS/ICE；通过 `VideoRenderProvider` 隔离供应商协议 |
+| 本地渲染 | 后续按离线、隐私和成本需求增加 FFmpeg Provider，不作为竞品现状结论 |
 | 浏览器自动化 | Playwright，使用 App 专用浏览器目录 |
 | Windows 微信 | Windows UI Automation 优先，OCR 作为补充 |
 | 图像识别 | OpenCV + OCR，限定到必要区域 |
@@ -739,6 +812,18 @@ task.failed
 | 可观测性 | 结构化脱敏日志 + OpenTelemetry 任务关联 |
 
 原竞品使用固定本机 HTTP `9000` 和 WebSocket `8765`。我们的实现不应简单照搬开放端口，而应优先使用 Tauri Channel、命名管道或带随机令牌和严格来源校验的回环 IPC，减少本机其他进程伪造指令的风险。
+
+视频渲染建议定义稳定的供应商抽象：
+
+```text
+VideoRenderProvider
+├── AliyunIceProvider       # 第一阶段：云端 Timeline 合成
+└── LocalFfmpegProvider     # 后续：离线或成本敏感场景
+```
+
+业务页面和工作流只依赖 `VideoRenderProvider`，不直接拼装阿里云签名或调用具体 Job API。阿里云 AccessKey 必须保存在服务端，Tauri 客户端只接收最小权限、短有效期的 STS 凭据。任务协议统一描述素材、Timeline、模板、Job、进度、结果、费用和失败原因，使将来切换或并行使用本地 FFmpeg 时不需要重写业务页面。
+
+第一阶段选择阿里云 IMS/ICE 的优势是客户端轻、Mac 和 Windows 结果一致、App 关闭后任务可继续、转场和模板能力成熟；代价是素材需要上传、依赖网络、产生 OSS 和合成费用，并需要明确数据地域、保留期限和删除策略。后续增加本地 FFmpeg，可以覆盖离线、敏感素材和大批量成本场景，但需要自己维护滤镜、字体、转场、编码器兼容和资源调度。
 
 ## 11. 功能建设优先级
 
@@ -758,7 +843,9 @@ task.failed
 ### 第二阶段：多平台发布和 AI 客服
 
 - 抖音、小红书、快手、视频号聚合发布；
-- 素材库和批量任务；
+- 阿里云 OSS 素材库和受限 STS 上传；
+- 阿里云 IMS/ICE Timeline 预览、模板剪辑和异步成片；
+- 视频渲染 Provider、批量任务、进度、费用和失败重试；
 - 多平台发布记录；
 - 抖音官方能力优先的 AI 客服；
 - 会话中心、知识库回复和审批；
@@ -829,6 +916,8 @@ frontend/src-tauri/
 10. 不把云端 Agent 后端完整塞进客户端，本地只保留必要执行能力；
 11. 不要求用户在 App 与 Web 之间来回切换完成同一个流程；
 12. 不一次性支持所有平台，先把一个平台的登录、执行、恢复、审计做完整。
+13. 不让业务页面直接依赖阿里云具体接口，必须通过视频渲染 Provider 隔离供应商；
+14. 不把长期 AccessKey 放进客户端，素材上传只使用最小权限、短有效期的 STS。
 
 ## 14. 购买账号后的动态验收计划
 
@@ -871,7 +960,7 @@ Mac 仍然可以继续开发 Tauri 的 React 界面、云端 API、任务协议�
 | 5 | 数据落盘 | 配置、数据库、日志、Cookie 的目录和加密情况 |
 | 6 | 云端通信 | 域名、协议、证书、数据类型和失败重试，不记录明文凭据 |
 | 7 | 平台账号 | 扫码登录、Cookie 有效期、注销、过期和风控处理 |
-| 8 | 内容发布 | 各平台从选择素材到发布记录的完整成功与失败链路 |
+| 8 | 视频剪辑与发布 | STS、OSS、Timeline、云端 Job、成片下载以及各平台发布的成功与失败链路 |
 | 9 | AI 客服 | 收消息、上下文、回复生成、自动发送、人工接管和审计 |
 | 10 | 微信 RPA | 窗口遮挡、DPI、锁屏、弹窗、微信重启等异常场景 |
 | 11 | 曝光获客 | 频控、每日上限、验证码、连续失败和熔断 |
@@ -905,6 +994,7 @@ Mac 仍然可以继续开发 Tauri 的 React 界面、云端 API、任务协议�
 - 微信桌面 RPA；
 - 多平台浏览器自动化；
 - 视频素材与批量发布；
+- 阿里云 OSS、Timeline Web SDK 和 IMS/ICE 云剪辑；
 - 私信客服与持续跟进；
 - 自动曝光和获客；
 - 工作流和任务管理。
@@ -913,6 +1003,6 @@ Mac 仍然可以继续开发 Tauri 的 React 界面、云端 API、任务协议�
 
 我们可以做同类产品，而且产品形态应当就是一个完整桌面 App。正确做法不是把所有功能强行放到纯网页，也不是让用户在 App 和网页之间切换，而是：
 
-> 用 Tauri + React 构建统一桌面界面，用受控本地执行器完成浏览器和 Windows RPA，用现有 agent-platform 云端负责 AI、工作流、知识、权限、审批和审计。
+> 用 Tauri + React 构建统一桌面界面，用阿里云 IMS/ICE 或可替换 Provider 完成视频渲染，用受控本地执行器完成浏览器和 Windows RPA，用现有 agent-platform 云端负责 AI、工作流、知识、权限、审批和审计。
 
 这样既保留桌面 RPA 必需的本机能力，也能复用当前平台已经建立的后端和前端基础，并为后续企业 Web 管理端保留同源复用能力。
