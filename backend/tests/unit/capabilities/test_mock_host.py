@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from agent_platform.capabilities.manifest import (
+    CapabilityManifest,
+    CoreProtocolDependency,
+)
+from agent_platform.capabilities.mock_host import (
+    CapabilityConflictError,
+    CapabilityNotInstalledError,
+    DuplicateCapabilityError,
+    MockCapabilityHost,
+    UnsatisfiedCoreProtocolError,
+)
+from agent_platform.capabilities.social_operations.manifest import (
+    SOCIAL_OPERATIONS_MANIFEST,
+)
+from agent_platform.capabilities.video_studio.manifest import VIDEO_STUDIO_MANIFEST
+
+CORE_PROTOCOLS = {
+    "core.approvals": "1.0",
+    "core.artifacts": "1.0",
+    "core.audit": "1.0",
+    "core.capability-host": "1.0",
+    "core.events": "1.0",
+    "core.permissions": "1.0",
+    "core.runs": "1.0",
+}
+
+
+def _host() -> MockCapabilityHost:
+    return MockCapabilityHost(core_protocols=CORE_PROTOCOLS)
+
+
+@pytest.mark.parametrize(
+    ("manifests", "expected_ids"),
+    [
+        ((), frozenset()),
+        ((VIDEO_STUDIO_MANIFEST,), frozenset({"video-studio"})),
+        ((SOCIAL_OPERATIONS_MANIFEST,), frozenset({"social-operations"})),
+        (
+            (VIDEO_STUDIO_MANIFEST, SOCIAL_OPERATIONS_MANIFEST),
+            frozenset({"video-studio", "social-operations"}),
+        ),
+    ],
+)
+def test_core_and_optional_capability_combinations_are_isolated(
+    manifests: tuple[CapabilityManifest, ...],
+    expected_ids: frozenset[str],
+) -> None:
+    host = _host()
+
+    for manifest in manifests:
+        host.install(manifest)
+
+    assert host.installed_capability_ids == expected_ids
+    assert host.enabled_capability_ids == expected_ids
+
+
+def test_disable_is_idempotent_and_does_not_uninstall_other_package() -> None:
+    host = _host()
+    host.install(VIDEO_STUDIO_MANIFEST)
+    host.install(SOCIAL_OPERATIONS_MANIFEST)
+
+    host.disable("video-studio")
+    host.disable("video-studio")
+
+    assert host.installed_capability_ids == frozenset({"video-studio", "social-operations"})
+    assert host.enabled_capability_ids == frozenset({"social-operations"})
+
+
+def test_disable_rejects_unknown_capability() -> None:
+    with pytest.raises(CapabilityNotInstalledError):
+        _host().disable("video-studio")
+
+
+def test_duplicate_registration_is_rejected_without_mutating_host() -> None:
+    host = _host()
+    host.install(VIDEO_STUDIO_MANIFEST)
+
+    with pytest.raises(DuplicateCapabilityError):
+        host.install(VIDEO_STUDIO_MANIFEST)
+
+    assert host.installed_capability_ids == frozenset({"video-studio"})
+
+
+def test_unsupported_manifest_schema_is_rejected() -> None:
+    host = _host()
+    manifest = replace(VIDEO_STUDIO_MANIFEST, schema_version="2.0")
+
+    with pytest.raises(UnsatisfiedCoreProtocolError):
+        host.install(manifest)
+
+    assert host.installed_capability_ids == frozenset()
+
+
+def test_resource_conflict_is_rejected_atomically() -> None:
+    host = _host()
+    host.install(VIDEO_STUDIO_MANIFEST)
+    conflicting = replace(
+        SOCIAL_OPERATIONS_MANIFEST,
+        backend_routes=VIDEO_STUDIO_MANIFEST.backend_routes,
+    )
+
+    with pytest.raises(CapabilityConflictError):
+        host.install(conflicting)
+
+    assert host.installed_capability_ids == frozenset({"video-studio"})
+    assert host.enabled_capability_ids == frozenset({"video-studio"})
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        CoreProtocolDependency(protocol_id="core.unknown", protocol_version="1.0"),
+        CoreProtocolDependency(protocol_id="core.runs", protocol_version="2.0"),
+    ],
+)
+def test_unsatisfied_core_dependency_is_rejected_without_partial_install(
+    dependency: CoreProtocolDependency,
+) -> None:
+    host = _host()
+    manifest = replace(VIDEO_STUDIO_MANIFEST, core_dependencies=(dependency,))
+
+    with pytest.raises(UnsatisfiedCoreProtocolError):
+        host.install(manifest)
+
+    assert host.installed_capability_ids == frozenset()
+    assert host.enabled_capability_ids == frozenset()

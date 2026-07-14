@@ -2,7 +2,7 @@
 
 > 文档性质：行业能力包功能清单、依赖实施顺序与完成状态的唯一执行台账
 > 建立日期：2026-07-14
-> 当前阶段：允许与 AI 中台 Core 隔离并行；尚未启动 B01
+> 当前阶段：允许与 AI 中台 Core 隔离并行；B01 首个独立纵切进行中
 > 适用范围：`video-studio`、`social-operations` 及两者的组合工作流
 > 主要证据：[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md)
 
@@ -230,7 +230,9 @@ deployment_installed && tenant_entitled && user_permitted
 
 **所属：Video Studio + Social Operations**
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-14**
 
 完成定义：
 
@@ -487,18 +489,19 @@ deployment_installed && tenant_entitled && user_permitted
 
 | 项目 | 当前结果 |
 | --- | --- |
-| `video-studio` 源码模块 | 未创建 |
-| `social-operations` 源码模块 | 未创建 |
-| Core 前置条件 | C01 已完成；C02-C20 继续串行，业务条目按依赖标记待集成 |
+| `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；业务实现尚未开始 |
+| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest；业务实现尚未开始 |
+| Core 前置条件 | C01-C02 已完成；C03-C20 继续串行，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
 | 我们的真实平台账号 E2E | 尚未开始 |
-| 能力包组合矩阵 | 尚未实现，前置依赖 Core C17 |
+| 能力包组合矩阵 | Mock Host 四组合隔离门禁已通过；真实 Core/C17 与 B17 组合回归尚未完成 |
 
 ## 7. 完成记录
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 平台/版本 | 验证证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| B01-B17 | 尚未开始 | — | — | — | — | C01 已完成，可从 B01 公共协议开始隔离并行开发 |
+| B01 | 进行中 | 2026-07-14 | — | 本任务提交 | Mock Host | 首个纵切实现版本化 Manifest、隔离装配、依赖方向与四组合门禁；`uv run pytest tests/unit/capabilities -q` 23 项通过，Ruff 与 Mypy 通过；不代表 C17 或真实 Core 集成完成 |
+| B02-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。
