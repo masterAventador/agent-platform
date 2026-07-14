@@ -2,7 +2,7 @@
 
 > 状态：已确认的实现基线  
 > 确认日期：2026-07-12  
-> 补充确认：2026-07-14（AI 中台 Core、能力授权与可插拔行业模块）
+> 补充确认：2026-07-15（B01 锁定能力资源命名空间协议）
 > 适用范围：企业级数字员工平台后端、Agent 运行时、知识库、Skill、工具、任务与观测体系
 
 ## 1. 建设目标
@@ -504,7 +504,7 @@ deployment_installed && tenant_entitled && user_permitted
 
 能力包的每个 API、Worker 任务、云资源凭据签发和本地设备指令都必须重复校验 Entitlement 与 RBAC。未安装或未授权时不得创建任务、签发 OSS STS、下发 RPA 指令或暴露内部配置。能力在任务执行过程中被撤销时，系统应阻止新任务，并按能力策略安全完成、暂停或取消存量任务，留下审计记录。
 
-能力包使用独立权限命名空间，例如 `video.*` 与 `social_operations.*`。具体权限码在能力详细设计中锁定并进入契约测试，禁止根据角色名称在客户端自行推导。
+能力包使用独立权限命名空间，例如 `video.*` 与 `social.*`。资源命名空间绑定 `capability_id` 的首个连字符分段，并由 Host 独占声明；Core 契约从稳定 `TenantPermission` 与 `EventType` 定义派生可信保留命名空间，因此同时覆盖 `workspace`、`employees`、`knowledge`、`skills`、`tools`、`operations`、`runs`、`models` 等权限前缀，以及 `run`、`message`、`plan`、`skill`、`tool`、`subagent`、`approval`、`artifact` 等事件前缀，不能允许能力包仅靠自报 `capability_id` 首段冒充 Core。Core 稳定 API 根与这些资源命名空间集中在同一 Core 契约来源，Manifest 构造期禁止同名 `capability_id`，并以 FastAPI 实际 OpenAPI 路径及权限/事件枚举做精确一致性测试，防止新增 Core 契约时遗漏保留。具体权限码在能力详细设计中锁定并进入契约测试，禁止根据角色名称在客户端自行推导。
 
 ## 12. 后端代码组织边界
 
@@ -513,6 +513,8 @@ deployment_installed && tenant_entitled && user_permitted
 本文只规定后端逻辑边界：平台业务、Agent 运行时、Knowledge Service、Tool Gateway、记忆、沙盒、能力包、基础设施和观测必须保持职责分离；FastAPI API 与 Agent Worker 共用同一套业务模块，但作为独立进程运行。
 
 能力包通过 bootstrap 和能力注册表显式装配路由、Worker 处理器、权限、事件、迁移与健康检查。Core 只依赖注册协议，不依赖具体能力包。能力包之间通过公开服务、平台事件或工作流协作，禁止互相导入仓储、数据库模型或内部服务。
+
+依赖方向检查覆盖 Python 静态导入，并对受保护的 Core 业务目录和能力包目录实施严格的动态导入原语禁用策略：禁止导入 `importlib` 及其子模块（包括别名和 `from importlib ...`），禁止直接引用或调用 `__import__`，也禁止通过 `builtins.__import__`（包括 `builtins` 导入别名）访问。门禁只做浅层 AST 语法检查，不模拟 Python 执行、赋值传播、容器保存或调用顺序；普通对象上的 `loader.import_module` 不会仅凭方法名被判定为动态导入原语。确需动态装载的插件只能由 bootstrap 或显式能力注册表层负责，禁止下沉到受保护业务目录。该检查只用于在评审和 CI 中阻止模块边界绕过，不是 Python 安全沙箱，也不替代进程隔离、最小权限或运行时安全控制。
 
 ## 13. 前端协议边界
 
