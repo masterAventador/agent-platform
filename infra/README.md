@@ -140,13 +140,15 @@ bash infra/platform/mvp-profile.sh stop
 
 该入口统一编排 PostgreSQL、Redis、MinIO、LiteLLM、本地 OpenAI-compatible Stub、API、Dispatcher、Worker、Sandbox Controller、Sandbox Janitor 和 Web 客户端。它只使用固定的 LiteLLM 官方镜像及仓库现有 Stub overlay，不读取供应商密钥、不发起付费模型调用，也不会启动或管理 RAGFlow；知识链路留到 C07 的独立 Knowledge Profile。
 
-首次启动会在 Git 忽略的 `.local/mvp-profile/agent-platform-mvp/` 下生成权限为本机用户私有的随机开发凭据。重复 `start`、`health` 和 `stop` 都是幂等操作；普通 `stop` 保留开发数据卷，若需要同时删除本 Profile 的卷，可显式执行：
+首次启动会在 Git 忽略的 `.local/mvp-profile/agent-platform-mvp/` 下生成权限为本机用户私有的随机开发凭据。运行目录必须位于当前仓库 `.local/` 下、由当前用户持有且权限为 `0700`，四个环境文件必须是权限为 `0600` 的普通文件；路径中的符号链接、宽松权限、未知/重复 dotenv 键、非字面值、非法或重复端口以及非预期 Docker socket/网络配置都会在调用 Docker 前被拒绝。脚本不会 `source` 环境文件。同一 Profile 的所有操作由 `.local/mvp-profile-locks/` 下的原子锁串行化。
+
+每个工作树使用由仓库绝对路径派生的 backend/frontend 镜像标签，启动前都会构建当前工作树内容，不复用全局 `:local` 标签。backend runtime 显式安装 PostgreSQL 客户端运行库，确保生产 Worker 镜像能够加载锁定的 psycopg 实现。重复 `start`、`health` 和 `stop` 都是幂等操作；普通 `stop` 保留开发数据卷，若需要同时删除本 Profile 的卷，可显式执行：
 
 ```bash
 MVP_PROFILE_REMOVE_VOLUMES=true bash infra/platform/mvp-profile.sh stop
 ```
 
-启动阶段任何配置、容器或健康检查失败时，脚本会清理由本次全新启动创建的专属资源并返回非零状态，不会触碰其他 Compose project。真实隔离验收使用随机项目名和随机回环端口，覆盖重复启停、故障健康检查、RAGFlow 排除以及容器、网络、卷无残留：
+启动阶段任何配置、容器或健康检查失败时，脚本会返回非零状态并报告清理是否完整：既有 Profile 数据卷始终保留，只删除本次失败启动新建的卷，运行环境文件也始终保留用于恢复和诊断；清理失败不会被静默吞掉。真实隔离验收使用随机项目名、一次分配的七个唯一回环端口和独立运行目录，覆盖 `status`、重复启停、保留卷后的失败重启与恢复、故障清理、同 Profile 并发拒绝、工作树镜像隔离、RAGFlow 排除以及最终容器/网络/卷无残留：
 
 ```bash
 bash infra/platform/test-mvp-profile.sh

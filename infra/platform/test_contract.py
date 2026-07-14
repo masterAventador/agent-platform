@@ -16,6 +16,7 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertGreaterEqual(len(re.findall(r"(?m)^FROM ", dockerfile)), 2)
         self.assertIn("uv.lock", dockerfile)
         self.assertRegex(dockerfile, r"uv sync[^\n]*--frozen[^\n]*--no-dev")
+        self.assertIn("libpq5", dockerfile)
         self.assertRegex(dockerfile, r"(?m)^USER (?!0$|root$).+$")
         self.assertNotRegex(dockerfile, r"(?im)^(?:ARG|ENV)\s+.*(?:SECRET|PASSWORD|API_KEY)")
 
@@ -145,8 +146,29 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertNotIn("infra/ragflow", script)
         self.assertNotIn("TokenHub", script)
         self.assertNotIn("LITELLM_UPSTREAM_API_KEY", script)
+        self.assertNotRegex(script, r'(?m)^\s*source\s+"\$\{[^}]*ENV_FILE\}"')
+        self.assertIn("load_dotenv_file", script)
+        self.assertIn("validate_runtime_directory", script)
+        self.assertIn("acquire_profile_lock", script)
+        self.assertIn("release_profile_lock", script)
+        self.assertIn("cleanup_failed_start", script)
+        self.assertIn("PREEXISTING_VOLUME_NAMES", script)
+        self.assertNotIn("stop_profile >/dev/null 2>&1 || true", script)
+        self.assertNotIn("|| true", script)
         for mode in ("start", "stop", "health", "status"):
             self.assertRegex(script, rf"(?m)^  {mode}\)")
+
+    def test_mvp_profile_uses_worktree_specific_images(self) -> None:
+        script = self.read("infra/platform/mvp-profile.sh")
+        compose = self.read("infra/compose/platform.yml")
+        self.assertIn("WORKTREE_IMAGE_ID", script)
+        self.assertIn("PLATFORM_BACKEND_IMAGE", script)
+        self.assertIn("PLATFORM_FRONTEND_IMAGE", script)
+        self.assertIn("app_compose build", script)
+        self.assertIn("--no-build", script)
+        self.assertIn("image: ${PLATFORM_BACKEND_IMAGE", compose)
+        self.assertEqual(compose.count("image: ${PLATFORM_BACKEND_IMAGE"), 6)
+        self.assertIn("image: ${PLATFORM_FRONTEND_IMAGE", compose)
 
     def test_mvp_profile_supports_isolated_compose_projects_and_networks(self) -> None:
         script = self.read("infra/platform/mvp-profile.sh")
@@ -175,6 +197,17 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("sandbox-controller", acceptance)
         self.assertIn("sandbox-janitor", acceptance)
         self.assertIn("ragflow", acceptance.lower())
+        self.assertIn("status", acceptance)
+        self.assertIn("assert_ports_are_unique", acceptance)
+        self.assertIn("assert_profile_volumes_exist", acceptance)
+        self.assertIn("assert_profile_volumes_absent", acceptance)
+        self.assertIn("concurrent start", acceptance)
+        self.assertIn("failed restart", acceptance)
+        self.assertRegex(
+            acceptance,
+            r'elif \[\[ "\$\{cleanup_exit\}" == "0" \]\]; then\s+rm -rf',
+        )
+        self.assertNotIn('source "${RUNTIME_DIR}/litellm.env"', acceptance)
 
 
 if __name__ == "__main__":

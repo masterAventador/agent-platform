@@ -22,7 +22,10 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN groupadd --gid 10001 agent-platform \
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 agent-platform \
     && useradd --uid 10001 --gid agent-platform --no-create-home --shell /usr/sbin/nologin agent-platform
 
 WORKDIR /app

@@ -392,7 +392,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
 | 无付费模型默认回归 | LiteLLM 配置契约 16 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目 |
 | TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
-| C03 MVP Profile 基础设施验收 | 隔离随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、重复启动、故障健康检查、恢复、重复停止及容器/网络/卷清理通过；RAGFlow 未启动 |
+| C03 MVP Profile 基础设施验收 | 隔离唯一随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、状态查询、重复启动、故障健康检查、保留卷停止、失败重启清理与恢复、同 Profile 并发拒绝、工作树镜像隔离及最终容器/网络/卷清理通过；dotenv 不执行、运行目录/权限/端口/网络配置校验通过；RAGFlow 未启动 |
 | 完整本机栈 E2E | MVP Profile 启停纵切已通过；注册、登录、员工发布、任务执行、UI 终态和 Tauri 核心流程仍待 C03 后续纵切 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
@@ -404,7 +404,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | --- | --- | --- | --- | --- | --- |
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
-| C03 | 进行中 | 2026-07-14 | — | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；后端相关 Pytest 65 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。真实 TokenHub、业务全链路、工作台和 Tauri 核心流程仍未完成，不得标记 C03 完成 |
+| C03 | 进行中 | 2026-07-14 | — | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；后端相关 Pytest 65 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按新旧卷边界清理、当前工作树专属镜像与真实恢复验收。真实 TokenHub、业务全链路、工作台和 Tauri 核心流程仍未完成，不得标记 C03 完成 |
 | C04-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。
