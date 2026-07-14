@@ -10,6 +10,8 @@ export const workspacePermissions = {
   skillsManage: 'skills.manage',
   toolsManage: 'tools.manage',
   operationsManage: 'operations.manage',
+  modelsManage: 'models.manage',
+  modelsUsageRead: 'models.usage.read',
 } as const
 
 export type WorkspacePermission = typeof workspacePermissions[keyof typeof workspacePermissions]
@@ -23,6 +25,8 @@ export interface WorkspaceCapabilities {
   canManageSkills: boolean
   canManageTools: boolean
   canManageOperations: boolean
+  canManageModels: boolean
+  canReadModelsUsage: boolean
 }
 
 export function hasWorkspacePermission(
@@ -44,5 +48,7 @@ export function getWorkspaceCapabilities(workspace: Workspace): WorkspaceCapabil
     canManageSkills: granted.has(workspacePermissions.skillsManage),
     canManageTools: granted.has(workspacePermissions.toolsManage),
     canManageOperations: granted.has(workspacePermissions.operationsManage),
+    canManageModels: granted.has(workspacePermissions.modelsManage),
+    canReadModelsUsage: granted.has(workspacePermissions.modelsUsageRead),
   }
 }

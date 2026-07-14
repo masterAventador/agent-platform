@@ -22,7 +22,8 @@ const adminWorkspace: Workspace = {
   slug: 'workspace-admin',
   role: 'admin',
   permissions: Object.values(workspacePermissions).filter(
-    (permission) => permission !== workspacePermissions.workspaceManage,
+    (permission) => permission !== workspacePermissions.workspaceManage
+      && permission !== workspacePermissions.modelsManage,
   ),
 }
 const memberWorkspace: Workspace = {

@@ -10,6 +10,10 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeVersionRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    ModelGatewayProvisioningCommandRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
     RunEventRecord,
@@ -48,6 +52,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ToolRecord,
     SandboxLeaseRecord,
     ToolAuditRecord,
+    TenantModelGatewayPolicyRecord,
+    ModelGatewayProvisioningCommandRecord,
 )
 
 

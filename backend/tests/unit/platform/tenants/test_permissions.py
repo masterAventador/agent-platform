@@ -23,6 +23,8 @@ from agent_platform.platform.tenants.permissions import (
                     TenantPermission.OPERATIONS_MANAGE,
                     TenantPermission.RUNS_EXECUTE,
                     TenantPermission.RUNS_MANAGE,
+                    TenantPermission.MODELS_MANAGE,
+                    TenantPermission.MODELS_USAGE_READ,
                 }
             ),
         ),
@@ -37,6 +39,7 @@ from agent_platform.platform.tenants.permissions import (
                     TenantPermission.OPERATIONS_MANAGE,
                     TenantPermission.RUNS_EXECUTE,
                     TenantPermission.RUNS_MANAGE,
+                    TenantPermission.MODELS_USAGE_READ,
                 }
             ),
         ),
@@ -65,4 +68,6 @@ def test_permission_codes_are_stable_api_values() -> None:
         "operations.manage",
         "runs.execute",
         "runs.manage",
+        "models.manage",
+        "models.usage.read",
     }

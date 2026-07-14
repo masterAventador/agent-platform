@@ -12,6 +12,8 @@ class TenantPermission(StrEnum):
     OPERATIONS_MANAGE = "operations.manage"
     RUNS_EXECUTE = "runs.execute"
     RUNS_MANAGE = "runs.manage"
+    MODELS_MANAGE = "models.manage"
+    MODELS_USAGE_READ = "models.usage.read"
 
 
 _MANAGER_PERMISSIONS = frozenset(
@@ -23,10 +25,12 @@ _MANAGER_PERMISSIONS = frozenset(
         TenantPermission.OPERATIONS_MANAGE,
         TenantPermission.RUNS_EXECUTE,
         TenantPermission.RUNS_MANAGE,
+        TenantPermission.MODELS_USAGE_READ,
     }
 )
 _ROLE_PERMISSIONS: dict[TenantRole, frozenset[TenantPermission]] = {
-    TenantRole.OWNER: _MANAGER_PERMISSIONS | {TenantPermission.WORKSPACE_MANAGE},
+    TenantRole.OWNER: _MANAGER_PERMISSIONS
+    | {TenantPermission.WORKSPACE_MANAGE, TenantPermission.MODELS_MANAGE},
     TenantRole.ADMIN: _MANAGER_PERMISSIONS,
     TenantRole.MEMBER: frozenset({TenantPermission.RUNS_EXECUTE}),
 }

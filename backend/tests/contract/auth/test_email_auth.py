@@ -65,6 +65,8 @@ async def test_register_login_restore_session_and_logout(auth_client: AsyncClien
     assert register_response.json()["workspaces"][0]["permissions"] == [
         "employees.manage",
         "knowledge.manage",
+        "models.manage",
+        "models.usage.read",
         "operations.manage",
         "runs.execute",
         "runs.manage",

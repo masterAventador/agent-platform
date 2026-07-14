@@ -32,6 +32,8 @@ describe('workspace capabilities', () => {
       workspacePermissions.skillsManage,
       workspacePermissions.toolsManage,
       workspacePermissions.operationsManage,
+      workspacePermissions.modelsManage,
+      workspacePermissions.modelsUsageRead,
     ]))
 
     expect(capabilities).toEqual({
@@ -43,6 +45,8 @@ describe('workspace capabilities', () => {
       canManageSkills: true,
       canManageTools: true,
       canManageOperations: true,
+      canManageModels: true,
+      canReadModelsUsage: true,
     })
   })
 
@@ -56,6 +60,8 @@ describe('workspace capabilities', () => {
       canManageSkills: false,
       canManageTools: false,
       canManageOperations: false,
+      canManageModels: false,
+      canReadModelsUsage: false,
     })
     expect(getWorkspaceCapabilities(workspace('admin', [
       workspacePermissions.operationsManage,
@@ -75,6 +81,8 @@ describe('workspace capabilities', () => {
     expect(capabilities.canExecuteRuns).toBe(true)
     expect(capabilities.canManageEmployees).toBe(false)
     expect(capabilities.canManageOperations).toBe(false)
+    expect(capabilities.canManageModels).toBe(false)
+    expect(capabilities.canReadModelsUsage).toBe(false)
   })
 
   it('fails closed instead of crashing when an old API response omits permissions', () => {
@@ -94,6 +102,8 @@ describe('workspace capabilities', () => {
       canManageSkills: false,
       canManageTools: false,
       canManageOperations: false,
+      canManageModels: false,
+      canReadModelsUsage: false,
     })
     expect(hasWorkspacePermission(
       legacyWorkspace,

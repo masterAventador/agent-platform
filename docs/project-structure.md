@@ -91,6 +91,7 @@ backend/
 │       │   ├── approvals/         # 人工审批
 │       │   ├── artifacts/         # 文件和任务产物索引
 │       │   ├── skills/            # Skill 注册、版本、绑定和发布
+│       │   ├── model_gateway/     # 租户模型网关 desired policy 与端口
 │       │   └── audit/             # 企业审计
 │       ├── capabilities/          # 可插拔行业能力，只依赖 Core 公开接口
 │       │   ├── registry.py        # 模块清单、装配和可用性检查
@@ -162,6 +163,7 @@ capabilities ──────┤
 - `infrastructure/` 实现数据库、缓存、存储、队列和密钥等技术接口，不能承载业务决策；
 - API 和 Worker 共用同一个 Python 包与数据库模型，不拆成两套仓库或复制两套领域模型；
 - 数字员工只保存 provider-neutral 模型 alias；供应商模型和密钥只进入独立 LiteLLM 配置，Worker 通过 `infrastructure/llm/` 访问网关。
+- 租户模型网关策略位于 `platform/model_gateway/`，SQLAlchemy policy/outbox 位于 `infrastructure/database/`；后续独立 Controller 通过公开接口消费 outbox 并对账 LiteLLM，本阶段不在 API 进程内伪装 Controller 行为。
 
 ### 3.2 后端进程
 

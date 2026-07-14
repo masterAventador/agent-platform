@@ -6,11 +6,24 @@ const demoWorkspaceName = 'Agent Platform 演示工作区'
 const managerPermissions = [
   'employees.manage',
   'knowledge.manage',
+  'models.usage.read',
   'operations.manage',
   'runs.execute',
   'runs.manage',
   'skills.manage',
   'tools.manage',
+]
+const ownerPermissions = [
+  'employees.manage',
+  'knowledge.manage',
+  'models.manage',
+  'models.usage.read',
+  'operations.manage',
+  'runs.execute',
+  'runs.manage',
+  'skills.manage',
+  'tools.manage',
+  'workspace.manage',
 ]
 
 interface LoginWorkspace {
@@ -90,7 +103,7 @@ test('owner 权限响应、管理入口与知识库删除闭环一致', async ({
   const workspace = await login(page, 'demo@example.com')
 
   expect(workspace).toMatchObject({ name: demoWorkspaceName, role: 'owner' })
-  expect(workspace.permissions).toEqual([...managerPermissions, 'workspace.manage'])
+  expect(workspace.permissions).toEqual(ownerPermissions)
   await expectManagerSurfaces(page)
 
   await page.goto('/knowledge-bases')
@@ -106,11 +119,13 @@ test('owner 权限响应、管理入口与知识库删除闭环一致', async ({
   await expect(page).toHaveURL(/\/knowledge-bases$/)
 })
 
-test('admin 获得业务管理权限但没有 workspace.manage', async ({ page }) => {
+test('admin 获得业务管理和模型用量读取权限但没有 owner-only 权限', async ({ page }) => {
   const workspace = await login(page, 'demo.admin@example.com')
 
   expect(workspace).toMatchObject({ name: demoWorkspaceName, role: 'admin' })
   expect(workspace.permissions).toEqual(managerPermissions)
+  expect(workspace.permissions).not.toContain('models.manage')
+  expect(workspace.permissions).not.toContain('workspace.manage')
   await expectManagerSurfaces(page)
 
   await page.goto('/employees')

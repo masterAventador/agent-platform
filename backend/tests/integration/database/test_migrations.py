@@ -69,6 +69,47 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "SELECT name, sql FROM sqlite_master "
             "WHERE type = 'index' AND tbl_name = 'tool_audit_events'"
         ).fetchall()
+        policy_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(tenant_model_gateway_policies)"
+            ).fetchall()
+        }
+        provisioning_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+        policy_foreign_keys = {
+            (row[2], row[3], row[4], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(tenant_model_gateway_policies)"
+            ).fetchall()
+        }
+        provisioning_foreign_keys = {
+            (row[2], row[3], row[4], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+        provisioning_unique_index = next(
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(model_gateway_provisioning_commands)"
+            ).fetchall()
+            if row[2] == 1
+        )
+        provisioning_unique_columns = tuple(
+            row[2]
+            for row in connection.execute(
+                f"PRAGMA index_info('{provisioning_unique_index}')"
+            ).fetchall()
+        )
+        provisioning_table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'model_gateway_provisioning_commands'"
+        ).fetchone()[0]
     assert columns == {"id", "name", "slug", "created_at"}
     assert user_columns == {
         "id",
@@ -132,6 +173,38 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "CREATE INDEX ix_tool_audit_events_invocation_id ON tool_audit_events "
         "(invocation_id) WHERE invocation_id IS NOT NULL",
     ) in tool_audit_indexes
+    assert {
+        "tenant_id",
+        "enabled",
+        "allowed_aliases",
+        "budget_microusd",
+        "budget_period",
+        "rpm_limit",
+        "tpm_limit",
+        "max_parallel_requests",
+        "revision",
+        "status",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    } == policy_columns
+    assert {
+        "id",
+        "tenant_id",
+        "desired_revision",
+        "action",
+        "status",
+        "attempts",
+        "last_error_code",
+        "created_at",
+        "processed_at",
+    } == provisioning_columns
+    assert ("tenants", "tenant_id", "id", "CASCADE") in policy_foreign_keys
+    assert ("users", "updated_by", "id", "RESTRICT") in policy_foreign_keys
+    assert ("tenants", "tenant_id", "id", "CASCADE") in provisioning_foreign_keys
+    assert provisioning_unique_columns == ("tenant_id", "desired_revision", "action")
+    assert "action = 'reconcile'" in provisioning_table_sql
+    assert "status IN ('pending', 'processing', 'completed', 'failed')" in provisioning_table_sql
 
     command.downgrade(config, "base")
 
@@ -143,7 +216,8 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "'employees', 'employee_versions'"
             ", 'runs', 'run_events', 'run_commands', 'knowledge_bases', "
             "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
-            "'tool_audit_events'"
+            "'tool_audit_events', 'tenant_model_gateway_policies', "
+            "'model_gateway_provisioning_commands'"
             ")"
         ).fetchall()
     assert platform_tables == []
@@ -193,7 +267,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260714_0016"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260714_0017"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

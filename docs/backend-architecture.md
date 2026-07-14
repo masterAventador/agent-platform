@@ -232,6 +232,14 @@ get_artifacts()
 - LiteLLM 作为独立基础设施运行，平台不得依赖其内部 Python 类型、数据库模型或私有 API；
 - 测试可以在宿主侧注入假的 `BaseChatModel`，但不得把测试模型或假供应商配置写入生产领域契约。
 
+租户模型网关采用 desired-state + controller 边界：
+
+- 平台 API 只维护租户期望策略，包括启用状态、允许使用的 provider-neutral alias、月度微美元预算和 RPM/TPM/并发限制；策略不得保存供应商、真实模型、Base URL、密钥或 `secret_ref`；
+- 每次创建或更新策略都使用乐观 revision，并在同一个 PostgreSQL 事务中写入唯一的 provisioning outbox 命令；只有策略与命令同时持久化才算接受了新的 desired revision；
+- 独立 Controller 后续消费 outbox，把 desired-state 对账到 LiteLLM 的公开管理接口，再将策略状态推进为 `active`、`disabled` 或 `error`；Controller 不允许通过 LiteLLM 私有 API、内部数据库或源码修改完成配置；
+- 当前第一纵切只实现 desired policy、权限、API 和 outbox 持久化，尚未实现 Controller、LiteLLM 对账、实际用量或凭据下发，因此 API 不返回伪造的用量、成本或凭据状态。
+- `budget_microusd` 在 PostgreSQL 中使用 BigInteger、在 HTTP PUT 与响应中使用无前导零的十进制字符串；但领域与 LiteLLM Admin Adapter 统一把上限收紧为 `2^53-1` 微美元，因为固定 LiteLLM v1.86.2 的 `max_budget` 最终按 float 处理，signed-int64 全范围不能可靠往返。该预算只用于模型网关配额 guardrail，不是财务账本；正式计费、结算和对账必须使用独立的定点金额数据源。
+
 ## 5. 统一 API 与事件
 
 ### 5.1 核心 API
@@ -465,6 +473,8 @@ OpenTelemetry 不能替代审计日志。审计必须记录：
 | `operations.manage` | 是 | 是 | 否 |
 | `runs.execute` | 是 | 是 | 是 |
 | `runs.manage` | 是 | 是 | 否 |
+| `models.manage` | 是 | 否 | 否 |
+| `models.usage.read` | 是 | 是 | 否 |
 
 租户成员身份仅提供受资源规则约束的读取能力，不代表可以读取租户内全部数据：
 
@@ -474,6 +484,7 @@ OpenTelemetry 不能替代审计日志。审计必须记录：
 - MCP Server 与 Tool 的读取和修改都需要 `tools.manage`，避免泄漏企业工具拓扑与连接信息；
 - 知识库创建、上传和删除需要 `knowledge.manage`，检索和读取可由租户成员使用；
 - 死信查看和重放需要 `operations.manage`。
+- 模型网关期望策略的读取需要 `models.usage.read`，修改需要仅 Owner 持有的 `models.manage`。
 
 所有租户接口先校验成员身份，再校验稳定权限码，并在查询或资源装载阶段实施行级隔离。当前阶段只定义以上三种角色及其授权行为，不在此扩展成员管理 API。
 
