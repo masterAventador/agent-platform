@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROFILE_NAME="agent-platform-mvp-test-$$"
+TEST_RUNTIME_ROOT="${ROOT_DIR}/.local/mvp-profile-tests"
+RUNTIME_DIR="${TEST_RUNTIME_ROOT}/${PROFILE_NAME}"
+MVP_SCRIPT="${ROOT_DIR}/infra/platform/mvp-profile.sh"
+PORT_HOLDER_NAME="${PROFILE_NAME}-port-holder"
+
+allocate_ports() {
+  python3 - <<'PY'
+import socket
+import random
+
+listeners = []
+try:
+    candidates = list(range(20000, 40000))
+    random.SystemRandom().shuffle(candidates)
+    for candidate in candidates:
+        listener = socket.socket()
+        try:
+            listener.bind(("127.0.0.1", candidate))
+        except OSError:
+            listener.close()
+            continue
+        listeners.append(listener)
+        if len(listeners) == 7:
+            break
+    if len(listeners) != 7:
+        raise SystemExit("could not reserve seven unique MVP test ports")
+    print(" ".join(str(listener.getsockname()[1]) for listener in listeners))
+finally:
+    for listener in listeners:
+        listener.close()
+PY
+}
+
+assert_ports_are_unique() {
+  local unique_count
+  unique_count="$(printf '%s\n' \
+    "${POSTGRES_PORT}" "${REDIS_PORT}" "${MINIO_API_PORT}" "${MINIO_CONSOLE_PORT}" \
+    "${LITELLM_PORT}" "${PLATFORM_API_PORT}" "${PLATFORM_WEB_PORT}" | sort -u | wc -l | tr -d ' ')"
+  if [[ "${unique_count}" != "7" ]]; then
+    printf 'MVP acceptance ports must be unique\n' >&2
+    return 1
+  fi
+}
+
+read_env_value() {
+  local path="$1"
+  local expected_key="$2"
+  python3 - "${path}" "${expected_key}" <<'PY'
+import re
+import sys
+
+path, expected_key = sys.argv[1:]
+values = {}
+with open(path, encoding="utf-8") as env_file:
+    for raw_line in env_file:
+        line = raw_line.rstrip("\n")
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=([A-Za-z0-9_./:@+-]+)", line)
+        if match is None or match.group(1) in values:
+            raise SystemExit(f"invalid generated dotenv file: {path}")
+        values[match.group(1)] = match.group(2)
+if expected_key not in values:
+    raise SystemExit(f"missing {expected_key} in {path}")
+print(values[expected_key])
+PY
+}
+
+profile_volumes() {
+  local project
+  for project in "${PROFILE_NAME}-core" "${PROFILE_NAME}-litellm" "${PROFILE_NAME}-app"; do
+    docker volume ls --quiet --filter "label=com.docker.compose.project=${project}"
+  done | sort -u
+}
+
+assert_profile_volumes_exist() {
+  if ! profile_volumes | rg --quiet '.'; then
+    printf 'MVP test expected retained profile volumes\n' >&2
+    return 1
+  fi
+}
+
+assert_profile_volumes_absent() {
+  if profile_volumes | rg --quiet '.'; then
+    printf 'MVP test left profile volumes behind\n' >&2
+    return 1
+  fi
+}
+
+assert_profile_containers_absent() {
+  local project
+  for project in "${PROFILE_NAME}-core" "${PROFILE_NAME}-litellm" "${PROFILE_NAME}-app"; do
+    if docker ps --all --quiet --filter "label=com.docker.compose.project=${project}" | rg --quiet '.'; then
+      printf 'MVP test left containers behind for project: %s\n' "${project}" >&2
+      return 1
+    fi
+  done
+}
+
+assert_profile_runtime_is_safe_to_remove() {
+  case "${RUNTIME_DIR}" in
+    "${ROOT_DIR}"/.local/mvp-profile-tests/agent-platform-mvp-test-*) return 0 ;;
+    *)
+      printf 'refusing to remove unsafe test runtime directory: %s\n' "${RUNTIME_DIR}" >&2
+      return 1
+      ;;
+  esac
+}
+
+export MVP_PROFILE_NAME="${PROFILE_NAME}"
+export MVP_PROFILE_RUNTIME_DIR="${RUNTIME_DIR}"
+export MVP_PROFILE_REMOVE_VOLUMES=false
+read -r POSTGRES_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT \
+  LITELLM_PORT PLATFORM_API_PORT PLATFORM_WEB_PORT < <(allocate_ports)
+export POSTGRES_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT
+export LITELLM_PORT PLATFORM_API_PORT PLATFORM_WEB_PORT
+assert_ports_are_unique
+
+cleanup() {
+  local original_exit=$?
+  local cleanup_exit=0
+  trap - EXIT
+  if docker ps --all --quiet --filter "name=^/${PORT_HOLDER_NAME}$" | rg --quiet '.'; then
+    if ! docker rm --force "${PORT_HOLDER_NAME}" >/dev/null; then
+      printf 'MVP acceptance cleanup failed to remove port holder: %s\n' "${PORT_HOLDER_NAME}" >&2
+      cleanup_exit=1
+    fi
+  fi
+  if [[ -d "${RUNTIME_DIR}" ]]; then
+    if ! MVP_PROFILE_REMOVE_VOLUMES=true bash "${MVP_SCRIPT}" stop; then
+      printf 'MVP acceptance cleanup failed; preserving runtime env: %s\n' "${RUNTIME_DIR}" >&2
+      cleanup_exit=1
+    elif ! assert_profile_volumes_absent; then
+      printf 'MVP acceptance cleanup left volumes; preserving runtime env: %s\n' "${RUNTIME_DIR}" >&2
+      cleanup_exit=1
+    elif ! assert_profile_runtime_is_safe_to_remove; then
+      cleanup_exit=1
+    elif [[ "${cleanup_exit}" == "0" ]]; then
+      rm -rf "${RUNTIME_DIR}"
+      printf 'MVP acceptance cleanup completed: %s\n' "${PROFILE_NAME}"
+    fi
+  fi
+  if [[ "${original_exit}" -ne 0 ]]; then
+    exit "${original_exit}"
+  fi
+  exit "${cleanup_exit}"
+}
+trap cleanup EXIT
+
+mkdir -p "${TEST_RUNTIME_ROOT}"
+chmod 700 "${TEST_RUNTIME_ROOT}"
+UNSAFE_TARGET="${TEST_RUNTIME_ROOT}/${PROFILE_NAME}-unsafe-target"
+UNSAFE_LINK="${TEST_RUNTIME_ROOT}/${PROFILE_NAME}-symlink"
+mkdir -p "${UNSAFE_TARGET}"
+chmod 700 "${UNSAFE_TARGET}"
+ln -s "${UNSAFE_TARGET}" "${UNSAFE_LINK}"
+if MVP_PROFILE_RUNTIME_DIR="${UNSAFE_LINK}" bash "${MVP_SCRIPT}" status >/dev/null 2>&1; then
+  printf 'MVP profile must reject a symlinked runtime directory\n' >&2
+  exit 1
+fi
+rm "${UNSAFE_LINK}"
+rmdir "${UNSAFE_TARGET}"
+
+bash "${MVP_SCRIPT}" start
+bash "${MVP_SCRIPT}" status
+bash "${MVP_SCRIPT}" start
+bash "${MVP_SCRIPT}" health
+
+LITELLM_WORKER_API_KEY="$(read_env_value "${RUNTIME_DIR}/litellm.env" LITELLM_WORKER_API_KEY)"
+AGENT_PLATFORM_LLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
+  AGENT_PLATFORM_LLM_GATEWAY_API_KEY="${LITELLM_WORKER_API_KEY}" \
+  uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
+    python "${ROOT_DIR}/infra/litellm/worker_gateway_probe.py" "chat"
+
+docker compose -p "${PROFILE_NAME}-litellm" \
+  --env-file "${RUNTIME_DIR}/litellm.env" \
+  -f "${ROOT_DIR}/infra/compose/litellm.yml" \
+  -f "${ROOT_DIR}/infra/litellm/compose.stub.yml" \
+  ps --status running --services | rg --quiet '^openai-stub$'
+
+docker compose -p "${PROFILE_NAME}-app" \
+  --env-file "${RUNTIME_DIR}/platform.env" \
+  -f "${ROOT_DIR}/infra/compose/platform.yml" \
+  --profile worker ps --status running --services | rg --quiet '^sandbox-controller$'
+docker compose -p "${PROFILE_NAME}-app" \
+  --env-file "${RUNTIME_DIR}/platform.env" \
+  -f "${ROOT_DIR}/infra/compose/platform.yml" \
+  --profile worker ps --status running --services | rg --quiet '^sandbox-janitor$'
+
+if docker ps --filter "label=com.docker.compose.project=${PROFILE_NAME}-core" \
+  --filter "label=com.docker.compose.service=ragflow" --quiet | rg --quiet '.'; then
+  printf 'RAGFlow must not be part of the MVP profile\n' >&2
+  exit 1
+fi
+
+docker compose -p "${PROFILE_NAME}-app" \
+  --env-file "${RUNTIME_DIR}/platform.env" \
+  -f "${ROOT_DIR}/infra/compose/platform.yml" \
+  --profile worker stop api
+if bash "${MVP_SCRIPT}" health >/dev/null 2>&1; then
+  printf 'MVP health must fail when API is stopped\n' >&2
+  exit 1
+fi
+bash "${MVP_SCRIPT}" start
+
+bash "${MVP_SCRIPT}" stop
+bash "${MVP_SCRIPT}" status
+assert_profile_containers_absent
+assert_profile_volumes_exist
+
+CORE_ENV_BACKUP="${RUNTIME_DIR}/core.env.backup"
+cp -p "${RUNTIME_DIR}/core.env" "${CORE_ENV_BACKUP}"
+MALICIOUS_MARKER="${RUNTIME_DIR}/dotenv-was-executed"
+printf 'UNEXPECTED=$(%s)\n' "touch ${MALICIOUS_MARKER}" >>"${RUNTIME_DIR}/core.env"
+if bash "${MVP_SCRIPT}" start >/dev/null 2>&1; then
+  printf 'MVP profile must reject unexpected dotenv content\n' >&2
+  exit 1
+fi
+if [[ -e "${MALICIOUS_MARKER}" ]]; then
+  printf 'MVP profile executed dotenv content\n' >&2
+  exit 1
+fi
+mv "${CORE_ENV_BACKUP}" "${RUNTIME_DIR}/core.env"
+chmod 600 "${RUNTIME_DIR}/core.env"
+assert_profile_volumes_exist
+
+FAILURE_LOG="${RUNTIME_DIR}/failed-restart.log"
+PLATFORM_BACKEND_IMAGE="agent-platform-backend:mvp-$(python3 -c \
+  'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "${ROOT_DIR}")"
+docker run --detach --rm --name "${PORT_HOLDER_NAME}" \
+  --publish "127.0.0.1:${POSTGRES_PORT}:8000" \
+  "${PLATFORM_BACKEND_IMAGE}" python -m http.server 8000 >/dev/null
+if bash "${MVP_SCRIPT}" start >"${FAILURE_LOG}" 2>&1; then
+  printf 'MVP failed restart must return non-zero when a port is occupied\n' >&2
+  exit 1
+fi
+docker rm --force "${PORT_HOLDER_NAME}" >/dev/null
+if ! rg --quiet 'failed-start cleanup completed' "${FAILURE_LOG}"; then
+  printf 'MVP failed restart did not report cleanup completion\n' >&2
+  exit 1
+fi
+assert_profile_containers_absent
+assert_profile_volumes_exist
+if docker network inspect "${PROFILE_NAME}-llm" >/dev/null 2>&1; then
+  printf 'MVP failed restart left its LiteLLM network behind\n' >&2
+  exit 1
+fi
+
+bash "${MVP_SCRIPT}" start
+
+# concurrent start: the first process holds the same-profile lock while rebuilding.
+FIRST_START_LOG="${RUNTIME_DIR}/concurrent-first.log"
+SECOND_START_LOG="${RUNTIME_DIR}/concurrent-second.log"
+bash "${MVP_SCRIPT}" start >"${FIRST_START_LOG}" 2>&1 &
+FIRST_START_PID=$!
+for _ in $(seq 1 100); do
+  if [[ -d "${ROOT_DIR}/.local/mvp-profile-locks/${PROFILE_NAME}.lock" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if bash "${MVP_SCRIPT}" start >"${SECOND_START_LOG}" 2>&1; then
+  printf 'concurrent start must be rejected for the same MVP profile\n' >&2
+  wait "${FIRST_START_PID}"
+  exit 1
+fi
+if ! rg --quiet 'operation already in progress' "${SECOND_START_LOG}"; then
+  printf 'concurrent start rejection did not report the profile lock\n' >&2
+  wait "${FIRST_START_PID}"
+  exit 1
+fi
+wait "${FIRST_START_PID}"
+bash "${MVP_SCRIPT}" health
+
+API_CONTAINER_ID="$(docker compose -p "${PROFILE_NAME}-app" \
+  --env-file "${RUNTIME_DIR}/platform.env" -f "${ROOT_DIR}/infra/compose/platform.yml" \
+  --profile worker ps --quiet api)"
+FRONTEND_CONTAINER_ID="$(docker compose -p "${PROFILE_NAME}-app" \
+  --env-file "${RUNTIME_DIR}/platform.env" -f "${ROOT_DIR}/infra/compose/platform.yml" \
+  --profile worker ps --quiet frontend)"
+API_IMAGE="$(docker inspect --format '{{.Config.Image}}' "${API_CONTAINER_ID}")"
+FRONTEND_IMAGE="$(docker inspect --format '{{.Config.Image}}' "${FRONTEND_CONTAINER_ID}")"
+if [[ ! "${API_IMAGE}" =~ ^agent-platform-backend:mvp-[a-f0-9]{12}$ || \
+  ! "${FRONTEND_IMAGE}" =~ ^agent-platform-frontend:mvp-[a-f0-9]{12}$ ]]; then
+  printf 'MVP profile did not use worktree-specific images: %s %s\n' "${API_IMAGE}" "${FRONTEND_IMAGE}" >&2
+  exit 1
+fi
+
+bash "${MVP_SCRIPT}" stop
+assert_profile_containers_absent
+assert_profile_volumes_exist
+if docker network inspect "${PROFILE_NAME}-llm" >/dev/null 2>&1; then
+  printf 'MVP test left its LiteLLM network behind\n' >&2
+  exit 1
+fi
+printf 'MVP profile status, retained volumes, failed restart cleanup, concurrent start and image isolation passed\n'

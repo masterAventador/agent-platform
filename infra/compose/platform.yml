@@ -22,7 +22,7 @@ x-host-gateway: &host-gateway
 services:
   migrate:
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command: ["alembic", "upgrade", "head"]
     environment: *backend-environment
     extra_hosts: *host-gateway
@@ -31,7 +31,7 @@ services:
 
   api:
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     environment:
       <<: *backend-environment
       AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-api
@@ -58,7 +58,7 @@ services:
 
   dispatcher:
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command: ["python", "-m", "agent_platform.workers.dispatcher_main"]
     environment:
       <<: *backend-environment
@@ -82,7 +82,7 @@ services:
   worker:
     profiles: ["worker"]
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command: ["python", "-m", "agent_platform.workers.main"]
     environment:
       <<: *backend-environment
@@ -117,7 +117,7 @@ services:
   sandbox-janitor:
     profiles: ["worker"]
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command: ["python", "-m", "agent_platform.workers.sandbox_janitor"]
     environment:
       <<: *backend-environment
@@ -144,7 +144,7 @@ services:
   sandbox-controller:
     profiles: ["worker"]
     build: *backend-build
-    image: agent-platform-backend:local
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command:
       - uvicorn
       - agent_platform.sandbox.controller.main:app
@@ -178,7 +178,7 @@ services:
     build:
       context: ../../frontend
       dockerfile: Dockerfile
-    image: agent-platform-frontend:local
+    image: ${PLATFORM_FRONTEND_IMAGE:-agent-platform-frontend:local}
     depends_on:
       api:
         condition: service_healthy
@@ -195,9 +195,9 @@ services:
 networks:
   core:
     external: true
-    name: agent-platform_default
+    name: ${CORE_NETWORK_NAME:-agent-platform_default}
   sandbox-control:
     internal: true
   llm:
     external: true
-    name: agent-platform-llm
+    name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}

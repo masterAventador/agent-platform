@@ -127,6 +127,33 @@ bash infra/observability/test.sh start-health
 
 ## API、Worker 与 Web 本机容器
 
+### C03 本机 MVP Profile（默认 Stub）
+
+无需准备真实模型密钥即可从仓库根目录启动当前 MVP 所需的完整本机栈：
+
+```bash
+bash infra/platform/mvp-profile.sh start
+bash infra/platform/mvp-profile.sh health
+bash infra/platform/mvp-profile.sh status
+bash infra/platform/mvp-profile.sh stop
+```
+
+该入口统一编排 PostgreSQL、Redis、MinIO、LiteLLM、本地 OpenAI-compatible Stub、API、Dispatcher、Worker、Sandbox Controller、Sandbox Janitor 和 Web 客户端。它只使用固定的 LiteLLM 官方镜像及仓库现有 Stub overlay，不读取供应商密钥、不发起付费模型调用，也不会启动或管理 RAGFlow；知识链路留到 C07 的独立 Knowledge Profile。
+
+首次启动会在 Git 忽略的 `.local/mvp-profile/agent-platform-mvp/` 下生成权限为本机用户私有的随机开发凭据。运行目录必须位于当前仓库 `.local/` 下、由当前用户持有且权限为 `0700`，四个环境文件必须是权限为 `0600` 的普通文件；路径中的符号链接、宽松权限、未知/重复 dotenv 键、非字面值、非法或重复端口以及非预期 Docker socket/网络配置都会在调用 Docker 前被拒绝。脚本不会 `source` 环境文件。同一 Profile 的所有操作由 `.local/mvp-profile-locks/` 下的原子锁串行化；干净启动还会在 Core、LiteLLM 和 App 各自执行 `up` 前分组预检对应回环端口，把端口选择到 Compose 绑定之间的竞态窗口压缩到单次预检与单次 `up` 之间。
+
+每个工作树使用由仓库绝对路径派生的 backend/frontend 镜像标签，启动前都会构建当前工作树内容，不复用全局 `:local` 标签。backend runtime 显式安装 PostgreSQL 客户端运行库，确保生产 Worker 镜像能够加载锁定的 psycopg 实现。重复 `start`、`health` 和 `stop` 都是幂等操作；普通 `stop` 保留开发数据卷，若需要同时删除本 Profile 的卷，可显式执行：
+
+```bash
+MVP_PROFILE_REMOVE_VOLUMES=true bash infra/platform/mvp-profile.sh stop
+```
+
+启动阶段任何配置、容器或健康检查失败时，脚本会返回非零状态并报告清理是否完整：启动前会按稳定资源名快照同 Profile 的容器、网络和卷，失败时只按差集删除本轮新建资源，不执行破坏性的整体 `down`，因此启动前已经存在或被重启的资源会保留；外部 LiteLLM 网络同样只有在本轮新建且归属标签正确时才会删除。运行环境文件始终保留用于恢复和诊断。环境文件集合缺失但 Docker 中仍有同 Profile 容器、卷或网络时，`stop` 会明确返回非零并保留资源，禁止误报“已经停止”或在缺少可信配置时盲目清理。任何资源枚举、网络存在性/归属检查或删除失败都视为清理不完整，不会被静默吞掉；归属其他 Profile 的网络会原样保留并让停止操作失败，只有明确确认 LiteLLM 网络不存在时才按幂等停止处理。真实隔离验收使用随机项目名、一次分配的七个唯一回环端口和独立运行目录，覆盖 `status`、重复启停、保留卷后的失败重启与恢复、故障清理、同 Profile 并发拒绝、工作树镜像隔离、RAGFlow 排除以及最终容器/网络/卷无残留：
+
+```bash
+bash infra/platform/test-mvp-profile.sh
+```
+
 平台进程使用独立的 `agent-platform-app` Compose project，不会把 core、RAGFlow 或观测容器当作 orphan 管理。它加入 core 创建的外部网络 `agent-platform_default`，通过 `postgres`、`redis`、`minio` 服务 DNS 访问核心依赖；RAGFlow 与 OTLP 使用显式的 `host.docker.internal`/`host-gateway`。因此 core 的宿主机端口可以保持只绑定 `127.0.0.1`，平台也能与三个独立 Compose 栈安全并行；platform `down` 不会删除外部 core 网络，平台 API 与 Web 端口同样只绑定 `127.0.0.1`。
 
 先准备只存于本机的运行环境文件，并替换全部 `CHANGE_ME`：

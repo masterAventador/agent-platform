@@ -117,7 +117,9 @@
 
 ### C03 本机完整栈、真实 AI 链路与工作台
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-14**
 
 完成定义：
 
@@ -376,9 +378,9 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 519 项：484 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
+| 后端 Pytest | 收集 585 项：550 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
 | Ruff | 通过 |
-| Mypy | 136 个源码文件通过 |
+| Mypy | 144 个源码文件通过 |
 | 前端 Vitest | 20 个测试文件、89 项测试通过；含 PlatformAdapter 契约与架构边界测试 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
@@ -390,7 +392,8 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
 | 无付费模型默认回归 | LiteLLM 配置契约 16 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目 |
 | TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
-| 完整本机栈 E2E | 本轮未执行，纳入 C03 |
+| C03 MVP Profile 基础设施验收 | 隔离唯一随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、状态查询、重复启动、故障健康检查、保留卷停止、失败重启清理与恢复、同 Profile 并发拒绝、工作树镜像隔离及最终容器/网络/卷清理通过；dotenv 不执行、运行目录/权限/端口/网络配置校验通过；行为回归额外覆盖无 `rg` 时预存卷保护、重复启动失败不拆既有容器、缺失环境状态时停止失败关闭、LiteLLM 网络检查异常失败关闭、外来网络拒绝删除、网络删除失败传播、Compose `up` 前分组端口占用拒绝，以及启动期间 `INT`/`TERM`/`ERR` 的退出码、差集清理和锁释放；RAGFlow 未启动 |
+| 完整本机栈 E2E | MVP Profile 启停纵切已通过；注册、登录、员工发布、任务执行、UI 终态和 Tauri 核心流程仍待 C03 后续纵切 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
 当前已知失败：无。
@@ -401,6 +404,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | --- | --- | --- | --- | --- | --- |
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
-| C03-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C03 | 进行中 | 2026-07-14 | — | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（33 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。真实 TokenHub、业务全链路、工作台和 Tauri 核心流程仍未完成，不得标记 C03 完成 |
+| C04-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。
