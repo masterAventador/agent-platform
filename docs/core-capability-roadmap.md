@@ -107,7 +107,9 @@
 - 接通安全凭据、文件选择/保存、外部链接、系统通知和能力探测；
 - 业务页面不直接依赖 `@tauri-apps/*`，Web 业务页面保持复用；
 - macOS 桌面开发版可启动，Windows 构建链路具备自动化编译验证；
-- PlatformAdapter 契约测试、Tauri Rust 测试和桌面冒烟测试通过。
+- Vitest、Playwright Web 业务回归、PlatformAdapter 契约测试和 Tauri Rust 测试通过；
+- 使用 WebdriverIO 与 `@wdio/tauri-service` 建立真实 Tauri 桌面 E2E，覆盖应用启动、IPC 和代表性原生桥接；测试驱动只进入测试构建；
+- macOS 本机桌面 E2E 与冒烟通过，Windows 在 CI 或 Windows 设备完成构建和桌面冒烟；具体分层遵循 [`tauri-testing-strategy.md`](tauri-testing-strategy.md)。
 
 ### C03 本机完整栈、真实 AI 链路与工作台
 

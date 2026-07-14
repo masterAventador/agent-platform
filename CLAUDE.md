@@ -4,7 +4,7 @@
 
 每个新会话首次进入本项目时，必须完整阅读一次 `docs/project-structure.md`、`docs/backend-architecture.md` 和 `docs/frontend-architecture.md`，同一会话内无需在每次设计、实现或修改前重复读取。仅当对应文档在会话期间发生变化，或当前上下文中已无法确认其内容时，才需要重新读取。这三份文档分别是整体工程结构、后端架构和前端架构的权威说明；如果代码、临时方案或其他文档与其冲突，应先向用户说明并确认是否修改架构基线，禁止自行引入另一套技术体系。
 
-每个新会话还必须主动读取 `docs/core-capability-roadmap.md`、`docs/industry-capability-roadmap.md` 和 `docs/tencent-cloud-mvp-deployment.md`，确认 Core、行业能力包和腾讯云部署的最新状态、当前条目与依赖关系。完成任何会改变任务状态、验证基线、功能范围、供应商方案、部署资源或验收证据的工作时，必须在同一个任务和同一个提交中更新对应文档并标记状态；不得只完成代码而遗漏执行台账。竞品功能或证据发生变化时，还必须同步核对 `docs/dt-ai-helper-competitive-analysis.md`。
+每个新会话还必须主动读取 `docs/core-capability-roadmap.md`、`docs/industry-capability-roadmap.md`、`docs/tencent-cloud-mvp-deployment.md` 和 `docs/tauri-testing-strategy.md`，确认 Core、行业能力包、腾讯云部署和桌面端测试的最新状态、当前条目与依赖关系。完成任何会改变任务状态、验证基线、功能范围、供应商方案、部署资源或验收证据的工作时，必须在同一个任务和同一个提交中更新对应文档并标记状态；不得只完成代码而遗漏执行台账。竞品功能或证据发生变化时，还必须同步核对 `docs/dt-ai-helper-competitive-analysis.md`。
 
 ### 整体工程结构
 
@@ -167,6 +167,18 @@ platform/
 ### 后端边界
 
 Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python Agent 后端。Web、Tauri 和后续 App 统一通过 HTTPS、SSE 或 WebSocket 访问云端 FastAPI 平台。只有明确提出离线执行需求并完成安全与升级设计后，才能引入本地 Sidecar。
+
+### Tauri 四层测试门禁（强制）
+
+- React Web 测试入口必须长期保留，用于复用同一套业务页面、快速回归和内部调试；这不改变 Tauri 是普通用户主要交付入口的产品决策；
+- Vitest 负责组件、状态、业务逻辑、Schema 和 `PlatformAdapter` 契约测试；
+- Playwright 负责共享 React UI 的完整业务流程，覆盖页面访问、点击、输入、提交和最终结果；Web 测试使用真实 Web 适配器或明确的测试适配器，不得直接伪装 Tauri 原生成功；
+- WebdriverIO 与 `@wdio/tauri-service` 负责真实 Tauri 应用的桌面 E2E，至少覆盖应用启动、Rust IPC、文件/外链/通知/凭据等原生桥接和代表性核心流程；
+- Rust `cargo test` 负责 Tauri Command、权限、配置、错误转换和其他无需拉起 WebView 的原生逻辑；
+- WebdriverIO 的内嵌 WebDriver 插件只能在测试构建中启用，禁止打入生产安装包或扩大正式版本攻击面；
+- `agent-browser` 只用于 Web 入口的探索式检查，不替代 Playwright 回归，也不作为真实 Tauri 窗口的正式验收工具；
+- 共享 UI 行为变更必须运行相关 Vitest 与 Playwright；原生桥接变更还必须运行相关 Rust 与 WebdriverIO 用例；发布候选版本必须在 macOS 和 Windows 分别完成桌面冒烟；
+- 目录、命令、CI 分层和完成判定以 [`docs/tauri-testing-strategy.md`](docs/tauri-testing-strategy.md) 为准。
 
 ## AI 中台底座与客户能力包规范（强制）
 
