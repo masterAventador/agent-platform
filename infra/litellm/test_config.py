@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "infra/compose/litellm.yml"
 COMPOSE_ENV = ROOT / "infra/compose/.env.litellm.example"
@@ -15,6 +14,7 @@ LITELLM_CONFIG = ROOT / "infra/litellm/config.yaml"
 STUB_COMPOSE_FILE = ROOT / "infra/litellm/compose.stub.yml"
 STUB_CONFIG = ROOT / "infra/litellm/config.stub.yaml"
 STUB_SERVER = ROOT / "infra/litellm/openai_stub.py"
+STUB_PROTOCOL_TEST = ROOT / "infra/litellm/test_openai_stub.py"
 BOOTSTRAP_SCRIPT = ROOT / "infra/litellm/bootstrap_key.py"
 NETWORK_SCRIPT = ROOT / "infra/litellm/network.sh"
 WORKER_PROBE = ROOT / "infra/litellm/worker_gateway_probe.py"
@@ -159,9 +159,7 @@ class LiteLlmComposeContractTest(unittest.TestCase):
         self.assertEqual(bootstrap["image"], EXPECTED_IMAGE)
         self.assertNotIn("ports", bootstrap)
         self.assertEqual(bootstrap["restart"], "no")
-        self.assertEqual(
-            bootstrap["depends_on"]["litellm"]["condition"], "service_healthy"
-        )
+        self.assertEqual(bootstrap["depends_on"]["litellm"]["condition"], "service_healthy")
         self.assertEqual(Path(bootstrap["volumes"][0]["source"]), BOOTSTRAP_SCRIPT)
         self.assertTrue(bootstrap["volumes"][0]["read_only"])
 
@@ -180,7 +178,7 @@ class LiteLlmComposeContractTest(unittest.TestCase):
         self.assertIn("/key/update", script)
         self.assertGreaterEqual(script.count("/key/list"), 2)
         self.assertIn('hashlib.sha256(WORKER_KEY.encode("utf-8"))', script)
-        self.assertNotIn('authorization=WORKER_KEY', script)
+        self.assertNotIn("authorization=WORKER_KEY", script)
         self.assertIn('field in {"models", "allowed_routes"}', script)
         self.assertIn("set(actual) == set(value)", script)
         self.assertIn("len(actual) == len(set(actual))", script)
@@ -218,36 +216,28 @@ class LiteLlmComposeContractTest(unittest.TestCase):
         self.assertIn("logs --no-color", script)
         self.assertIn("trap cleanup_on_exit EXIT", script)
         self.assertNotIn('COMPOSE_PROJECT_NAME="agent-platform-litellm"', script)
-        self.assertNotIn(
-            'python3 - "${LITELLM_PORT}" "${LITELLM_WORKER_API_KEY}"', script
-        )
+        self.assertNotIn('python3 - "${LITELLM_PORT}" "${LITELLM_WORKER_API_KEY}"', script)
         self.assertIn('os.environ["LITELLM_WORKER_API_KEY"]', script)
 
     def test_dynamic_tests_isolate_and_guard_the_external_network(self) -> None:
         compose_source = COMPOSE_FILE.read_text(encoding="utf-8")
-        self.assertIn(
-            "name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}", compose_source
-        )
+        self.assertIn("name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}", compose_source)
         self.assertEqual(self.config["networks"]["llm"]["name"], "agent-platform-llm")
         self.assertTrue(self.config["networks"]["database"]["internal"])
         self.assertEqual(set(self.config["services"]["litellm-db"]["networks"]), {"database"})
 
         network = NETWORK_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn(
-            'NETWORK_NAME="${LITELLM_NETWORK_NAME:-agent-platform-llm}"', network
-        )
+        self.assertIn('NETWORK_NAME="${LITELLM_NETWORK_NAME:-agent-platform-llm}"', network)
 
         script = TEST_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('agent-platform-litellm-test-*', script)
+        self.assertIn("agent-platform-litellm-test-*", script)
         self.assertIn('LITELLM_NETWORK_NAME="${COMPOSE_PROJECT_NAME}-llm"', script)
         self.assertIn("cleanup_test_network", script)
         self.assertIn(
             '[[ "${LITELLM_NETWORK_NAME}" != "${COMPOSE_PROJECT_NAME}-llm" ]]',
             script,
         )
-        self.assertIn(
-            '[[ "${LITELLM_NETWORK_NAME}" == "agent-platform-llm" ]]', script
-        )
+        self.assertIn('[[ "${LITELLM_NETWORK_NAME}" == "agent-platform-llm" ]]', script)
         self.assertIn('docker network rm "${LITELLM_NETWORK_NAME}"', script)
         cleanup_body = script.split("cleanup_runtime() {", 1)[1].split("\n}", 1)[0]
         self.assertLess(
@@ -335,6 +325,11 @@ class LiteLlmComposeContractTest(unittest.TestCase):
         probe = WORKER_PROBE.read_text(encoding="utf-8")
         self.assertIn('"content": "fallback"', probe)
         self.assertIn("local fallback completion", probe)
+
+    def test_local_stub_protocol_regressions_are_part_of_the_config_gate(self) -> None:
+        self.assertTrue(STUB_PROTOCOL_TEST.is_file(), "missing local Stub protocol tests")
+        script = TEST_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('python3 "${ROOT_DIR}/infra/litellm/test_openai_stub.py"', script)
 
     def test_dynamic_worker_flow_runs_one_shot_bootstrap_twice_explicitly(self) -> None:
         script = TEST_SCRIPT.read_text(encoding="utf-8")

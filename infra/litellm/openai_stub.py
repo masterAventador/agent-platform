@@ -45,6 +45,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(last_message, dict):
                 raise ValueError("last message must be an object")
             scenario = last_message.get("content")
+            if isinstance(scenario, str):
+                try:
+                    structured_scenario = json.loads(scenario)
+                except json.JSONDecodeError:
+                    structured_scenario = None
+                if isinstance(structured_scenario, dict) and isinstance(
+                    structured_scenario.get("message"), str
+                ):
+                    scenario = structured_scenario["message"]
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             self._send_json(400, {"error": str(exc)})
             return
@@ -83,7 +92,9 @@ class Handler(BaseHTTPRequestHandler):
 
         message: dict[str, Any]
         finish_reason = "stop"
-        if request.get("tools"):
+        if scenario == "mvp-web-flow":
+            message = {"role": "assistant", "content": "local stub completion"}
+        elif request.get("tools"):
             message = {
                 "role": "assistant",
                 "content": None,
@@ -151,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 ],
             }
-            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
         final = {
             "id": "chatcmpl-local-stub-stream",
             "object": "chat.completion.chunk",
@@ -160,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
         }
-        self.wfile.write(f"data: {json.dumps(final)}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {json.dumps(final)}\n\n".encode())
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
