@@ -2,6 +2,7 @@
 
 > 状态：已确认的实现基线  
 > 确认日期：2026-07-12  
+> 补充确认：2026-07-14（AI 中台 Core、可插拔能力包与客户解决方案）
 > 适用范围：项目根目录、前后端工程、协议、Skill、基础设施和工程脚本
 
 ## 1. 核心决策
@@ -19,8 +20,11 @@
 - 前后端分别维护依赖、测试和构建配置；
 - FastAPI API 与 Agent Worker 共用后端代码，但作为独立进程运行；
 - Web 与 Tauri 共用前端业务代码，但分别生成 Web 静态资源和桌面安装包；
+- Tauri 是普通用户的主要交付入口，Web 构建保留给复用测试、内部调试和未来可选管理端；
+- AI 中台能力作为永久 Core，视频剪辑、自动运营等行业功能作为可插拔能力包；
+- 客户差异通过能力授权、交付清单和声明式解决方案包实现，不维护客户专属代码分支；
 - CI 根据目录变更分别执行前端、后端和跨系统检查；
-- 生产环境可以分别扩容 API、Worker、Web 和基础设施。
+- 生产环境分别扩容 API、Worker 和基础设施；只有启用可选企业管理端时才部署 Web 静态站点。
 
 ## 2. 项目根目录
 
@@ -34,7 +38,11 @@ agent-platform/
 ├── contracts/                     # 由后端协议导出的跨端契约产物
 │   ├── openapi/                   # OpenAPI 快照
 │   ├── events/                    # 平台事件 JSON Schema
+│   ├── capabilities/              # 能力清单和授权契约 Schema
 │   └── fixtures/                  # 前后端契约测试公共样例
+├── solution-packs/                # 非敏感、声明式客户解决方案配置
+│   ├── templates/                 # 通用方案模板
+│   └── examples/                  # 脱敏示例，不保存真实客户数据
 ├── infra/                         # 本地依赖和部署基础设施配置
 │   ├── compose/                   # PostgreSQL、Redis、MinIO 等本地编排
 │   ├── docker/                    # API、Worker、Web 镜像配置
@@ -77,12 +85,17 @@ backend/
 │       │   ├── tenants/           # 企业和租户
 │       │   ├── users/             # 用户
 │       │   ├── permissions/       # RBAC 和资源授权
+│       │   ├── entitlements/      # 企业能力授权、套餐和交付清单
 │       │   ├── employees/         # 数字员工定义、版本和发布
 │       │   ├── runs/              # 任务、状态和事件
 │       │   ├── approvals/         # 人工审批
 │       │   ├── artifacts/         # 文件和任务产物索引
 │       │   ├── skills/            # Skill 注册、版本、绑定和发布
 │       │   └── audit/             # 企业审计
+│       ├── capabilities/          # 可插拔行业能力，只依赖 Core 公开接口
+│       │   ├── registry.py        # 模块清单、装配和可用性检查
+│       │   ├── video_studio/      # 素材、Timeline、云剪辑和成片任务
+│       │   └── social_operations/ # 平台账号、发布、客服和 RPA 任务
 │       ├── runtimes/              # EmployeeRuntime 实现
 │       │   ├── base.py
 │       │   ├── deep_agent.py
@@ -122,6 +135,7 @@ backend/
 ```text
 api ───────────────┐
 workers ───────────┤
+capabilities ──────┤
                    ▼
                 platform
                    │
@@ -140,10 +154,13 @@ workers ───────────┤
 - `api/` 只负责协议转换、认证入口、参数校验和调用业务服务，不实现 Agent 逻辑；
 - `workers/` 负责消费任务和驱动运行时，不复制 API 业务代码；
 - `platform/` 保存平台业务规则，不依赖 FastAPI 请求对象；
+- `platform/entitlements/` 是企业能力授权的唯一真相源，不依赖前端菜单或安装包判断；
+- `capabilities/` 通过 Core 公开接口接入，Core 的 `platform/`、`runtimes/`、`knowledge/`、`tools/` 和 `memory/` 禁止反向导入能力包；
+- `capabilities/video_studio/` 与 `capabilities/social_operations/` 禁止互相导入内部实现；
 - `runtimes/` 统一实现 `EmployeeRuntime`，不得把 Deep Agents 或 LangGraph 内部事件直接暴露给 API；
 - `knowledge/`、`tools/`、`memory/` 和 `sandbox/` 通过清晰接口被运行时调用；
 - `infrastructure/` 实现数据库、缓存、存储、队列和密钥等技术接口，不能承载业务决策；
-- API 和 Worker 共用同一个 Python 包与数据库模型，不拆成两套仓库或复制两套领域模型。
+- API 和 Worker 共用同一个 Python 包与数据库模型，不拆成两套仓库或复制两套领域模型；
 - 数字员工只保存 provider-neutral 模型 alias；供应商模型和密钥只进入独立 LiteLLM 配置，Worker 通过 `infrastructure/llm/` 访问网关。
 
 ### 3.2 后端进程
@@ -166,6 +183,7 @@ Worker 进程
 frontend/
 ├── src/
 │   ├── app/                       # Provider、路由和布局
+│   │   └── capability-registry/   # 根据服务端能力清单装配路由和菜单
 │   ├── features/                  # 按业务功能组织的页面和逻辑
 │   │   ├── auth/
 │   │   ├── dashboard/
@@ -178,6 +196,8 @@ frontend/
 │   │   ├── artifacts/
 │   │   ├── observability/
 │   │   ├── audit/
+│   │   ├── video-studio/          # 可选视频能力包前端
+│   │   ├── social-operations/     # 可选自动运营能力包前端
 │   │   └── organization/
 │   ├── components/                # 跨 Feature 公共 UI 和 AI 组件
 │   ├── api/
@@ -196,6 +216,8 @@ frontend/
 ├── e2e/                           # Playwright 跨页面流程
 ├── public/
 ├── src-tauri/                     # Tauri 原生适配和打包
+│   ├── sidecars/                  # 受签名和版本控制的可选本地执行组件
+│   └── capabilities/              # Tauri 权限声明，不承载业务页面
 ├── package.json
 ├── vite.config.ts
 ├── playwright.config.ts
@@ -236,7 +258,39 @@ backend Pydantic / FastAPI
 - CI 必须检查生成产物是否与后端定义一致；
 - 破坏性协议修改必须增加版本或提供兼容迁移期。
 
-## 6. Skill 代码与运行数据
+## 6. 能力包与客户解决方案
+
+平台按三层组织产品能力：
+
+```text
+AI Platform Core（始终保留）
+├── video-studio（按交付清单安装、按企业授权）
+├── social-operations（按交付清单安装、按企业授权）
+└── solution-pack（客户工作流、提示词、品牌和业务参数）
+```
+
+Core 包含企业、用户、权限、数字员工、运行时、模型、知识、记忆、Skill、Tool、任务、审批、产物、审计和客户端骨架。能力包只能依赖 Core 的公开服务、契约和事件，不能要求 Core 导入其内部模块。
+
+每个能力包必须提供稳定清单，至少声明：
+
+- `capability_id` 和版本；
+- 后端路由、Worker 处理器和事件；
+- 前端路由、菜单和按需加载入口；
+- 所需企业 Entitlement 与 RBAC 权限；
+- 可选 Tauri Sidecar、系统权限和云资源；
+- 数据迁移、健康检查、测试和卸载/禁用行为。
+
+`solution-packs/` 只保存非敏感的声明式资产，例如 AI 角色模板、工作流、提示词、知识绑定描述、审批规则、品牌和业务默认值。真实客户凭据、Cookie、聊天、联系人、素材和生产配置必须保存在平台数据库、对象存储或密钥服务，不得提交 Git。
+
+能力可用性统一计算为：
+
+```text
+deployment_installed && tenant_entitled && user_permitted
+```
+
+同一主干可以生成不同交付清单，但禁止复制前后端工程、长期维护客户分支或在通用模块中硬编码客户名称。
+
+## 7. Skill 代码与运行数据
 
 根目录 `skills/` 只保存随平台源码维护的内置 Skill：
 
@@ -262,7 +316,7 @@ skills/builtin/report-writer/
 
 本地运行数据统一放在根目录 `.local/` 或 Docker Volume，并加入 `.gitignore`。
 
-## 7. 基础设施和本地开发
+## 8. 基础设施和本地开发
 
 `infra/` 负责提供统一的本地依赖配置，但不把前后端业务代码放进基础设施目录。
 
@@ -283,7 +337,7 @@ infra/ragflow/
 - 调试完整观测链路时再叠加 `observability.yml`；
 - 本地服务使用完毕必须停止，不设置开机自启。
 
-## 8. 工程脚本
+## 9. 工程脚本
 
 根目录 `scripts/` 只保存跨工程动作，例如：
 
@@ -292,11 +346,12 @@ infra/ragflow/
 - 生成前端 API 客户端；
 - 执行前后端联合检查；
 - 初始化或发布内置 Skill；
+- 校验能力包清单和生成客户交付配置；
 - 清理本地临时运行数据。
 
 前端专属脚本留在 `frontend/package.json`，后端专属工具配置留在 `backend/pyproject.toml`，避免根目录成为第三套构建系统。
 
-## 9. 测试归属
+## 10. 测试归属
 
 | 测试类型 | 位置 |
 |---|---|
@@ -306,11 +361,13 @@ infra/ragflow/
 | React 单元和组件测试 | 与 `frontend/src/` 被测文件就近放置 |
 | Web 核心用户流程 | `frontend/e2e/` |
 | Tauri Rust 单元测试 | `frontend/src-tauri/` 内就近放置 |
+| 能力包后端测试 | `backend/tests/` 对应 unit、integration、contract 目录 |
+| 客户组合 E2E | `frontend/e2e/`，按能力组合或交付 Profile 标记 |
 | 公共契约样例 | `contracts/fixtures/` |
 
 不在根目录再创建一个混合的 `tests/`，避免测试运行器、依赖和职责混杂。
 
-## 10. CI 边界
+## 11. CI 边界
 
 CI 根据改动路径执行：
 
@@ -319,9 +376,12 @@ CI 根据改动路径执行：
 - 修改 `contracts/**` 或后端协议：重新生成客户端并运行前后端契约检查；
 - 修改 `skills/**`：校验 Skill 目录、元数据、引用文件和脚本测试；
 - 修改 `infra/**`：校验 Compose、镜像和观测配置；
+- 修改能力包或 `solution-packs/**`：校验模块清单、授权、禁用行为和目标客户组合；
 - 合并主分支前执行一次前后端完整检查。
 
-## 11. 未来扩展边界
+CI 的最低组合矩阵必须包含 Core-only、Core+视频、Core+自动运营和当前正式客户交付组合。禁用可选能力时，Core 的登录、数字员工、任务、知识、Skill、Tool、审批和审计回归必须继续通过。
+
+## 12. 未来扩展边界
 
 未来如果建设独立移动 App，可以在根目录增加：
 
@@ -331,7 +391,7 @@ mobile/
 
 移动端继续复用平台 API、事件协议、认证语义和设计 Token，但不要求直接复用 React DOM 页面。未确定移动技术栈前不创建空工程，也不提前引入 Monorepo 工具。
 
-## 12. 禁止事项
+## 13. 禁止事项
 
 - 禁止将前端和后端拆成两个 Git 仓库；
 - 禁止把 Python 后端放入 Tauri Sidecar 作为默认架构；
@@ -339,4 +399,8 @@ mobile/
 - 禁止 API 与 Worker 分别复制平台业务模型；
 - 禁止在根目录堆放临时脚本、上传文件、数据库文件和沙盒数据；
 - 禁止手工维护两套 OpenAPI DTO 或两套平台事件；
-- 禁止为了单仓库而强制前后端共用同一个依赖管理器或同一个发布节奏。
+- 禁止为了单仓库而强制前后端共用同一个依赖管理器或同一个发布节奏；
+- 禁止为客户复制前后端 Feature、API、Worker 或整仓代码；
+- 禁止把前端隐藏菜单当作企业能力授权；
+- 禁止在未授权时签发云资源凭据、下载 Sidecar 或调度能力包任务；
+- 禁止让 AI 中台 Core 依赖视频剪辑、自动运营或任何客户解决方案内部代码。

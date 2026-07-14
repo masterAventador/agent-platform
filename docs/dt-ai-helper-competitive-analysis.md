@@ -825,6 +825,53 @@ VideoRenderProvider
 
 第一阶段选择阿里云 IMS/ICE 的优势是客户端轻、Mac 和 Windows 结果一致、App 关闭后任务可继续、转场和模板能力成熟；代价是素材需要上传、依赖网络、产生 OSS 和合成费用，并需要明确数据地域、保留期限和删除策略。后续增加本地 FFmpeg，可以覆盖离线、敏感素材和大批量成本场景，但需要自己维护滤镜、字体、转场、编码器兼容和资源调度。
 
+### 10.8 AI 中台底座与客户定制能力
+
+产品定位进一步明确为“一个稳定底座、两个可选行业能力包、多个客户解决方案”：
+
+```text
+AI Platform Core（所有客户始终保留）
+├── Video Studio（按客户启用）
+├── Social Operations（按客户启用）
+└── Solution Pack（客户工作流、提示词、品牌和业务配置）
+```
+
+AI 中台 Core 包含：
+
+- 企业、工作区、用户、Session、RBAC 和审计；
+- 数字员工、LangGraph、Deep Agents 和统一运行时；
+- 模型网关、知识库、长期记忆、Skill、Tool、MCP 和沙箱；
+- 任务、事件、审批、产物、配额和可观测性；
+- Tauri/React 客户端骨架、平台适配、安全凭据、更新和设备基础能力。
+
+视频剪辑属于 `video-studio` 能力包，包含素材库、OSS、Timeline、IMS/ICE、模板、剪辑任务和成片。自动运营属于 `social-operations` 能力包，包含平台账号、Playwright、本地 RPA、微信、朋友圈、私信、内容发布和曝光。
+
+客户交付组合示例：
+
+```text
+客户 A = Core + Video Studio + Social Operations + A Solution Pack
+客户 B = Core + B Solution Pack
+客户 C = Core + Video Studio + C Solution Pack
+```
+
+“客户不需要就去掉”不应通过删除代码或维护客户分支实现，而应通过三层机制控制：
+
+1. **部署/安装：** 决定后端模块、Worker、Playwright、OCR 等组件是否随交付安装；
+2. **企业授权：** 决定客户是否购买或获准使用能力；
+3. **用户权限：** 决定企业内具体用户是否可以查看、执行、审批和管理。
+
+最终可用条件统一为：
+
+```text
+deployment_installed && tenant_entitled && user_permitted
+```
+
+前端隐藏菜单不能代替安全授权。未授权企业不能通过直接调用接口创建任务、获取 OSS STS、下载 RPA Sidecar 或接收本地执行指令。
+
+首次由单个客户提出、但未来可以复用的能力仍然应实现为通用能力包，不能以客户名称硬编码。只有客户专属 AI 角色、知识绑定、工作流、提示词、内容模板、审批规则、品牌和业务参数进入 Solution Pack。真实凭据、Cookie、联系人、聊天和素材属于运行数据，不进入 Git。
+
+所有客户交付都从同一主干和同一模块注册机制生成。最低测试矩阵覆盖 Core-only、Core+视频、Core+自动运营和正式客户实际组合，确保关闭定制能力后 AI 中台仍然完整可用。
+
 ## 11. 功能建设优先级
 
 ### 第一阶段：桌面执行闭环
