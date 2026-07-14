@@ -1,7 +1,6 @@
-from pathlib import Path
 import re
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,7 +81,7 @@ class PlatformContainerContractTest(unittest.TestCase):
     def test_compose_uses_external_network_for_separate_core_stack(self) -> None:
         compose = self.read("infra/compose/platform.yml")
         self.assertRegex(compose, r"external:\s*true")
-        self.assertIn("name: agent-platform_default", compose)
+        self.assertIn("name: ${CORE_NETWORK_NAME:-agent-platform_default}", compose)
         self.assertIn("@postgres:5432", compose)
         self.assertIn("@redis:6379", compose)
         self.assertIn("minio:9000", compose)
@@ -90,7 +89,7 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("AGENT_PLATFORM_DATABASE_URL", compose)
         self.assertIn("AGENT_PLATFORM_REDIS_URL", compose)
         self.assertIn("AGENT_PLATFORM_MINIO_ENDPOINT", compose)
-        self.assertIn("name: agent-platform-llm", compose)
+        self.assertIn("name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}", compose)
         self.assertRegex(compose, r"llm:\s*\n\s+external:\s*true")
 
     def test_examples_do_not_contain_real_secrets(self) -> None:
@@ -126,6 +125,56 @@ class PlatformContainerContractTest(unittest.TestCase):
         )
         self.assertIn("networks: [core, sandbox-control, llm]", worker)
         self.assertNotIn("LITELLM_MASTER_KEY", worker)
+
+    def test_mvp_profile_is_stub_only_ragflow_free_and_failure_safe(self) -> None:
+        script = self.read("infra/platform/mvp-profile.sh")
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn("infra/compose/core.yml", script)
+        self.assertIn("infra/compose/litellm.yml", script)
+        self.assertIn("infra/litellm/compose.stub.yml", script)
+        self.assertIn("infra/compose/platform.yml", script)
+        self.assertIn("--profile worker", script)
+        self.assertIn("openai-stub", script)
+        self.assertIn("worker-key-bootstrap", script)
+        self.assertIn("--wait", script)
+        self.assertIn("cleanup_failed_start", script)
+        self.assertNotRegex(
+            script,
+            r"(?:app|litellm|core)_compose down[^\n]*\|\| true",
+        )
+        self.assertNotIn("infra/ragflow", script)
+        self.assertNotIn("TokenHub", script)
+        self.assertNotIn("LITELLM_UPSTREAM_API_KEY", script)
+        for mode in ("start", "stop", "health", "status"):
+            self.assertRegex(script, rf"(?m)^  {mode}\)")
+
+    def test_mvp_profile_supports_isolated_compose_projects_and_networks(self) -> None:
+        script = self.read("infra/platform/mvp-profile.sh")
+        self.assertIn("MVP_PROFILE_NAME", script)
+        self.assertIn("MVP_PROFILE_RUNTIME_DIR", script)
+        self.assertIn('CORE_NETWORK_NAME="${CORE_PROJECT}_default"', script)
+        self.assertIn('LITELLM_NETWORK_NAME="${PROFILE_NAME}-llm"', script)
+        self.assertIn('-p "${CORE_PROJECT}"', script)
+        self.assertIn('-p "${LITELLM_PROJECT}"', script)
+        self.assertIn('-p "${APP_PROJECT}"', script)
+
+        compose = self.read("infra/compose/platform.yml")
+        self.assertIn("name: ${CORE_NETWORK_NAME:-agent-platform_default}", compose)
+        self.assertIn("name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}", compose)
+
+    def test_mvp_profile_has_real_repeatable_acceptance_entry(self) -> None:
+        acceptance = self.read("infra/platform/test-mvp-profile.sh")
+        self.assertIn("mvp-profile.sh", acceptance)
+        self.assertIn("start", acceptance)
+        self.assertIn("health", acceptance)
+        self.assertIn("stop", acceptance)
+        self.assertIn("trap cleanup EXIT", acceptance)
+        self.assertIn("openai-stub", acceptance)
+        self.assertIn("worker_gateway_probe.py", acceptance)
+        self.assertIn('"chat"', acceptance)
+        self.assertIn("sandbox-controller", acceptance)
+        self.assertIn("sandbox-janitor", acceptance)
+        self.assertIn("ragflow", acceptance.lower())
 
 
 if __name__ == "__main__":

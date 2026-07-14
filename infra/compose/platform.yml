@@ -195,9 +195,9 @@ services:
 networks:
   core:
     external: true
-    name: agent-platform_default
+    name: ${CORE_NETWORK_NAME:-agent-platform_default}
   sandbox-control:
     internal: true
   llm:
     external: true
-    name: agent-platform-llm
+    name: ${LITELLM_NETWORK_NAME:-agent-platform-llm}

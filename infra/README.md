@@ -127,6 +127,31 @@ bash infra/observability/test.sh start-health
 
 ## API、Worker 与 Web 本机容器
 
+### C03 本机 MVP Profile（默认 Stub）
+
+无需准备真实模型密钥即可从仓库根目录启动当前 MVP 所需的完整本机栈：
+
+```bash
+bash infra/platform/mvp-profile.sh start
+bash infra/platform/mvp-profile.sh health
+bash infra/platform/mvp-profile.sh status
+bash infra/platform/mvp-profile.sh stop
+```
+
+该入口统一编排 PostgreSQL、Redis、MinIO、LiteLLM、本地 OpenAI-compatible Stub、API、Dispatcher、Worker、Sandbox Controller、Sandbox Janitor 和 Web 客户端。它只使用固定的 LiteLLM 官方镜像及仓库现有 Stub overlay，不读取供应商密钥、不发起付费模型调用，也不会启动或管理 RAGFlow；知识链路留到 C07 的独立 Knowledge Profile。
+
+首次启动会在 Git 忽略的 `.local/mvp-profile/agent-platform-mvp/` 下生成权限为本机用户私有的随机开发凭据。重复 `start`、`health` 和 `stop` 都是幂等操作；普通 `stop` 保留开发数据卷，若需要同时删除本 Profile 的卷，可显式执行：
+
+```bash
+MVP_PROFILE_REMOVE_VOLUMES=true bash infra/platform/mvp-profile.sh stop
+```
+
+启动阶段任何配置、容器或健康检查失败时，脚本会清理由本次全新启动创建的专属资源并返回非零状态，不会触碰其他 Compose project。真实隔离验收使用随机项目名和随机回环端口，覆盖重复启停、故障健康检查、RAGFlow 排除以及容器、网络、卷无残留：
+
+```bash
+bash infra/platform/test-mvp-profile.sh
+```
+
 平台进程使用独立的 `agent-platform-app` Compose project，不会把 core、RAGFlow 或观测容器当作 orphan 管理。它加入 core 创建的外部网络 `agent-platform_default`，通过 `postgres`、`redis`、`minio` 服务 DNS 访问核心依赖；RAGFlow 与 OTLP 使用显式的 `host.docker.internal`/`host-gateway`。因此 core 的宿主机端口可以保持只绑定 `127.0.0.1`，平台也能与三个独立 Compose 栈安全并行；platform `down` 不会删除外部 core 网络，平台 API 与 Web 端口同样只绑定 `127.0.0.1`。
 
 先准备只存于本机的运行环境文件，并替换全部 `CHANGE_ME`：
