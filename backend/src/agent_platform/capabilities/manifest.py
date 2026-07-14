@@ -24,9 +24,9 @@ class CoreProtocolDependency:
     protocol_version: str
 
     def __post_init__(self) -> None:
-        if not _PROTOCOL_ID_PATTERN.fullmatch(self.protocol_id):
+        if not _matches_pattern(_PROTOCOL_ID_PATTERN, self.protocol_id):
             raise ManifestValidationError("invalid Core protocol dependency")
-        if not _PROTOCOL_VERSION_PATTERN.fullmatch(self.protocol_version):
+        if not _matches_pattern(_PROTOCOL_VERSION_PATTERN, self.protocol_version):
             raise ManifestValidationError("invalid Core protocol version")
 
 
@@ -48,11 +48,11 @@ class CapabilityManifest:
     core_dependencies: tuple[CoreProtocolDependency, ...]
 
     def __post_init__(self) -> None:
-        if not _PROTOCOL_VERSION_PATTERN.fullmatch(self.schema_version):
+        if not _matches_pattern(_PROTOCOL_VERSION_PATTERN, self.schema_version):
             raise ManifestValidationError("invalid manifest schema version")
-        if not _CAPABILITY_ID_PATTERN.fullmatch(self.capability_id):
+        if not _matches_pattern(_CAPABILITY_ID_PATTERN, self.capability_id):
             raise ManifestValidationError("invalid capability id")
-        if not _SEMANTIC_VERSION_PATTERN.fullmatch(self.capability_version):
+        if not _matches_pattern(_SEMANTIC_VERSION_PATTERN, self.capability_version):
             raise ManifestValidationError("invalid capability version")
 
         required_declarations = (
@@ -118,3 +118,7 @@ def _validate_declarations(values: tuple[str, ...], *, required: bool) -> None:
         raise ManifestValidationError("invalid manifest declaration")
     if len(values) != len(set(values)):
         raise ManifestValidationError("duplicate manifest declaration")
+
+
+def _matches_pattern(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None

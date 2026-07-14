@@ -61,16 +61,32 @@ class MockCapabilityHost:
         if not isinstance(manifest, CapabilityManifest):
             raise TypeError("manifest must be a CapabilityManifest")
         if manifest.schema_version != MANIFEST_SCHEMA_VERSION:
-            raise UnsatisfiedCoreProtocolError("unsupported manifest schema")
+            raise UnsatisfiedCoreProtocolError(
+                "unsupported manifest schema: "
+                f"expected={MANIFEST_SCHEMA_VERSION} actual={manifest.schema_version}"
+            )
         if manifest.capability_id in self._manifests:
             raise DuplicateCapabilityError("capability is already installed")
         for dependency in manifest.core_dependencies:
-            if self._core_protocols.get(dependency.protocol_id) != dependency.protocol_version:
-                raise UnsatisfiedCoreProtocolError("Core protocol dependency is unavailable")
+            actual_version = self._core_protocols.get(dependency.protocol_id)
+            if actual_version != dependency.protocol_version:
+                actual = actual_version if actual_version is not None else "<missing>"
+                raise UnsatisfiedCoreProtocolError(
+                    "Core protocol dependency is unavailable: "
+                    f"protocol={dependency.protocol_id} "
+                    f"expected={dependency.protocol_version} actual={actual}"
+                )
 
         claims = manifest.resource_claims()
-        if any(claim in self._resource_owners for claim in claims):
-            raise CapabilityConflictError("capability resource conflict")
+        for claim in claims:
+            owner = self._resource_owners.get(claim)
+            if owner is not None:
+                category, resource = claim
+                raise CapabilityConflictError(
+                    "capability resource conflict: "
+                    f"{category}={resource} owner={owner} "
+                    f"requester={manifest.capability_id}"
+                )
 
         self._manifests[manifest.capability_id] = manifest
         self._enabled.add(manifest.capability_id)

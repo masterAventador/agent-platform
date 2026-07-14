@@ -91,9 +91,12 @@ def test_unsupported_manifest_schema_is_rejected() -> None:
     host = _host()
     manifest = replace(VIDEO_STUDIO_MANIFEST, schema_version="2.0")
 
-    with pytest.raises(UnsatisfiedCoreProtocolError):
+    with pytest.raises(UnsatisfiedCoreProtocolError) as error:
         host.install(manifest)
 
+    assert "manifest schema" in str(error.value)
+    assert "expected=1.0" in str(error.value)
+    assert "actual=2.0" in str(error.value)
     assert host.installed_capability_ids == frozenset()
 
 
@@ -105,9 +108,12 @@ def test_resource_conflict_is_rejected_atomically() -> None:
         backend_routes=VIDEO_STUDIO_MANIFEST.backend_routes,
     )
 
-    with pytest.raises(CapabilityConflictError):
+    with pytest.raises(CapabilityConflictError) as error:
         host.install(conflicting)
 
+    assert "backend_route=/api/v1/video-studio" in str(error.value)
+    assert "owner=video-studio" in str(error.value)
+    assert "requester=social-operations" in str(error.value)
     assert host.installed_capability_ids == frozenset({"video-studio"})
     assert host.enabled_capability_ids == frozenset({"video-studio"})
 
@@ -125,8 +131,28 @@ def test_unsatisfied_core_dependency_is_rejected_without_partial_install(
     host = _host()
     manifest = replace(VIDEO_STUDIO_MANIFEST, core_dependencies=(dependency,))
 
-    with pytest.raises(UnsatisfiedCoreProtocolError):
+    with pytest.raises(UnsatisfiedCoreProtocolError) as error:
         host.install(manifest)
 
+    assert dependency.protocol_id in str(error.value)
+    assert f"expected={dependency.protocol_version}" in str(error.value)
+    actual_version = CORE_PROTOCOLS.get(dependency.protocol_id, "<missing>")
+    assert f"actual={actual_version}" in str(error.value)
     assert host.installed_capability_ids == frozenset()
     assert host.enabled_capability_ids == frozenset()
+
+
+@pytest.mark.parametrize(
+    "core_protocols",
+    [
+        {1: "1.0"},
+        {None: "1.0"},
+        {"core.runs": 1},
+        {"core.runs": None},
+    ],
+)
+def test_mock_host_normalizes_invalid_protocol_types_to_public_value_error(
+    core_protocols: dict[object, object],
+) -> None:
+    with pytest.raises(ValueError, match="^invalid Mock Host Core protocol$"):
+        MockCapabilityHost(core_protocols=core_protocols)  # type: ignore[arg-type]
