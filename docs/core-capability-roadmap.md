@@ -421,7 +421,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 验证项 | 当前结果 |
 | --- | --- |
 | 后端 Pytest | 默认环境收集 958 项：919 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
-| 后端 Unit + Contract | 771 项通过；新增覆盖前置请求体限流、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL、Run 幂等、硬超时/有界 tombstone、Worker 首次物化失败回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
+| 后端 Unit + Contract | 780 项通过；新增覆盖前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
 | Mypy | 170 个源码文件通过 |
