@@ -76,12 +76,17 @@ impl SocialOperationsRuntime {
     ) -> Result<Self, SocialRuntimeError> {
         let root = root.as_ref().to_path_buf();
         let cookie_vault = EncryptedCookieVault::open(&root)?;
+        let installed_sidecar = match verifying_key {
+            Some(key) => TrustedSidecarInstaller::new(&root, key, max_package_bytes)?
+                .installed_current_verified()?,
+            None => None,
+        };
         Ok(Self {
             root,
             verifying_key,
             max_package_bytes,
             cookie_vault,
-            installed_sidecar: None,
+            installed_sidecar,
             accounts: HashMap::new(),
             active_account: None,
         })
@@ -126,9 +131,13 @@ impl SocialOperationsRuntime {
         platform: &str,
         account_id: &str,
     ) -> Result<PathBuf, SocialRuntimeError> {
-        if let Some(account) = self.accounts.get(account_id) {
+        if let Some(account) = self.accounts.get_mut(account_id) {
             if account.platform != platform {
                 return Err(SocialRuntimeError::InvalidAccount);
+            }
+            if !account.profile.path().is_dir() {
+                account.profile = BrowserProfile::prepare_raw(&self.root, platform, account_id)?;
+                account.login = QrLoginSession::new();
             }
             return Ok(account.profile.path().to_path_buf());
         }
@@ -156,6 +165,35 @@ impl SocialOperationsRuntime {
             .login
             .apply(signal)
             .map_err(Into::into)
+    }
+
+    pub fn apply_login_signal_with_executor(
+        &mut self,
+        account_id: &str,
+        signal: LoginSignal,
+        executor: &mut LocalExecutorManager,
+    ) -> Result<LoginSnapshot, SocialRuntimeError> {
+        let fail_safe = matches!(
+            signal,
+            LoginSignal::CaptchaRequired | LoginSignal::RiskControl | LoginSignal::LoginExpired
+        );
+        let transition = self.apply_login_signal(account_id, signal);
+        if !fail_safe {
+            return transition;
+        }
+
+        let stop_result = if self.active_account.as_deref() == Some(account_id) {
+            self.active_account = None;
+            executor
+                .stop()
+                .map(|_| ())
+                .map_err(SocialRuntimeError::from)
+        } else {
+            Ok(())
+        };
+        let snapshot = transition?;
+        stop_result?;
+        Ok(snapshot)
     }
 
     pub fn account_snapshot(&self, account_id: &str) -> Result<LoginSnapshot, SocialRuntimeError> {
@@ -271,16 +309,8 @@ impl SocialOperationsRuntime {
         account_id: &str,
         executor: &mut LocalExecutorManager,
     ) -> Result<(), SocialRuntimeError> {
-        self.accounts
-            .get_mut(account_id)
-            .ok_or(SocialRuntimeError::InvalidAccount)?
-            .login
-            .apply(LoginSignal::RiskControl)?;
-        if self.active_account.as_deref() == Some(account_id) {
-            self.active_account = None;
-            executor.stop()?;
-        }
-        Ok(())
+        self.apply_login_signal_with_executor(account_id, LoginSignal::RiskControl, executor)
+            .map(|_| ())
     }
 }
 
@@ -291,6 +321,7 @@ fn parse_login_signal(value: &str) -> Result<LoginSignal, SocialRuntimeError> {
         "authenticated" => Ok(LoginSignal::Authenticated),
         "captcha_required" => Ok(LoginSignal::CaptchaRequired),
         "risk_control" => Ok(LoginSignal::RiskControl),
+        "login_expired" => Ok(LoginSignal::LoginExpired),
         "operator_resume" => Ok(LoginSignal::OperatorResume),
         "logout" => Ok(LoginSignal::Logout),
         _ => Err(SocialRuntimeError::InvalidAccount),
@@ -349,10 +380,17 @@ pub fn social_account_prepare(
 #[tauri::command]
 pub fn social_account_login_signal(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
+    executor: State<'_, Mutex<LocalExecutorManager>>,
     account_id: String,
     signal: String,
 ) -> Result<LoginSnapshot, SocialRuntimeError> {
-    lock_runtime(&runtime)?.apply_login_signal(&account_id, parse_login_signal(&signal)?)
+    let mut runtime = lock_runtime(&runtime)?;
+    let mut executor = lock_executor(&executor)?;
+    runtime.apply_login_signal_with_executor(
+        &account_id,
+        parse_login_signal(&signal)?,
+        &mut executor,
+    )
 }
 
 #[tauri::command]

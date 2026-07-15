@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -11,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from agent_platform.capabilities.social_operations import device_account_persistence
 from agent_platform.capabilities.social_operations.device_account_persistence import (
     SqliteDeviceAccountStateStore,
 )
@@ -383,3 +385,38 @@ def test_sqlite_rejects_symlink_leaf(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="symbolic link"):
         SqliteDeviceAccountStateStore(linked_state)
+
+
+def test_sqlite_requires_an_owner_only_private_parent(tmp_path: Path) -> None:
+    public_parent = tmp_path / "public"
+    public_parent.mkdir(mode=0o700)
+    public_parent.chmod(0o755)
+
+    with pytest.raises(ValueError, match="private directory"):
+        SqliteDeviceAccountStateStore(public_parent / "state.db")
+
+
+def test_sqlite_detects_leaf_replacement_between_validation_and_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "state.db"
+    store = SqliteDeviceAccountStateStore(state_path)
+    replacement = tmp_path / "replacement.db"
+    shutil.copy2(state_path, replacement)
+    real_connect = device_account_persistence.sqlite3.connect
+    swapped = False
+
+    def swapping_connect(
+        path: Path, *, timeout: float
+    ) -> device_account_persistence.sqlite3.Connection:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            state_path.unlink()
+            state_path.symlink_to(replacement)
+        return real_connect(path, timeout=timeout)
+
+    monkeypatch.setattr(device_account_persistence.sqlite3, "connect", swapping_connect)
+
+    with pytest.raises(ValueError, match="changed while opening|symbolic link"):
+        store.load()

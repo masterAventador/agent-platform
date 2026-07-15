@@ -50,11 +50,18 @@ describe('WebPlatformAdapter', () => {
       secureCredentials: false,
       rememberedLogin: false,
       localExecution: false,
+      socialOperations: false,
     })
     await expect(adapter.credentials.get('worker-key')).rejects.toEqual(
       expect.objectContaining<Partial<PlatformCapabilityError>>({
         code: 'capability_unavailable',
         capability: 'secureCredentials',
+      }),
+    )
+    await expect(adapter.socialOperations.hasCookies('account-1')).rejects.toEqual(
+      expect.objectContaining<Partial<PlatformCapabilityError>>({
+        code: 'capability_unavailable',
+        capability: 'socialOperations',
       }),
     )
   })
@@ -191,5 +198,81 @@ describe('TauriPlatformAdapter', () => {
       capabilityId: 'social-operations',
       request,
     })
+  })
+
+  it('通过类型化 Social Operations 桥接调用 B02 账号运行时命令', async () => {
+    const manifest = {
+      version: '1.2.3',
+      platform: 'macos',
+      arch: 'aarch64',
+      sha256: 'a'.repeat(64),
+      package_size: 3,
+    }
+    const snapshot = {
+      state: 'healthy',
+      circuit_open: false,
+      session_revision: 3,
+    }
+    const status = {
+      running: true,
+      protocolVersion: '1.0',
+      capabilityId: 'social-operations',
+    }
+    tauriMocks.invoke
+      .mockResolvedValueOnce('1.2.3')
+      .mockResolvedValueOnce('1.2.3')
+      .mockResolvedValueOnce(snapshot)
+      .mockResolvedValueOnce(snapshot)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(status)
+      .mockResolvedValueOnce({ status: 'accepted' })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(['token=[REDACTED]'])
+    const adapter = createTauriPlatformAdapter()
+    const request = { protocol_version: '1.0', message_type: 'task.request' }
+
+    await expect(adapter.socialOperations.installSidecar({
+      manifest,
+      package: new Uint8Array([1, 2, 3]),
+      signature: new Uint8Array([4, 5]),
+    })).resolves.toBe('1.2.3')
+    await expect(adapter.socialOperations.downloadSidecar({
+      downloadUrl: 'https://updates.example.com/social-sidecar',
+      manifest,
+      signature: new Uint8Array([6, 7]),
+    })).resolves.toBe('1.2.3')
+    await expect(adapter.socialOperations.prepareAccount('douyin', 'account-1')).resolves.toEqual(snapshot)
+    await expect(adapter.socialOperations.signalLogin('account-1', 'login_expired')).resolves.toEqual(snapshot)
+    await adapter.socialOperations.storeCookies('account-1', new Uint8Array([8, 9]))
+    await expect(adapter.socialOperations.hasCookies('account-1')).resolves.toBe(true)
+    await expect(adapter.socialOperations.startAccount('account-1')).resolves.toEqual(status)
+    await expect(adapter.socialOperations.invokeAccount('account-1', request)).resolves.toEqual({ status: 'accepted' })
+    await adapter.socialOperations.logoutAccount('account-1')
+    await adapter.socialOperations.emergencyStop('account-1')
+    await expect(adapter.socialOperations.takeSafeDiagnostics()).resolves.toEqual(['token=[REDACTED]'])
+
+    expect(tauriMocks.invoke.mock.calls).toEqual([
+      ['social_sidecar_install', {
+        manifest,
+        package: [1, 2, 3],
+        signature: [4, 5],
+      }],
+      ['social_sidecar_download', {
+        downloadUrl: 'https://updates.example.com/social-sidecar',
+        manifest,
+        signature: [6, 7],
+      }],
+      ['social_account_prepare', { platform: 'douyin', accountId: 'account-1' }],
+      ['social_account_login_signal', { accountId: 'account-1', signal: 'login_expired' }],
+      ['social_account_store_cookies', { accountId: 'account-1', cookies: [8, 9] }],
+      ['social_account_has_cookies', { accountId: 'account-1' }],
+      ['social_account_start', { accountId: 'account-1' }],
+      ['social_account_invoke', { accountId: 'account-1', request }],
+      ['social_account_logout', { accountId: 'account-1' }],
+      ['social_account_emergency_stop', { accountId: 'account-1' }],
+      ['social_executor_take_safe_diagnostics'],
+    ])
   })
 })

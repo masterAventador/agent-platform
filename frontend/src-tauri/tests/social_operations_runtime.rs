@@ -111,6 +111,13 @@ fn emergency_stop_terminates_execution_and_circuits_the_account() {
     runtime
         .start_account(ACCOUNT_ID, &mut executor)
         .expect("start");
+    runtime
+        .apply_login_signal(ACCOUNT_ID, LoginSignal::RiskControl)
+        .expect("state enters handoff before emergency cleanup");
+    assert!(
+        executor.status_snapshot().expect("still active").running,
+        "the test must exercise emergency cleanup after the state already changed"
+    );
 
     runtime
         .emergency_stop(ACCOUNT_ID, &mut executor)
@@ -120,6 +127,136 @@ fn emergency_stop_terminates_execution_and_circuits_the_account() {
     let snapshot = runtime.account_snapshot(ACCOUNT_ID).expect("snapshot");
     assert_eq!(snapshot.state, LoginState::HumanHandoff);
     assert!(snapshot.circuit_open);
+
+    runtime
+        .emergency_stop(ACCOUNT_ID, &mut executor)
+        .expect("repeated emergency stop is idempotent");
+}
+
+#[cfg(unix)]
+#[test]
+fn risk_captcha_and_expired_signals_circuit_and_stop_the_active_process() {
+    for signal in [
+        LoginSignal::RiskControl,
+        LoginSignal::CaptchaRequired,
+        LoginSignal::LoginExpired,
+    ] {
+        let (signing_key, package, manifest, signature) = signed_sidecar();
+        let root = tempdir().expect("runtime root");
+        let mut runtime = SocialOperationsRuntime::new(
+            root.path(),
+            Some(signing_key.verifying_key().to_bytes()),
+            1024 * 1024,
+        )
+        .expect("runtime");
+        let mut executor = LocalExecutorManager::default();
+        runtime
+            .install_manifest(&manifest, &package, &signature)
+            .expect("signed install");
+        runtime
+            .prepare_account("douyin", ACCOUNT_ID)
+            .expect("profile");
+        for login_signal in [
+            LoginSignal::BeginQr,
+            LoginSignal::QrScanned,
+            LoginSignal::Authenticated,
+        ] {
+            runtime
+                .apply_login_signal(ACCOUNT_ID, login_signal)
+                .expect("login");
+        }
+        runtime
+            .start_account(ACCOUNT_ID, &mut executor)
+            .expect("start");
+
+        runtime
+            .apply_login_signal_with_executor(ACCOUNT_ID, signal, &mut executor)
+            .expect("fail-safe signal");
+
+        assert!(!executor.status_snapshot().expect("stopped").running);
+        let snapshot = runtime.account_snapshot(ACCOUNT_ID).expect("snapshot");
+        assert_eq!(snapshot.state, LoginState::HumanHandoff);
+        assert!(snapshot.circuit_open);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn logout_then_prepare_recreates_profile_and_allows_a_new_qr_session() {
+    let (signing_key, package, manifest, signature) = signed_sidecar();
+    let root = tempdir().expect("runtime root");
+    let mut runtime = SocialOperationsRuntime::new(
+        root.path(),
+        Some(signing_key.verifying_key().to_bytes()),
+        1024 * 1024,
+    )
+    .expect("runtime");
+    let mut executor = LocalExecutorManager::default();
+    runtime
+        .install_manifest(&manifest, &package, &signature)
+        .expect("signed install");
+    let original = runtime
+        .prepare_account("douyin", ACCOUNT_ID)
+        .expect("profile");
+    runtime
+        .apply_login_signal(ACCOUNT_ID, LoginSignal::BeginQr)
+        .expect("begin qr");
+    runtime
+        .logout_account(ACCOUNT_ID, &mut executor)
+        .expect("logout");
+    assert!(!original.exists());
+
+    let recreated = runtime
+        .prepare_account("douyin", ACCOUNT_ID)
+        .expect("reprepare");
+    assert!(recreated.is_dir());
+    assert_eq!(recreated, original);
+    let snapshot = runtime
+        .apply_login_signal(ACCOUNT_ID, LoginSignal::BeginQr)
+        .expect("new QR session");
+    assert_eq!(snapshot.state, LoginState::AwaitingScan);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_runtime_recovers_the_verified_installed_sidecar_without_redownloading() {
+    let (signing_key, package, manifest, signature) = signed_sidecar();
+    let root = tempdir().expect("runtime root");
+    {
+        let mut runtime = SocialOperationsRuntime::new(
+            root.path(),
+            Some(signing_key.verifying_key().to_bytes()),
+            1024 * 1024,
+        )
+        .expect("first runtime");
+        runtime
+            .install_manifest(&manifest, &package, &signature)
+            .expect("signed install");
+    }
+
+    let mut recovered = SocialOperationsRuntime::new(
+        root.path(),
+        Some(signing_key.verifying_key().to_bytes()),
+        1024 * 1024,
+    )
+    .expect("recovered runtime");
+    let mut executor = LocalExecutorManager::default();
+    recovered
+        .prepare_account("douyin", ACCOUNT_ID)
+        .expect("profile");
+    for signal in [
+        LoginSignal::BeginQr,
+        LoginSignal::QrScanned,
+        LoginSignal::Authenticated,
+    ] {
+        recovered
+            .apply_login_signal(ACCOUNT_ID, signal)
+            .expect("login");
+    }
+    recovered
+        .start_account(ACCOUNT_ID, &mut executor)
+        .expect("start recovered install");
+    assert!(executor.status_snapshot().expect("status").running);
 }
 
 #[cfg(unix)]

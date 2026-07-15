@@ -29,6 +29,7 @@ export function createTauriPlatformAdapter(): PlatformAdapter {
       secureCredentials: true,
       rememberedLogin: true,
       localExecution: true,
+      socialOperations: true,
     }),
     runtimeConfig: () => invoke('platform_runtime_config'),
     selectFile: async (options = {}) => {
@@ -96,6 +97,47 @@ export function createTauriPlatformAdapter(): PlatformAdapter {
       }),
       status: () => invoke('local_executor_status', { capabilityId: 'social-operations' }),
       stop: () => invoke('local_executor_stop', { capabilityId: 'social-operations' }),
+    },
+    socialOperations: {
+      installSidecar: ({ manifest, package: packageBytes, signature }) => invoke<string>(
+        'social_sidecar_install',
+        {
+          manifest,
+          package: Array.from(packageBytes),
+          signature: Array.from(signature),
+        },
+      ),
+      downloadSidecar: ({ downloadUrl, manifest, signature }) => invoke<string>(
+        'social_sidecar_download',
+        { downloadUrl, manifest, signature: Array.from(signature) },
+      ),
+      prepareAccount: (platform, accountId) => invoke(
+        'social_account_prepare',
+        { platform, accountId },
+      ),
+      signalLogin: (accountId, signal) => invoke(
+        'social_account_login_signal',
+        { accountId, signal },
+      ),
+      storeCookies: (accountId, cookies) => invoke<void>(
+        'social_account_store_cookies',
+        { accountId, cookies: Array.from(cookies) },
+      ),
+      hasCookies: (accountId) => invoke<boolean>(
+        'social_account_has_cookies',
+        { accountId },
+      ),
+      startAccount: (accountId) => invoke('social_account_start', { accountId }),
+      invokeAccount: (accountId, request) => invoke(
+        'social_account_invoke',
+        { accountId, request },
+      ),
+      logoutAccount: (accountId) => invoke<void>('social_account_logout', { accountId }),
+      emergencyStop: (accountId) => invoke<void>(
+        'social_account_emergency_stop',
+        { accountId },
+      ),
+      takeSafeDiagnostics: () => invoke<string[]>('social_executor_take_safe_diagnostics'),
     },
   }
 }

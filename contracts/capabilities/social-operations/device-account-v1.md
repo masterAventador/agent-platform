@@ -17,7 +17,7 @@
 - 本地任务只投递给同租户、同所有者目标设备；离线或紧停设备不能领取，领取带有限租约，租约在 `lease_expires_at <= now` 时即可恢复，`claim_attempt` 必须递增；
 - 注册、心跳、投递、领取、紧停、账号绑定、健康、恢复和注销共享同一个进程内 `RLock` 线性化边界；claim/stop、enqueue/stop 和 account-execute/stop 的最终状态必须以紧停为安全终态；
 - 紧急停止原因只接受非敏感枚举，取消该设备尚未完成的排队或已领取任务、熔断关联账号并禁止继续投递；恢复紧急停止需要后续显式管理契约，不能由设备自行绕过；
-- 隔离 SQLite 适配器使用 `BEGIN IMMEDIATE` 和单调 revision 保存能力快照，逐级以 `O_DIRECTORY | O_NOFOLLOW` 打开祖先并以 `O_NOFOLLOW` 打开数据库，文件权限为 `0600`；持久化失败必须回滚同一临界区内的内存状态。跨进程生产原子领取必须由 Core PostgreSQL 适配器实现，不能宣称 SQLite 快照已覆盖该门禁。
+- 隔离 SQLite 适配器使用 `BEGIN IMMEDIATE` 和单调 revision 保存能力快照：逐级以 `O_DIRECTORY | O_NOFOLLOW` 打开祖先，最终父目录必须由当前用户持有且权限不宽于 `0700`，数据库必须由当前用户持有且权限不宽于 `0600`；应用在 `sqlite3.connect(path)` 前后分别以 `O_NOFOLLOW` 打开叶子并校验设备号和 inode，一旦发生替换或符号链接即关闭连接并拒绝。Python `sqlite3` 不能从已校验的文件描述符建立连接，因此这里的主要边界是应用私有目录，前后身份校验用于检测竞态，不能宣称 SQLite 自身使用了 `O_NOFOLLOW`。持久化失败必须回滚同一临界区内的内存状态。跨进程生产原子领取必须由 Core PostgreSQL 适配器实现，不能宣称 SQLite 快照已覆盖该门禁。
 
 ## 平台账号与人工接管
 

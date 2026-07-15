@@ -469,6 +469,7 @@ pub enum LoginSignal {
     Authenticated,
     CaptchaRequired,
     RiskControl,
+    LoginExpired,
     OperatorResume,
     Logout,
 }
@@ -506,6 +507,14 @@ impl QrLoginSession {
     }
 
     pub fn apply(&mut self, signal: LoginSignal) -> Result<LoginSnapshot, BrowserSessionError> {
+        if matches!(
+            signal,
+            LoginSignal::CaptchaRequired | LoginSignal::RiskControl | LoginSignal::LoginExpired
+        ) {
+            self.snapshot.state = LoginState::HumanHandoff;
+            self.snapshot.circuit_open = true;
+            return Ok(self.snapshot);
+        }
         if self.snapshot.state == LoginState::HumanHandoff
             && signal != LoginSignal::OperatorResume
             && signal != LoginSignal::Logout
@@ -514,10 +523,6 @@ impl QrLoginSession {
         }
 
         match signal {
-            LoginSignal::CaptchaRequired | LoginSignal::RiskControl => {
-                self.snapshot.state = LoginState::HumanHandoff;
-                self.snapshot.circuit_open = true;
-            }
             LoginSignal::OperatorResume if self.snapshot.state == LoginState::HumanHandoff => {
                 self.snapshot.state = LoginState::AwaitingScan;
                 self.snapshot.circuit_open = true;
@@ -540,6 +545,9 @@ impl QrLoginSession {
                 self.snapshot.state = LoginState::LoggedOut;
                 self.snapshot.circuit_open = true;
                 self.snapshot.session_revision += 1;
+            }
+            LoginSignal::CaptchaRequired | LoginSignal::RiskControl | LoginSignal::LoginExpired => {
+                unreachable!("handled as fail-safe signals above")
             }
             _ => return Err(BrowserSessionError::InvalidLoginTransition),
         }

@@ -223,6 +223,43 @@ impl TrustedSidecarInstaller {
         package: &[u8],
         signature: &[u8],
     ) -> Result<PathBuf, SidecarPackageError> {
+        self.verify_manifest_package(manifest, package, signature)?;
+        if let Some(current) = self.current_version()? {
+            if compare_versions(&manifest.version, &current)? == std::cmp::Ordering::Less {
+                return Err(SidecarPackageError::RollbackRejected);
+            }
+        }
+        let installed = self.install_verified(&manifest.version, package)?;
+        self.write_signed_metadata(manifest, signature)?;
+        self.write_current_version(&manifest.version)?;
+        Ok(installed)
+    }
+
+    pub fn installed_current_verified(&self) -> Result<Option<PathBuf>, SidecarPackageError> {
+        let Some(version) = self.current_version()? else {
+            return Ok(None);
+        };
+        let version_dir = self.root.join("sidecars").join(&version);
+        ensure_existing_private_directory(&version_dir)?;
+        let manifest_bytes = read_private_bounded(&version_dir.join(".manifest.json"), 4096)?;
+        let signature = read_private_bounded(&version_dir.join(".manifest.sig"), 128)?;
+        let manifest: SignedSidecarManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| SidecarPackageError::SignatureInvalid)?;
+        if manifest.version != version {
+            return Err(SidecarPackageError::SignatureInvalid);
+        }
+        let executable = version_dir.join("social-operations-sidecar");
+        let package = read_private_bounded(&executable, self.max_package_bytes)?;
+        self.verify_manifest_package(&manifest, &package, &signature)?;
+        Ok(Some(executable))
+    }
+
+    fn verify_manifest_package(
+        &self,
+        manifest: &SignedSidecarManifest,
+        package: &[u8],
+        signature: &[u8],
+    ) -> Result<(), SidecarPackageError> {
         validate_version(&manifest.version)?;
         if manifest.platform != std::env::consts::OS || manifest.arch != std::env::consts::ARCH {
             return Err(SidecarPackageError::PlatformMismatch);
@@ -241,14 +278,20 @@ impl TrustedSidecarInstaller {
         if manifest.sha256 != hex_digest(package) {
             return Err(SidecarPackageError::DigestMismatch);
         }
-        if let Some(current) = self.current_version()? {
-            if compare_versions(&manifest.version, &current)? == std::cmp::Ordering::Less {
-                return Err(SidecarPackageError::RollbackRejected);
-            }
-        }
-        let installed = self.install_verified(&manifest.version, package)?;
-        self.write_current_version(&manifest.version)?;
-        Ok(installed)
+        Ok(())
+    }
+
+    fn write_signed_metadata(
+        &self,
+        manifest: &SignedSidecarManifest,
+        signature: &[u8],
+    ) -> Result<(), SidecarPackageError> {
+        let version_dir = self.root.join("sidecars").join(&manifest.version);
+        ensure_existing_private_directory(&version_dir)?;
+        let manifest_bytes =
+            serde_json::to_vec(manifest).map_err(|_| SidecarPackageError::IoUnavailable)?;
+        write_private_atomic(&version_dir, ".manifest.json", &manifest_bytes)?;
+        write_private_atomic(&version_dir, ".manifest.sig", signature)
     }
 
     pub fn install_bytes(
@@ -303,10 +346,8 @@ impl TrustedSidecarInstaller {
                 Err(SidecarPackageError::InvalidRoot)
             }
             Ok(_) => {
-                let mut file = open_private_read(&marker)?;
-                let mut value = String::new();
-                file.read_to_string(&mut value)
-                    .map_err(|_| SidecarPackageError::IoUnavailable)?;
+                let value = String::from_utf8(read_private_bounded(&marker, 64)?)
+                    .map_err(|_| SidecarPackageError::InvalidVersion)?;
                 validate_version(value.trim())?;
                 Ok(Some(value.trim().to_owned()))
             }
@@ -317,19 +358,53 @@ impl TrustedSidecarInstaller {
 
     fn write_current_version(&self, version: &str) -> Result<(), SidecarPackageError> {
         let sidecars = create_private_child(&self.root, "sidecars")?;
-        let marker = sidecars.join(".current-version");
-        let staging = unique_staging(&sidecars, ".current-version")?;
+        write_private_atomic(&sidecars, ".current-version", version.as_bytes())
+    }
+}
+
+fn ensure_existing_private_directory(path: &Path) -> Result<(), SidecarPackageError> {
+    ensure_no_symlink_ancestors(path)?;
+    let metadata = path
+        .symlink_metadata()
+        .map_err(|_| SidecarPackageError::IoUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(SidecarPackageError::InvalidRoot);
+    }
+    set_private_directory_permissions(path)
+}
+
+fn read_private_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, SidecarPackageError> {
+    let mut file = open_private_read(path)?;
+    let mut contents = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut contents)
+        .map_err(|_| SidecarPackageError::IoUnavailable)?;
+    if contents.len() > max_bytes {
+        return Err(SidecarPackageError::PackageTooLarge);
+    }
+    Ok(contents)
+}
+
+fn write_private_atomic(
+    parent: &Path,
+    filename: &str,
+    contents: &[u8],
+) -> Result<(), SidecarPackageError> {
+    let destination = parent.join(filename);
+    let staging = unique_staging(parent, filename)?;
+    let result = (|| {
         let mut file = open_new_private(&staging)?;
-        file.write_all(version.as_bytes())
+        file.write_all(contents)
             .and_then(|_| file.sync_all())
             .map_err(|_| SidecarPackageError::IoUnavailable)?;
         set_private_file_permissions(&staging)?;
-        let result = atomic_replace(&staging, &marker);
-        if result.is_err() {
-            let _ = fs::remove_file(&staging);
-        }
-        result
+        atomic_replace(&staging, &destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
     }
+    result
 }
 
 fn trusted_download_url(url: &reqwest::Url) -> bool {
@@ -589,7 +664,7 @@ fn apply_windows_acl(path: &Path, directory: bool) -> Result<(), SidecarPackageE
 pub fn redact_log_line(line: &str) -> String {
     static BEARER: OnceLock<Regex> = OnceLock::new();
     static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
-    static SET_COOKIE: OnceLock<Regex> = OnceLock::new();
+    static COOKIE_HEADER: OnceLock<Regex> = OnceLock::new();
     static JSON_SECRET: OnceLock<Regex> = OnceLock::new();
     static QUERY_SECRET: OnceLock<Regex> = OnceLock::new();
     static PRIVATE_PATH: OnceLock<Regex> = OnceLock::new();
@@ -598,8 +673,9 @@ pub fn redact_log_line(line: &str) -> String {
     let assignment = ASSIGNMENT.get_or_init(|| {
         Regex::new(r"(?i)(cookie|token|password|secret|api[_-]?key)=[^\s]+").expect("valid regex")
     });
-    let set_cookie =
-        SET_COOKIE.get_or_init(|| Regex::new(r"(?i)Set-Cookie:\s*[^\s]+").expect("valid regex"));
+    let cookie_header = COOKIE_HEADER.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:Set-Cookie|Cookie):\s*[^\r\n]+").expect("valid regex")
+    });
     let json_secret = JSON_SECRET.get_or_init(|| {
         Regex::new(
             r#"(?i)\\?[\"'](cookie|token|password|secret|api[_-]?key)\\?[\"']\s*:\s*\\?[\"'][^\"']+\\?[\"']"#,
@@ -613,12 +689,12 @@ pub fn redact_log_line(line: &str) -> String {
         .expect("valid regex")
     });
     let private_path = PRIVATE_PATH.get_or_init(|| {
-        Regex::new(r"(?i)(?:/Users|/home|/root|/tmp|/private/var/folders)/[^\s]+|[A-Z]:\\[^\s]+")
+        Regex::new(r"(?i)(?:/Users|/home|/root|/tmp|/var/folders|/private/var/folders)/[^\s]+|[A-Z]:\\[^\s]+")
             .expect("valid regex")
     });
 
     let line = bearer.replace_all(line, "Bearer [REDACTED]");
-    let line = set_cookie.replace_all(&line, "Set-Cookie: [REDACTED]");
+    let line = cookie_header.replace_all(&line, "Cookie: [REDACTED]");
     let line = json_secret.replace_all(&line, "\"$1\":\"[REDACTED]\"");
     let line = query_secret.replace_all(&line, "$1[REDACTED]");
     let line = assignment.replace_all(&line, "$1=[REDACTED]");

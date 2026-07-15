@@ -17,6 +17,7 @@ export function getPlatformAdapter(): PlatformAdapter {
 
 export type {
   FileSelectionOptions,
+  JsonValue,
   LocalExecutorBridge,
   LocalExecutorStatus,
   PlatformAdapter,
@@ -27,5 +28,13 @@ export type {
   SaveFileOptions,
   SaveFileResult,
   SecureCredentialStore,
+  SocialAccountSnapshot,
+  SocialLoginSignal,
+  SocialLoginState,
+  SocialOperationsBridge,
+  SocialPlatform,
+  SocialSidecarDownloadInput,
+  SocialSidecarInstallInput,
+  SocialSidecarManifest,
 } from './types'
 export { PlatformCapabilityError, PlatformOperationError } from './types'

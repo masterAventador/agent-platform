@@ -71,6 +71,7 @@ export function createWebPlatformAdapter(): PlatformAdapter {
       secureCredentials: false,
       rememberedLogin: false,
       localExecution: false,
+      socialOperations: false,
     }),
     runtimeConfig: async () => ({ apiBaseUrl: null, webUrl: null }),
     selectFile,
@@ -101,6 +102,19 @@ export function createWebPlatformAdapter(): PlatformAdapter {
       invoke: async () => { throw new PlatformCapabilityError('localExecution') },
       status: async () => { throw new PlatformCapabilityError('localExecution') },
       stop: async () => { throw new PlatformCapabilityError('localExecution') },
+    },
+    socialOperations: {
+      installSidecar: async () => { throw new PlatformCapabilityError('socialOperations') },
+      downloadSidecar: async () => { throw new PlatformCapabilityError('socialOperations') },
+      prepareAccount: async () => { throw new PlatformCapabilityError('socialOperations') },
+      signalLogin: async () => { throw new PlatformCapabilityError('socialOperations') },
+      storeCookies: async () => { throw new PlatformCapabilityError('socialOperations') },
+      hasCookies: async () => { throw new PlatformCapabilityError('socialOperations') },
+      startAccount: async () => { throw new PlatformCapabilityError('socialOperations') },
+      invokeAccount: async () => { throw new PlatformCapabilityError('socialOperations') },
+      logoutAccount: async () => { throw new PlatformCapabilityError('socialOperations') },
+      emergencyStop: async () => { throw new PlatformCapabilityError('socialOperations') },
+      takeSafeDiagnostics: async () => { throw new PlatformCapabilityError('socialOperations') },
     },
   }
 }

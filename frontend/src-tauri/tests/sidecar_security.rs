@@ -222,11 +222,39 @@ fn signed_manifest_binds_digest_version_platform_arch_and_blocks_rollback() {
 #[test]
 fn redaction_covers_set_cookie_json_and_query_credentials() {
     let safe = redact_log_line(
-        r#"Set-Cookie: sid=abc123; token=xyz {\"password\":\"hunter2\"} https://x.test?a=1&access_token=secret"#,
+        r#"Cookie: sid=plain; Set-Cookie: sid=abc123; token=xyz {\"password\":\"hunter2\"} https://x.test?a=1&access_token=secret /var/folders/aa/user/cache /private/var/folders/bb/user/cache"#,
     );
-    for secret in ["abc123", "xyz", "hunter2", "secret"] {
+    for secret in ["plain", "abc123", "xyz", "hunter2", "secret", "user"] {
         assert!(!safe.contains(secret));
     }
+}
+
+#[test]
+fn signed_manifest_metadata_allows_verified_recovery_and_rejects_tampering() {
+    let (signing_key, package, _) = signed_package();
+    let root = tempdir().expect("temp root");
+    let installer =
+        TrustedSidecarInstaller::new(root.path(), signing_key.verifying_key().to_bytes(), 1024)
+            .expect("installer");
+    let (manifest, signature) = signed_manifest(&signing_key, "4.0.0", &package);
+    let installed = installer
+        .install_manifest(&manifest, &package, &signature)
+        .expect("signed manifest install");
+
+    assert_eq!(
+        installer
+            .installed_current_verified()
+            .expect("recover verified install"),
+        Some(installed.clone())
+    );
+
+    std::fs::write(&installed, vec![b'x'; package.len()]).expect("tamper executable");
+    assert_eq!(
+        installer
+            .installed_current_verified()
+            .expect_err("tampered recovered executable must fail"),
+        SidecarPackageError::DigestMismatch
+    );
 }
 
 #[test]
