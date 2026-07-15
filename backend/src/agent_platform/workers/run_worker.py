@@ -45,6 +45,7 @@ from agent_platform.infrastructure.queue.redis_streams import (
 from agent_platform.platform.conversations.entities import (
     ConversationMessage,
     ConversationMessageRole,
+    limit_conversation_message_content,
 )
 from agent_platform.platform.runs.commands import RunCommand
 from agent_platform.platform.runs.entities import Run, RunStatus
@@ -791,15 +792,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
@@ -944,15 +949,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             await session.commit()
 
@@ -987,15 +996,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             if settle_approval_id is not None:
                 await self._settle_approval_commands(
@@ -1116,11 +1129,15 @@ class RunWorker:
             content: str | None = None
             if event.type is EventType.MESSAGE_OUTPUT:
                 role = ConversationMessageRole.ASSISTANT
-                content = RunWorker._message_content(event.payload.get("content"))
+                content = limit_conversation_message_content(
+                    RunWorker._message_content(event.payload.get("content"))
+                )
             elif event.type is EventType.RUN_FAILED:
                 role = ConversationMessageRole.ERROR
-                content = RunWorker._message_content(
-                    event.payload.get("code") or event.payload.get("error_code") or "run_failed"
+                content = limit_conversation_message_content(
+                    RunWorker._message_content(
+                        event.payload.get("code") or event.payload.get("error_code") or "run_failed"
+                    )
                 )
             if role is None or content is None:
                 continue

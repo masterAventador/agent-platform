@@ -27,6 +27,7 @@ from agent_platform.infrastructure.database.repositories.runs import (
 )
 from agent_platform.platform.artifacts.entities import File, TaskAttachment
 from agent_platform.platform.conversations.entities import (
+    MAX_CONVERSATION_MESSAGE_CONTENT_CHARS,
     Conversation,
     ConversationMessage,
     ConversationMessageRole,
@@ -46,7 +47,7 @@ router = APIRouter(prefix="/api/v1", tags=["conversations"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
 
 CONTEXT_MAX_MESSAGES = 8
-CONTEXT_MAX_CHARS = 12_000
+CONTEXT_MAX_CHARS = MAX_CONVERSATION_MESSAGE_CONTENT_CHARS
 
 
 class CreateConversationRequest(BaseModel):
@@ -55,7 +56,7 @@ class CreateConversationRequest(BaseModel):
 
 
 class AppendMessageRequest(BaseModel):
-    content: str = Field(min_length=1, max_length=12_000)
+    content: str = Field(min_length=1, max_length=MAX_CONVERSATION_MESSAGE_CONTENT_CHARS)
     attachment_ids: list[UUID] = Field(default_factory=list, max_length=20)
     dispatch: bool = True
 

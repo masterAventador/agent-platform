@@ -25,6 +25,7 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunRepository,
 )
 from agent_platform.platform.conversations.entities import (
+    MAX_CONVERSATION_MESSAGE_CONTENT_CHARS,
     Conversation,
     ConversationMessage,
     ConversationMessageRole,
@@ -69,7 +70,7 @@ class ConversationMessageRecord(Base):
     )
     sequence: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(32))
-    content: Mapped[str] = mapped_column(String(12000))
+    content: Mapped[str] = mapped_column(String(MAX_CONVERSATION_MESSAGE_CONTENT_CHARS))
     attachment_ids: Mapped[list[str]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 

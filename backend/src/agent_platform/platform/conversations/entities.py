@@ -1,7 +1,25 @@
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 from uuid import UUID, uuid4
+
+MAX_CONVERSATION_MESSAGE_CONTENT_CHARS = 12_000
+CONVERSATION_MESSAGE_TRUNCATED_MARKER = "内容已截断"
+
+
+def limit_conversation_message_content(content: str) -> str:
+    if len(content) <= MAX_CONVERSATION_MESSAGE_CONTENT_CHARS:
+        return content
+    digest = sha256(content.encode("utf-8")).hexdigest()[:12]
+    suffix = (
+        f"\n\n[{CONVERSATION_MESSAGE_TRUNCATED_MARKER}，完整输出保留在任务事件中；"
+        f"sha256:{digest}]"
+    )
+    prefix_chars = MAX_CONVERSATION_MESSAGE_CONTENT_CHARS - len(suffix)
+    if prefix_chars <= 0:
+        return content[:MAX_CONVERSATION_MESSAGE_CONTENT_CHARS]
+    return f"{content[:prefix_chars]}{suffix}"
 
 
 class ConversationMessageRole(StrEnum):
@@ -80,7 +98,7 @@ class ConversationMessage:
             conversation_id=conversation_id,
             sequence=sequence,
             role=role,
-            content=content,
+            content=limit_conversation_message_content(content),
             run_id=run_id,
             attachment_ids=attachment_ids,
             created_at=datetime.now(UTC),

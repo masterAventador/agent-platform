@@ -41,7 +41,12 @@ from agent_platform.infrastructure.queue.redis_streams import (
     RunQueueDelivery,
     RunQueueMessage,
 )
-from agent_platform.platform.conversations.entities import Conversation, ConversationMessageRole
+from agent_platform.platform.conversations.entities import (
+    CONVERSATION_MESSAGE_TRUNCATED_MARKER,
+    MAX_CONVERSATION_MESSAGE_CONTENT_CHARS,
+    Conversation,
+    ConversationMessageRole,
+)
 from agent_platform.platform.employees.entities import EmployeeVersion
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
@@ -136,6 +141,10 @@ class InteractiveRuntime(CompletingRuntime):
 
 
 class ConversationOutputRuntime(CompletingRuntime):
+    def __init__(self, content: str = "会话里的最终答复") -> None:
+        super().__init__()
+        self.content = content
+
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
         self.requests.append(request)
         self.events = [
@@ -153,7 +162,7 @@ class ConversationOutputRuntime(CompletingRuntime):
                 run_id=request.run_id,
                 sequence=2,
                 event_type=EventType.MESSAGE_OUTPUT,
-                payload={"content": "会话里的最终答复"},
+                payload={"content": self.content},
             ),
             PlatformEvent.create(
                 tenant_id=request.tenant_id,
@@ -167,7 +176,7 @@ class ConversationOutputRuntime(CompletingRuntime):
         self.state = RuntimeState(
             run_id=request.run_id,
             status=RunStatus.COMPLETED,
-            data={"output": "会话里的最终答复"},
+            data={"output": self.content},
         )
         return self.state
 
@@ -873,6 +882,85 @@ async def test_worker_persists_message_output_into_conversation_timeline(factory
 
 
 @pytest.mark.asyncio
+async def test_worker_bounds_long_message_output_without_blocking_run_completion(factory) -> None:
+    long_content = "长" * (MAX_CONVERSATION_MESSAGE_CONTENT_CHARS + 99)
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="超长输出回写",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
+        input_data={"message": "请输出长文本"},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"runtime_type": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="conversation-long-output",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(ConversationOutputRuntime(long_content)),
+        consumer_name="conversation-long-output-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    assert events[1].payload == {"content": long_content}
+    assert len(messages) == 1
+    assert messages[0].role is ConversationMessageRole.ASSISTANT
+    assert messages[0].run_id == run.id
+    assert len(messages[0].content) == MAX_CONVERSATION_MESSAGE_CONTENT_CHARS
+    assert CONVERSATION_MESSAGE_TRUNCATED_MARKER in messages[0].content
+
+
+@pytest.mark.asyncio
 async def test_worker_observes_cancel_intent_during_blocking_start_and_stops_runtime(
     factory,
 ) -> None:
@@ -1560,12 +1648,20 @@ async def test_terminal_persistence_prefers_cancel_committed_after_runtime_retur
 
 @pytest.mark.asyncio
 async def test_permanent_preparation_failure_is_persisted_and_acknowledged(factory) -> None:
-    run = Run.create(
+    conversation = Conversation.create(
         tenant_id=uuid4(),
         employee_id=uuid4(),
-        employee_version=1,
         created_by=uuid4(),
+        title="准备失败回写",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
         input_data={},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
     )
     command = RunCommand.create(
         run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
@@ -1580,6 +1676,7 @@ async def test_permanent_preparation_failure_is_persisted_and_acknowledged(facto
         published_at=datetime.now(UTC),
     )
     async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
         await SqlAlchemyRunRepository(session).add(run)
         await SqlAlchemyEmployeeVersionRepository(session).add(version)
         await SqlAlchemyRunCommandRepository(session).add(command)
@@ -1615,6 +1712,13 @@ async def test_permanent_preparation_failure_is_persisted_and_acknowledged(facto
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert events[-1].payload == {"code": "invalid_runtime_definition"}
         assert "secret definition detail" not in repr(events)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert [(message.role, message.content, message.run_id) for message in messages] == [
+        (ConversationMessageRole.ERROR, "invalid_runtime_definition", run.id)
+    ]
 
 
 @pytest.mark.asyncio
