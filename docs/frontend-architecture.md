@@ -247,6 +247,8 @@ SkillExecution
 
 自主型、流程型和混合型员工使用相同任务页面骨架。前端不得展示 `runtime_type`，也不得根据底层框架名称硬编码页面分支。
 
+员工声明 `file_upload` 后，发起任务弹窗通过 `PlatformAdapter.selectFile()` 选择文件，先上传并取得稳定 `file_id`，再以 `attachment_ids` 创建任务。任务详情以租户作用域 Query 展示持久产物目录，文本和 JSON 可内嵌预览，下载统一经过 `PlatformAdapter.saveFile()`；定位依赖 `artifact.created` 事件中的稳定 `artifact_id`，删除成功后使同一租户、同一任务的产物缓存失效。Web 与 Tauri 共用这些业务规则，不直接操作对象存储 Key。
+
 ## 8. 状态管理边界
 
 ### 8.1 TanStack Query

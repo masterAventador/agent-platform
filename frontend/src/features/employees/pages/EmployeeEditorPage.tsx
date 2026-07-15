@@ -51,8 +51,7 @@ export function EmployeeEditorPage() {
   const hasLegacyWorkMode = legacyDefinition?.work_mode !== undefined
     && legacyDefinition.work_mode !== 'autonomous'
   const hasLegacyUnavailableCapability = Boolean(
-    legacyDefinition?.capabilities.file_upload
-    || legacyDefinition?.capabilities.scheduled_tasks,
+    legacyDefinition?.capabilities.scheduled_tasks,
   )
 
   useEffect(() => {
@@ -65,7 +64,7 @@ export function EmployeeEditorPage() {
       systemPrompt: employee.definition.system_prompt,
       modelAlias: 'general-purpose',
       conversation: employee.definition.capabilities.conversation,
-      fileUpload: false,
+      fileUpload: employee.definition.capabilities.file_upload,
       scheduledTasks: false,
       skillIds: employee.definition.skill_ids,
       toolIds: employee.definition.tool_ids,
@@ -94,7 +93,7 @@ export function EmployeeEditorPage() {
       capabilities: {
         conversation: values.conversation,
         scheduled_tasks: false,
-        file_upload: false,
+        file_upload: values.fileUpload,
       },
       skill_ids: values.skillIds,
       tool_ids: values.toolIds,
@@ -145,8 +144,8 @@ export function EmployeeEditorPage() {
             className="employee-form-error"
             type="warning"
             showIcon
-            title="历史配置声明了尚未接通的能力"
-            description="文件上传或定时任务当前并未真实接通。本次保存会将这些声明修正为关闭。"
+            title="历史配置使用了尚未接通的定时任务"
+            description="定时任务当前并未真实接通，本次保存会将该声明修正为关闭。"
           />
         )}
         <Form<EmployeeFormValues>
@@ -194,14 +193,14 @@ export function EmployeeEditorPage() {
                 <Checkbox>支持对话</Checkbox>
               </Form.Item>
               <Form.Item name="fileUpload" valuePropName="checked" noStyle>
-                <Checkbox disabled>支持文件上传（尚未接通）</Checkbox>
+                <Checkbox>支持文件上传</Checkbox>
               </Form.Item>
               <Form.Item name="scheduledTasks" valuePropName="checked" noStyle>
                 <Checkbox disabled>支持定时任务（尚未接通）</Checkbox>
               </Form.Item>
             </Space>
             <Typography.Paragraph type="secondary">
-              文件上传与定时任务尚未接通，保存时始终保持关闭；对话能力可正常配置。
+              文件上传已接通，可在任务发起时选择附件；定时任务尚未接通，保存时始终保持关闭。
             </Typography.Paragraph>
           </Form.Item>
           <Form.Item label="Skills" name="skillIds">

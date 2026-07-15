@@ -47,3 +47,34 @@ def test_production_auth_transport_accepts_secure_cross_site_cookie() -> None:
 
     assert settings.auth_cookie_secure is True
     assert settings.auth_cookie_same_site == "none"
+
+
+def test_tencent_cos_requires_region_and_credentials() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(artifact_storage_provider="tencent-cos")
+
+
+def test_artifact_storage_heartbeat_must_be_shorter_than_lease() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(
+            artifact_storage_operation_lease_seconds=5,
+            artifact_storage_operation_heartbeat_seconds=5,
+        )
+
+
+def test_artifact_tombstone_observation_must_cover_provider_timeout_and_rescan() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(
+            artifact_storage_request_timeout_seconds=30,
+            artifact_storage_tombstone_observation_seconds=34,
+            artifact_storage_tombstone_rescan_seconds=5,
+        )
+
+
+def test_unbound_file_cleanup_uses_a_bounded_default_interval() -> None:
+    settings = AppSettings()
+
+    assert settings.artifact_unbound_file_cleanup_interval_seconds == 300
+
+    with pytest.raises(ValidationError):
+        AppSettings(artifact_unbound_file_cleanup_interval_seconds=4)

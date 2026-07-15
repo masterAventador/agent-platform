@@ -1,5 +1,8 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from fastapi import FastAPI, Request, status
@@ -7,8 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.api.middleware.request_body_limit import (
+    FileUploadRequestBodyLimitMiddleware,
+)
+from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
@@ -20,6 +27,16 @@ from agent_platform.api.routes.tools import mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.engine import create_database_engine
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
+    SqlAlchemyFileRepository,
+)
+from agent_platform.infrastructure.object_storage.artifacts import (
+    create_artifact_storage_provider,
+    create_bounded_minio_client,
+)
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -29,6 +46,8 @@ from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimi
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
+from agent_platform.platform.artifacts.services import ArtifactService
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
@@ -38,6 +57,8 @@ from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.skills.ports import SkillStorage
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(
     *,
@@ -46,6 +67,7 @@ def create_app(
     auth_rate_limiter: AuthRateLimiter | None = None,
     knowledge_provider: KnowledgeProvider | None = None,
     skill_storage: SkillStorage | None = None,
+    artifact_storage: ArtifactStorageProvider | None = None,
     telemetry: Telemetry | None = None,
 ) -> FastAPI:
     initialize_database_metadata()
@@ -54,7 +76,7 @@ def create_app(
     app_telemetry.instrument_libraries()
     owned_engine = None
     if session_factory is None:
-        owned_engine = create_async_engine(app_settings.database_url)
+        owned_engine = create_database_engine(app_settings.database_url)
         session_factory = async_sessionmaker(owned_engine, expire_on_commit=False)
 
     owned_redis: Redis | None = None
@@ -74,23 +96,78 @@ def create_app(
         )
         knowledge_provider = owned_knowledge_provider
 
+    minio_client: Minio | None = None
+    if skill_storage is None or artifact_storage is None:
+        minio_client = create_bounded_minio_client(app_settings)
     if skill_storage is None:
-        minio_client = Minio(
-            app_settings.minio_endpoint,
-            access_key=app_settings.minio_access_key,
-            secret_key=app_settings.minio_secret_key,
-            secure=app_settings.minio_secure,
-        )
         skill_storage = MinioSkillStorage(
-            client=cast(MinioClient, minio_client),
-            bucket=app_settings.skill_storage_bucket,
+            client=cast(MinioClient, minio_client), bucket=app_settings.skill_storage_bucket
         )
+    if artifact_storage is None:
+        artifact_storage = create_artifact_storage_provider(
+            settings=app_settings,
+            minio_client=cast(MinioClient, minio_client) if minio_client is not None else None,
+        )
+    configured_session_factory = session_factory
+    configured_artifact_storage = artifact_storage
+
+    async def reconcile_artifact_storage() -> None:
+        next_unbound_cleanup_at = 0.0
+        while True:
+            try:
+                async with configured_session_factory() as session:
+                    service = ArtifactService(
+                        file_repository=SqlAlchemyFileRepository(session),
+                        artifact_repository=SqlAlchemyArtifactRepository(session),
+                        operation_repository=(
+                            SqlAlchemyArtifactStorageOperationRepository(
+                                session,
+                                heartbeat_session_factory=configured_session_factory,
+                            )
+                        ),
+                        storage=configured_artifact_storage,
+                        operation_lease_duration=timedelta(
+                            seconds=app_settings.artifact_storage_operation_lease_seconds
+                        ),
+                        operation_heartbeat_interval=(
+                            app_settings.artifact_storage_operation_heartbeat_seconds
+                        ),
+                        storage_request_timeout=(
+                            app_settings.artifact_storage_request_timeout_seconds
+                        ),
+                        tombstone_observation_duration=timedelta(
+                            seconds=(app_settings.artifact_storage_tombstone_observation_seconds)
+                        ),
+                        tombstone_rescan_interval=timedelta(
+                            seconds=app_settings.artifact_storage_tombstone_rescan_seconds
+                        ),
+                    )
+                    await service.reconcile_pending(commit=session.commit)
+                    loop_time = asyncio.get_running_loop().time()
+                    if loop_time >= next_unbound_cleanup_at:
+                        next_unbound_cleanup_at = loop_time + (
+                            app_settings.artifact_unbound_file_cleanup_interval_seconds
+                        )
+                        await service.cleanup_unbound_files(
+                            older_than=datetime.now(UTC)
+                            - timedelta(seconds=app_settings.artifact_unbound_file_ttl_seconds),
+                            commit=session.commit,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("artifact_storage_reconciliation_failed")
+            await asyncio.sleep(5)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
         try:
             yield
         finally:
+            reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconciliation_task
             try:
                 if owned_engine is not None:
                     await owned_engine.dispose()
@@ -102,12 +179,19 @@ def create_app(
                 app_telemetry.shutdown()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(FileUploadRequestBodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(app_settings.cors_allowed_origins),
         allow_credentials=True,
         allow_methods=["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
-        allow_headers=["Accept", "Authorization", "Content-Type"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Tenant-ID",
+        ],
     )
     app.state.settings = app_settings
     app.state.telemetry = app_telemetry
@@ -118,9 +202,11 @@ def create_app(
     app.state.knowledge_provider = knowledge_provider
     app.state.knowledge_provider_registry = KnowledgeProviderRegistry([knowledge_provider])
     app.state.skill_storage = skill_storage
+    app.state.artifact_storage = artifact_storage
     app.include_router(auth_router)
     app.include_router(employees_router)
     app.include_router(runs_router)
+    app.include_router(artifacts_router)
     app.include_router(dead_letters_router)
     app.include_router(knowledge_router)
     app.include_router(skills_router)

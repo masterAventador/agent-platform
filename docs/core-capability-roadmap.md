@@ -61,7 +61,7 @@
 | 工程质量基线 | 已完成 | 后端 0 失败；真实依赖跳过项均明确标注所需外部依赖 | C01 |
 | Tauri 桌面客户端 | 已完成 | 共享 React、`PlatformAdapter`、macOS/Windows 构建和真实桌面 E2E 已落地 | C02 |
 | 全栈真实验收与工作台 | 已完成 | 本地 Stub 成功/受控失败整栈闭环、工作台真实数据、Tauri 内核心流程及百炼真实请求均已通过 | C03 |
-| 文件与产物 | 未实现 | 文件上传关闭，运行时 `get_artifacts()` 返回空列表 | C04 |
+| 文件与产物 | 已完成 | 租户隔离的附件、沙箱物化、持久产物目录与客户端闭环已落地 | C04 |
 | 多轮会话 | 部分完成 | 主要是一次性任务，没有完整消息、追加输入和恢复体验 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
 | 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
@@ -165,7 +165,13 @@
 
 ### C04 文件上传、任务工作区与产物系统
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-15**
+
+**完成日期：2026-07-15**
+
+**质量收口日期：2026-07-16**
 
 完成定义：
 
@@ -174,7 +180,10 @@
 - 员工任务支持文件输入，沙箱可在授权范围读取，Agent 可创建产物；
 - `EmployeeRuntime.get_artifacts()` 返回真实数据；
 - 客户端支持选择、上传、预览、下载、定位和删除；
-- 覆盖租户隔离、大小/类型限制、失败清理、恶意路径和权限 E2E。
+- 跨数据库与对象存储变更通过持久操作日志、协调器重放和取消归并形成可恢复 Saga；
+- 覆盖租户隔离、大小/类型/内容限制、并发事件序号、失败恢复、恶意路径和权限 E2E。
+
+2026-07-16 完成最终质量收口：上传请求体在 multipart 解析和认证前即受控限流，重复/伪造长度头失败关闭；API、Controller 与真实 Sandbox 统一为 25 MiB；未绑定文件具备客户端补偿和服务端 TTL 两级回收，清扫成功或失败都受固定间隔节流；任务提交同时具备同步互斥和服务端幂等键，任务意图改变会生成新键；对象存储 SDK 的单次调用与重试受操作期限约束，迟到 put tombstone 在持久观察窗口内重扫，最终删除失败也会记录并退休；首次附件物化异常或取消都会删除新建 Sandbox/lease。本轮质量收口新增 `20260716_0020` 前向迁移，C04 既有领域建模迁移 `20260716_0018`/`20260716_0019` 保持可升级、可降级。
 
 ### C05 多轮会话与追加输入
 
@@ -407,24 +416,25 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 ## 6. 当前验证基线
 
-基线日期：2026-07-15。
+基线日期：2026-07-16。
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 收集 585 项：550 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
-| 后端 Unit + Contract | 580 项通过；包含 Core API route manifest 与工作台严格响应契约 |
+| 后端 Pytest | 默认环境收集 958 项：919 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
+| 后端 Unit + Contract | 780 项通过；新增覆盖前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
+| C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
-| Mypy | 159 个源码文件通过 |
-| 前端 Vitest | 23 个测试文件、98 项测试通过；含 PlatformAdapter、工作台 API/查询/页面与架构边界测试 |
+| Mypy | 170 个源码文件通过 |
+| 前端 Vitest | 28 个测试文件、119 项测试通过；新增同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
-| Playwright Web 业务回归 | 14 项通过；本机 Chrome 149 下以 `--trace=off` 规避既有 trace 收尾阻塞，测试服务与容器自动清理 |
+| Playwright Web 业务回归 | 15 项完整回归通过；PostgreSQL、Redis、MinIO 与 API 均支持测试进程传入的随机隔离端口，C04 附件场景以延迟上传同步双击验证 1 upload/1 Run；另有正式随机 MVP Profile 3 项真实 Worker/Sandbox 纵切通过，测试容器、网络和卷已销毁 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
 | 百炼最小真实请求 | `bash infra/litellm/test.sh real-provider` 通过 `general-purpose` 稳定别名、隔离 LiteLLM 和北京地域兼容接口调用 `qwen-plus` 成功，返回 23 Token；临时容器、网络和卷清零 |
-| 无付费模型默认回归 | LiteLLM 配置契约 17 项、Stub HTTP 协议 3 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目；包含仅由显式测试场景触发的确定性 HTTP 500 响应 |
+| 无付费模型默认回归 | LiteLLM 配置契约 17 项、Stub HTTP 协议 5 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目；包含仅由显式测试场景触发的确定性 HTTP 500，以及真实附件相对路径的 `glob → read_file → write_file → create_artifact` 序列 |
 | C03 MVP Profile 基础设施验收 | 隔离唯一随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、状态查询、重复启动、故障健康检查、保留卷停止、失败重启清理与恢复、同 Profile 并发拒绝、工作树镜像隔离及最终容器/网络/卷清理通过；dotenv 不执行、运行目录/权限/端口/网络配置校验通过；平台契约 42 项通过；行为回归额外覆盖无 `rg` 时预存卷保护、重复启动失败不拆既有容器、缺失环境状态时停止失败关闭、LiteLLM 网络检查异常失败关闭、外来网络拒绝删除、网络删除失败传播、Compose `up` 前分组端口占用拒绝，以及启动期间 `INT`/`TERM`/`ERR` 的退出码、差集清理和锁释放；正式 Playwright 业务纵切完成成功与受控模型失败两条真实链路，并验证工作台聚合、事件持久化、页面终态与刷新恢复；RAGFlow 未启动 |
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
@@ -438,6 +448,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
-| C04-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
+| C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

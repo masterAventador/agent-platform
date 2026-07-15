@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -8,13 +9,21 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
+    SqlAlchemyFileRepository,
+    SqlAlchemyTaskAttachmentRepository,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
+    EventSequenceConflict,
     SqlAlchemyRunCommandRepository,
+    SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
 )
 from agent_platform.infrastructure.database.repositories.skills import (
@@ -23,11 +32,21 @@ from agent_platform.infrastructure.database.repositories.skills import (
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
+from agent_platform.platform.artifacts.entities import Artifact, validate_workspace_path
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
+from agent_platform.platform.artifacts.services import (
+    DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS,
+    DEFAULT_STORAGE_OPERATION_LEASE,
+    DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
+    ArtifactService,
+    TaskAttachmentService,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
 )
 from agent_platform.platform.runs.entities import Run, RunStatus
+from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
 from agent_platform.platform.skills.materializer import (
     SkillBundleDigestMismatch,
@@ -36,7 +55,8 @@ from agent_platform.platform.skills.materializer import (
 )
 from agent_platform.platform.skills.ports import SkillStorage
 from agent_platform.platform.tool_gateway import PolicyContext
-from agent_platform.runtimes.base import EmployeeRuntime
+from agent_platform.runtimes.artifacts import ArtifactBackedRuntime
+from agent_platform.runtimes.base import ArtifactReference, EmployeeRuntime
 from agent_platform.runtimes.deep_agent import (
     DeepAgentFactory,
     DeepAgentRuntime,
@@ -347,20 +367,30 @@ class ComposedRuntimeResolver:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         skill_storage: SkillStorage,
+        artifact_storage: ArtifactStorageProvider | None = None,
         sandbox_manager: SandboxManager,
         gateway: ToolGatewayInvoker,
         runtime_selector: PlatformRuntimeSelector,
         model_resolver: PlatformModelResolver | None = None,
         sandbox_ttl: timedelta = DEFAULT_RUN_SANDBOX_TTL,
+        artifact_operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
+        artifact_operation_heartbeat_interval: float = (
+            DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS
+        ),
+        artifact_storage_request_timeout: float = DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
         close_callback: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._skill_storage = skill_storage
+        self._artifact_storage = artifact_storage
         self._sandbox_manager = sandbox_manager
         self._gateway = gateway
         self._runtime_selector = runtime_selector
         self._model_resolver = model_resolver or PlatformModelResolver()
         self._sandbox_ttl = sandbox_ttl
+        self._artifact_operation_lease_duration = artifact_operation_lease_duration
+        self._artifact_operation_heartbeat_interval = artifact_operation_heartbeat_interval
+        self._artifact_storage_request_timeout = artifact_storage_request_timeout
         self._close_callback = close_callback
 
     async def resolve(
@@ -434,6 +464,17 @@ class ComposedRuntimeResolver:
     ) -> PreparedRuntimeResult:
         try:
             async with self._session_factory() as session:
+                if self._artifact_storage is not None:
+                    await TaskAttachmentService(
+                        file_repository=SqlAlchemyFileRepository(session),
+                        attachment_repository=SqlAlchemyTaskAttachmentRepository(session),
+                        storage=self._artifact_storage,
+                        storage_request_timeout=self._artifact_storage_request_timeout,
+                    ).materialize(
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        workspace=environment.workspace,
+                    )
                 try:
                     skill_paths = await SkillMaterializer(
                         repository=SqlAlchemySkillRepository(session),
@@ -480,6 +521,80 @@ class ComposedRuntimeResolver:
                 ),
             )
             tools = [gateway_adapter.adapt(metadata) for metadata in tool_metadata]
+            artifact_storage = self._artifact_storage
+            if artifact_storage is not None:
+
+                async def create_artifact(
+                    name: str,
+                    media_type: str,
+                    workspace_path: str,
+                ) -> str:
+                    """Publish a file from /workspace as a task artifact."""
+
+                    safe_path = validate_workspace_path(workspace_path)
+                    content = await environment.workspace.read_file(path=f"/workspace/{safe_path}")
+                    async with self._session_factory() as artifact_session:
+
+                        async def persist_created_event(artifact: Artifact) -> None:
+                            events = SqlAlchemyRunEventRepository(artifact_session)
+                            for attempt in range(3):
+                                created_event = PlatformEvent.create(
+                                    tenant_id=run.tenant_id,
+                                    employee_id=run.employee_id,
+                                    run_id=run.id,
+                                    sequence=await events.next_sequence(run_id=run.id),
+                                    event_type=EventType.ARTIFACT_CREATED,
+                                    payload={
+                                        "artifact_id": str(artifact.id),
+                                        "name": artifact.name,
+                                        "media_type": artifact.media_type,
+                                        "size_bytes": artifact.size_bytes,
+                                    },
+                                )
+                                try:
+                                    await events.append(created_event)
+                                    return
+                                except EventSequenceConflict:
+                                    if attempt == 2:
+                                        raise
+
+                        artifact = await ArtifactService(
+                            file_repository=SqlAlchemyFileRepository(artifact_session),
+                            artifact_repository=SqlAlchemyArtifactRepository(artifact_session),
+                            operation_repository=(
+                                SqlAlchemyArtifactStorageOperationRepository(
+                                    artifact_session,
+                                    heartbeat_session_factory=self._session_factory,
+                                )
+                            ),
+                            storage=artifact_storage,
+                            operation_lease_duration=(self._artifact_operation_lease_duration),
+                            operation_heartbeat_interval=(
+                                self._artifact_operation_heartbeat_interval
+                            ),
+                            storage_request_timeout=self._artifact_storage_request_timeout,
+                        ).create_artifact(
+                            tenant_id=run.tenant_id,
+                            run_id=run.id,
+                            created_by=run.created_by,
+                            name=name,
+                            media_type=media_type,
+                            content=content,
+                            before_commit=persist_created_event,
+                            commit=artifact_session.commit,
+                        )
+                    return str(artifact.id)
+
+                tools.append(
+                    StructuredTool.from_function(
+                        coroutine=create_artifact,
+                        name="create_artifact",
+                        description=(
+                            "Publish a validated relative file from the task workspace "
+                            "as a downloadable artifact."
+                        ),
+                    )
+                )
             runtime = self._runtime_selector.select(
                 capabilities=capabilities,
                 tools=tools,
@@ -487,6 +602,64 @@ class ComposedRuntimeResolver:
                 model=model,
                 approval_store=approval_store,
             )
+            if self._artifact_storage is not None:
+
+                async def artifact_catalog(run_id: UUID) -> list[ArtifactReference]:
+                    if run_id != run.id:
+                        return []
+                    async with self._session_factory() as artifact_session:
+                        artifacts = await SqlAlchemyArtifactRepository(
+                            artifact_session
+                        ).list_for_run(tenant_id=run.tenant_id, run_id=run.id)
+                    return [
+                        ArtifactReference(
+                            artifact_id=artifact.id,
+                            name=artifact.name,
+                            media_type=artifact.media_type,
+                            size_bytes=artifact.size_bytes,
+                        )
+                        for artifact in artifacts
+                    ]
+
+                async def event_history(run_id: UUID) -> list[PlatformEvent]:
+                    if run_id != run.id:
+                        return []
+                    async with self._session_factory() as event_session:
+                        return await SqlAlchemyRunEventRepository(event_session).list(
+                            run_id=run.id,
+                            after_sequence=0,
+                        )
+
+                runtime = ArtifactBackedRuntime(
+                    runtime=runtime,
+                    artifact_catalog=artifact_catalog,
+                    event_history=event_history,
+                )
+        except asyncio.CancelledError:
+            if delete_on_error:
+                try:
+                    await asyncio.shield(
+                        self._sandbox_manager.delete(
+                            lease_id=environment.lease.id,
+                            scope=scope,
+                        )
+                    )
+                except Exception:
+                    logger.error(
+                        "runtime_cancelled_sandbox_delete_failed",
+                        extra={"run_id": str(run.id)},
+                    )
+            else:
+                close = getattr(environment.backend, "aclose", None)
+                if callable(close):
+                    try:
+                        await asyncio.shield(close())
+                    except Exception:
+                        logger.error(
+                            "runtime_cancelled_recovery_detach_failed",
+                            extra={"run_id": str(run.id)},
+                        )
+            raise
         except PermanentRuntimePreparationError as error:
 
             async def cleanup() -> None:
@@ -500,6 +673,27 @@ class ComposedRuntimeResolver:
             error.defer_cleanup(cleanup)
             raise
         except Exception:
+            if delete_on_error:
+                try:
+                    await self._sandbox_manager.delete(
+                        lease_id=environment.lease.id,
+                        scope=scope,
+                    )
+                except Exception:
+                    logger.error(
+                        "runtime_initial_sandbox_delete_failed",
+                        extra={"run_id": str(run.id)},
+                    )
+                    close = getattr(environment.backend, "aclose", None)
+                    if callable(close):
+                        try:
+                            await close()
+                        except Exception:
+                            logger.error(
+                                "runtime_initial_sandbox_detach_failed",
+                                extra={"run_id": str(run.id)},
+                            )
+                raise
             close = getattr(environment.backend, "aclose", None)
             if callable(close):
                 try:
@@ -509,9 +703,7 @@ class ComposedRuntimeResolver:
                         "runtime_recovery_detach_failed",
                         extra={"run_id": str(run.id)},
                     )
-            if not delete_on_error:
-                raise RuntimeRecoveryTransient from None
-            raise
+            raise RuntimeRecoveryTransient from None
 
         return PreparedRuntimeResult(
             runtime=runtime,

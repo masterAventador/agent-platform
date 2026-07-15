@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import type { Page } from '@playwright/test'
 
+import { composeEnvironment, frontendRoot, postgresDatabaseUrl } from './compose-core'
 
 export interface WorkspaceFixture {
   owner_workspace_id: string
@@ -15,10 +15,8 @@ export interface WorkspaceFixture {
   member_employee_name: string
 }
 
-const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const backendRoot = resolve(frontendRoot, '../backend')
-const databaseUrl =
-  'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_e2e'
+const databaseUrl = postgresDatabaseUrl('agent_platform_e2e')
 
 export function prepareWorkspaceFixture(email: string): WorkspaceFixture {
   const output = execFileSync(
@@ -27,7 +25,7 @@ export function prepareWorkspaceFixture(email: string): WorkspaceFixture {
     {
       cwd: backendRoot,
       encoding: 'utf8',
-      env: { ...process.env, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
+      env: { ...composeEnvironment, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
     },
   )
   return JSON.parse(output) as WorkspaceFixture

@@ -19,9 +19,7 @@ class RunStatus(StrEnum):
 
 
 _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
-    RunStatus.QUEUED: frozenset(
-        {RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLED}
-    ),
+    RunStatus.QUEUED: frozenset({RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.RUNNING: frozenset(
         {
             RunStatus.WAITING_FOR_INPUT,
@@ -42,9 +40,7 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.CANCELLED: frozenset(),
 }
 
-_TERMINAL_STATUSES = frozenset(
-    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
-)
+_TERMINAL_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +59,7 @@ class Run:
     finished_at: datetime | None = None
     error_code: str | None = None
     error_message: str | None = None
+    idempotency_key: UUID | None = None
 
     @classmethod
     def create(
@@ -73,6 +70,7 @@ class Run:
         employee_version: int,
         created_by: UUID,
         input_data: dict[str, JsonValue],
+        idempotency_key: UUID | None = None,
     ) -> "Run":
         run_id = uuid4()
         now = datetime.now(UTC)
@@ -87,6 +85,7 @@ class Run:
             status=RunStatus.QUEUED,
             created_at=now,
             updated_at=now,
+            idempotency_key=idempotency_key,
         )
 
     def transition_to(
@@ -105,9 +104,7 @@ class Run:
             status=status,
             updated_at=now,
             started_at=(
-                now
-                if self.started_at is None and status is RunStatus.RUNNING
-                else self.started_at
+                now if self.started_at is None and status is RunStatus.RUNNING else self.started_at
             ),
             finished_at=now if status in _TERMINAL_STATUSES else None,
             error_code=error_code if status is RunStatus.FAILED else None,

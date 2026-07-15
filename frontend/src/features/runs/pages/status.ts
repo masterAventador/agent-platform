@@ -32,6 +32,7 @@ export function formatRunEvent(
     'run.started': '任务开始执行',
     'run.progress': '任务取得新进展',
     'message.output': '模型输出',
+    'artifact.created': '生成任务产物',
     'run.completed': '任务执行完成',
     'run.failed': '任务执行失败',
     'run.cancelled': '任务已取消',
@@ -41,6 +42,8 @@ export function formatRunEvent(
     label: labels[type] ?? type,
     content: type === 'message.output' && typeof payload.content === 'string'
       ? payload.content
-      : null,
+      : type === 'artifact.created' && typeof payload.name === 'string'
+        ? payload.name
+        : null,
   }
 }

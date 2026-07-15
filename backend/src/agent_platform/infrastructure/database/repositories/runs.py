@@ -58,6 +58,18 @@ class RunRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    idempotency_key: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "created_by",
+            "employee_id",
+            "idempotency_key",
+            name="uq_runs_creation_idempotency",
+        ),
+    )
 
 
 class RunEventRecord(Base):
@@ -127,6 +139,7 @@ class SqlAlchemyRunRepository:
                 finished_at=run.finished_at,
                 error_code=run.error_code,
                 error_message=run.error_message,
+                idempotency_key=run.idempotency_key,
             )
         )
         await self._session.flush()
@@ -136,6 +149,26 @@ class SqlAlchemyRunRepository:
 
     async def get_for_update(self, *, tenant_id: UUID, run_id: UUID) -> Run | None:
         return await self._get(tenant_id=tenant_id, run_id=run_id, for_update=True)
+
+    async def get_by_idempotency_key(
+        self,
+        *,
+        tenant_id: UUID,
+        created_by: UUID,
+        employee_id: UUID,
+        idempotency_key: UUID,
+    ) -> Run | None:
+        record = (
+            await self._session.execute(
+                select(RunRecord).where(
+                    RunRecord.tenant_id == tenant_id,
+                    RunRecord.created_by == created_by,
+                    RunRecord.employee_id == employee_id,
+                    RunRecord.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        return self._to_entity(record) if record is not None else None
 
     async def _get(
         self,
@@ -230,6 +263,7 @@ class SqlAlchemyRunRepository:
             finished_at=cls._as_utc(record.finished_at) if record.finished_at else None,
             error_code=record.error_code,
             error_message=record.error_message,
+            idempotency_key=record.idempotency_key,
         )
 
     @staticmethod
@@ -242,23 +276,23 @@ class SqlAlchemyRunEventRepository:
         self._session = session
 
     async def append(self, event: PlatformEvent) -> None:
-        self._session.add(
-            RunEventRecord(
-                event_id=event.event_id,
-                event_version=event.event_version,
-                tenant_id=event.tenant_id,
-                employee_id=event.employee_id,
-                run_id=event.run_id,
-                sequence=event.sequence,
-                event_type=event.type.value,
-                occurred_at=event.occurred_at,
-                payload=event.payload,
-            )
-        )
         try:
-            await self._session.flush()
+            async with self._session.begin_nested():
+                self._session.add(
+                    RunEventRecord(
+                        event_id=event.event_id,
+                        event_version=event.event_version,
+                        tenant_id=event.tenant_id,
+                        employee_id=event.employee_id,
+                        run_id=event.run_id,
+                        sequence=event.sequence,
+                        event_type=event.type.value,
+                        occurred_at=event.occurred_at,
+                        payload=event.payload,
+                    )
+                )
+                await self._session.flush()
         except IntegrityError as error:
-            await self._session.rollback()
             raise EventSequenceConflict from error
 
     async def list(self, *, run_id: UUID, after_sequence: int) -> list[PlatformEvent]:
@@ -286,6 +320,11 @@ class SqlAlchemyRunEventRepository:
         ]
 
     async def next_sequence(self, *, run_id: UUID) -> int:
+        locked_run = await self._session.execute(
+            select(RunRecord.id).where(RunRecord.id == run_id).with_for_update()
+        )
+        if locked_run.scalar_one_or_none() is None:
+            raise LookupError("run not found while allocating event sequence")
         result = await self._session.execute(
             select(func.coalesce(func.max(RunEventRecord.sequence), 0)).where(
                 RunEventRecord.run_id == run_id

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_platform.platform.artifacts.entities import MAX_FILE_SIZE_BYTES
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -39,7 +41,7 @@ class ExecResponse(StrictModel):
 
 class UploadFile(StrictModel):
     path: str
-    content_base64: str = Field(max_length=22_369_624)
+    content_base64: str = Field(max_length=((MAX_FILE_SIZE_BYTES + 2) // 3) * 4)
 
 
 class UploadRequest(StrictModel):

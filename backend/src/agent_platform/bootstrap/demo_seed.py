@@ -5,6 +5,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid5
 
@@ -14,6 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    ArtifactRecord,
+    FileRecord,
+    TaskAttachmentRecord,
+)
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.dead_letters import RunDeadLetterRecord
 from agent_platform.infrastructure.database.repositories.employees import (
@@ -26,7 +32,11 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantRecord,
 )
 from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.object_storage.artifacts import (
+    create_artifact_storage_provider,
+)
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 from agent_platform.platform.employees.entities import (
     EmployeeStatus,
     EmployeeVisibility,
@@ -59,6 +69,12 @@ DEMO_FAILED_RUN_ID = uuid5(_DEMO_NAMESPACE, "failed-run")
 DEMO_MCP_SERVER_ID = uuid5(_DEMO_NAMESPACE, "disabled-mcp-server")
 DEMO_TOOL_ID = uuid5(_DEMO_NAMESPACE, "disabled-tool")
 DEMO_DEAD_LETTER_ID = uuid5(_DEMO_NAMESPACE, "settled-dead-letter")
+DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
+DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
+DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
+
+DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
+DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
 
 _DEMO_CREATED_AT = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
 _DEMO_STARTED_AT = datetime(2026, 7, 1, 8, 1, tzinfo=UTC)
@@ -67,8 +83,7 @@ _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _ALLOWED_ENVIRONMENTS = frozenset({"local", "development"})
 _SYSTEM_DATABASES = frozenset({"postgres", "template0", "template1"})
 _DEMO_MODEL_DISCLOSURE = (
-    "Seed 本身不调用模型；用户手动发起任务会使用本机已配置网关，"
-    "并可能产生上游费用。"
+    "Seed 本身不调用模型；用户手动发起任务会使用本机已配置网关，并可能产生上游费用。"
 )
 
 
@@ -103,6 +118,9 @@ type DemoRecord = (
     | McpServerRecord
     | ToolRecord
     | RunDeadLetterRecord
+    | FileRecord
+    | TaskAttachmentRecord
+    | ArtifactRecord
 )
 
 
@@ -131,6 +149,7 @@ async def seed_demo_data(
     session_factory: async_sessionmaker[AsyncSession],
     database_url: str,
     environment: str,
+    artifact_storage: ArtifactStorageProvider,
 ) -> DemoSeedSummary:
     validate_demo_database_url(database_url, environment=environment)
     hasher = Argon2PasswordHasher()
@@ -157,6 +176,17 @@ async def seed_demo_data(
         except IntegrityError as error:
             await session.rollback()
             raise DemoSeedConflict("stable demo data conflicts with existing local data") from error
+
+    await artifact_storage.put(
+        key=_demo_file_storage_key(),
+        content=DEMO_FILE_CONTENT,
+        media_type="text/plain",
+    )
+    await artifact_storage.put(
+        key=_demo_artifact_storage_key(),
+        content=DEMO_ARTIFACT_CONTENT,
+        media_type="text/plain",
+    )
 
     return DemoSeedSummary(
         email=DEMO_EMAIL,
@@ -227,7 +257,7 @@ def _demo_records(
         "capabilities": {
             "conversation": False,
             "scheduled_tasks": False,
-            "file_upload": False,
+            "file_upload": True,
         },
         "skill_ids": [],
         "tool_ids": [],
@@ -312,9 +342,7 @@ def _demo_records(
                 created_by=DEMO_USER_ID,
                 name="演示研究助理",
                 avatar_url=None,
-                role_description=(
-                    f"展示数字员工定义与历史任务。{_DEMO_MODEL_DISCLOSURE}"
-                ),
+                role_description=(f"展示数字员工定义与历史任务。{_DEMO_MODEL_DISCLOSURE}"),
                 visibility=EmployeeVisibility.TENANT.value,
                 runtime_type=RuntimeType.AUTONOMOUS.value,
                 system_prompt=f"这是 Seed 预置的本地演示员工。{_DEMO_MODEL_DISCLOSURE}",
@@ -324,7 +352,7 @@ def _demo_records(
                 capabilities={
                     "conversation": False,
                     "scheduled_tasks": False,
-                    "file_upload": False,
+                    "file_upload": True,
                 },
                 skill_ids=[],
                 tool_ids=[],
@@ -422,6 +450,7 @@ def _demo_records(
             ),
         ),
         *_demo_run_records(),
+        *_demo_artifact_records(),
         (
             McpServerRecord(
                 id=DEMO_MCP_SERVER_ID,
@@ -591,7 +620,17 @@ def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
             EventType.MESSAGE_OUTPUT,
             {"content": "这是 Seed 预置的历史任务结果；Seed 本身未调用模型。"},
         ),
-        (3, EventType.RUN_COMPLETED, {"status": "completed"}),
+        (
+            3,
+            EventType.ARTIFACT_CREATED,
+            {
+                "artifact_id": str(DEMO_ARTIFACT_ID),
+                "name": "历史任务结果.txt",
+                "media_type": "text/plain",
+                "size_bytes": len(DEMO_ARTIFACT_CONTENT),
+            },
+        ),
+        (4, EventType.RUN_COMPLETED, {"status": "completed"}),
     )
     failed_events = (
         (1, EventType.RUN_STARTED, {"status": "running"}),
@@ -613,15 +652,91 @@ def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
                         run_id=run_id,
                         sequence=sequence,
                         event_type=event_type.value,
-                        occurred_at=(
-                            _DEMO_STARTED_AT if sequence == 1 else _DEMO_FINISHED_AT
-                        ),
+                        occurred_at=(_DEMO_STARTED_AT if sequence == 1 else _DEMO_FINISHED_AT),
                         payload=payload,
                     ),
                     event_fields,
                 )
             )
     return records
+
+
+def _demo_file_storage_key() -> str:
+    return f"tenants/{DEMO_TENANT_ID}/files/{DEMO_FILE_ID}"
+
+
+def _demo_artifact_storage_key() -> str:
+    return f"tenants/{DEMO_TENANT_ID}/runs/{DEMO_COMPLETED_RUN_ID}/artifacts/{DEMO_ARTIFACT_ID}"
+
+
+def _demo_artifact_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    file_fields = (
+        "tenant_id",
+        "owner_id",
+        "name",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "storage_key",
+    )
+    attachment_fields = (
+        "tenant_id",
+        "run_id",
+        "file_id",
+        "workspace_path",
+    )
+    artifact_fields = (
+        "tenant_id",
+        "run_id",
+        "created_by",
+        "name",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "storage_key",
+    )
+    return [
+        (
+            FileRecord(
+                id=DEMO_FILE_ID,
+                tenant_id=DEMO_TENANT_ID,
+                owner_id=DEMO_MEMBER_USER_ID,
+                name="任务说明.txt",
+                media_type="text/plain",
+                size_bytes=len(DEMO_FILE_CONTENT),
+                sha256=sha256(DEMO_FILE_CONTENT).hexdigest(),
+                storage_key=_demo_file_storage_key(),
+                created_at=_DEMO_CREATED_AT,
+            ),
+            file_fields,
+        ),
+        (
+            TaskAttachmentRecord(
+                id=DEMO_ATTACHMENT_ID,
+                tenant_id=DEMO_TENANT_ID,
+                run_id=DEMO_COMPLETED_RUN_ID,
+                file_id=DEMO_FILE_ID,
+                workspace_path=f"inputs/{DEMO_FILE_ID}/任务说明.txt",
+                created_at=_DEMO_CREATED_AT,
+            ),
+            attachment_fields,
+        ),
+        (
+            ArtifactRecord(
+                id=DEMO_ARTIFACT_ID,
+                tenant_id=DEMO_TENANT_ID,
+                run_id=DEMO_COMPLETED_RUN_ID,
+                created_by=DEMO_MEMBER_USER_ID,
+                name="历史任务结果.txt",
+                media_type="text/plain",
+                size_bytes=len(DEMO_ARTIFACT_CONTENT),
+                sha256=sha256(DEMO_ARTIFACT_CONTENT).hexdigest(),
+                storage_key=_demo_artifact_storage_key(),
+                created_at=_DEMO_FINISHED_AT,
+            ),
+            artifact_fields,
+        ),
+    ]
 
 
 def _format_summary(summary: DemoSeedSummary) -> str:
@@ -651,6 +766,7 @@ async def _run_cli(settings: AppSettings) -> DemoSeedSummary:
             session_factory=session_factory,
             database_url=settings.database_url,
             environment=settings.app_environment,
+            artifact_storage=create_artifact_storage_provider(settings=settings),
         )
     finally:
         await engine.dispose()

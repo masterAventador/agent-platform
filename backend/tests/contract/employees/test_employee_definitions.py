@@ -287,7 +287,6 @@ async def test_employee_is_not_visible_across_tenants(
         ("workflow", False, False),
         ("hybrid", False, False),
         ("autonomous", True, False),
-        ("autonomous", False, True),
     ],
 )
 @pytest.mark.asyncio
@@ -320,7 +319,6 @@ async def test_create_rejects_configuration_not_currently_runnable(
         ("workflow", False, False),
         ("hybrid", False, False),
         ("autonomous", True, False),
-        ("autonomous", False, True),
     ],
 )
 @pytest.mark.asyncio
@@ -364,8 +362,26 @@ def test_openapi_exposes_current_employee_write_contract(
 
     assert definition["properties"]["work_mode"]["const"] == "autonomous"
     assert capabilities["properties"]["scheduled_tasks"]["const"] is False
-    assert capabilities["properties"]["file_upload"]["const"] is False
+    assert capabilities["properties"]["file_upload"]["type"] == "boolean"
     assert capabilities["properties"]["conversation"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_autonomous_employee_accepts_file_upload_capability(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+) -> None:
+    owner, _ = employee_clients
+    current_user = await register_and_login(owner, "employee-file-upload@example.com")
+    tenant_id = current_user["workspaces"][0]["id"]
+
+    response = await owner.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": tenant_id},
+        json=employee_definition(file_upload=True),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["definition"]["capabilities"]["file_upload"] is True
 
 
 @pytest.mark.asyncio

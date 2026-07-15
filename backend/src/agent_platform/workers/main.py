@@ -12,7 +12,6 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from minio import Minio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -34,6 +33,10 @@ from agent_platform.infrastructure.llm.litellm import (
 )
 from agent_platform.infrastructure.mcp.executor import MCPToolExecutor
 from agent_platform.infrastructure.mcp.resolver import DatabaseMCPClientResolver
+from agent_platform.infrastructure.object_storage.artifacts import (
+    create_artifact_storage_provider,
+    create_bounded_minio_client,
+)
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -353,17 +356,16 @@ def _build_runtime_resolver(
         credential_resolver=adapters.credential_resolver,
         audit_sink=adapters.audit_sink,
     )
-    minio = Minio(
-        settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-    )
+    minio = create_bounded_minio_client(settings)
     return ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=MinioSkillStorage(
             client=cast(MinioClient, minio),
             bucket=settings.skill_storage_bucket,
+        ),
+        artifact_storage=create_artifact_storage_provider(
+            settings=settings,
+            minio_client=cast(MinioClient, minio),
         ),
         sandbox_manager=adapters.sandbox_manager,
         gateway=gateway,
@@ -372,6 +374,13 @@ def _build_runtime_resolver(
             checkpointer=checkpointer,
         ),
         sandbox_ttl=timedelta(seconds=settings.sandbox_ttl_seconds),
+        artifact_operation_lease_duration=timedelta(
+            seconds=settings.artifact_storage_operation_lease_seconds
+        ),
+        artifact_operation_heartbeat_interval=(
+            settings.artifact_storage_operation_heartbeat_seconds
+        ),
+        artifact_storage_request_timeout=(settings.artifact_storage_request_timeout_seconds),
         close_callback=adapters.aclose,
         model_resolver=model_resolver,
     )

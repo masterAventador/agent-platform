@@ -24,4 +24,11 @@ describe('formatRunEvent', () => {
       content: null,
     })
   })
+
+  it('展示任务产物创建事件及文件名', () => {
+    expect(formatRunEvent('artifact.created', { name: 'result.txt' })).toEqual({
+      label: '生成任务产物',
+      content: 'result.txt',
+    })
+  })
 })

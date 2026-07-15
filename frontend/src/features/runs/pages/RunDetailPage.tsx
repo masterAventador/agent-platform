@@ -1,11 +1,20 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { Button, Card, Descriptions, Empty, Flex, Space, Spin, Tag, Typography } from 'antd'
-import { useEffect } from 'react'
+import { Button, Card, Descriptions, Empty, Flex, List, Modal, Space, Spin, Tag, Typography } from 'antd'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
-import { runKeys, useControlRun, useRun, useRunEvents } from '../api/queries'
+import { getPlatformAdapter } from '../../../platform'
+import {
+  runKeys,
+  useArtifacts,
+  useControlRun,
+  useDeleteArtifact,
+  useRun,
+  useRunEvents,
+} from '../api/queries'
+import { downloadArtifact, type Artifact } from '../api/runs'
 import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
 import './runs.css'
 
@@ -13,7 +22,7 @@ import './runs.css'
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled'])
 const streamEvents = [
   'run.started', 'run.progress', 'message.output', 'approval.required',
-  'run.completed', 'run.failed', 'run.cancelled',
+  'artifact.created', 'run.completed', 'run.failed', 'run.cancelled',
 ]
 
 export function RunDetailPage({
@@ -26,10 +35,13 @@ export function RunDetailPage({
   const { runId } = useParams()
   const run = useRun(runId)
   const events = useRunEvents(runId)
+  const artifacts = useArtifacts(runId)
+  const deleteArtifact = useDeleteArtifact(runId ?? '')
   const control = useControlRun(runId ?? '')
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   const runStatus = run.data?.status
+  const [preview, setPreview] = useState<{ artifact: Artifact; content: string } | null>(null)
 
   useEffect(() => {
     if (!runId || !tenantId || !runStatus || terminalStatuses.has(runStatus)) return
@@ -40,6 +52,7 @@ export function RunDetailPage({
     const refresh = () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.detail(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.events(tenantId, runId) })
+      void queryClient.invalidateQueries({ queryKey: runKeys.artifacts(tenantId, runId) })
     }
     streamEvents.forEach((type) => source.addEventListener(type, refresh))
     return () => source.close()
@@ -126,7 +139,11 @@ export function RunDetailPage({
             {events.data.map((event) => {
               const presentation = formatRunEvent(event.type, event.payload)
               return (
-                <div className="run-event-item" key={event.event_id}>
+                <div
+                  className="run-event-item"
+                  data-artifact-id={event.payload.artifact_id}
+                  key={event.event_id}
+                >
                   <Space orientation="vertical" size={2}>
                     <Typography.Text strong>{presentation.label}</Typography.Text>
                     {presentation.content && (
@@ -142,6 +159,83 @@ export function RunDetailPage({
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待任务开始执行" />
         )}
       </Card>
+      <Card className="run-artifacts" title="任务产物">
+        {artifacts.data?.length ? (
+          <List
+            dataSource={artifacts.data}
+            renderItem={(artifact) => (
+              <List.Item
+                actions={[
+                  <Button
+                    aria-label={`预览 ${artifact.name}`}
+                    key="preview"
+                    onClick={async () => {
+                      const bytes = await downloadArtifact(data.tenant_id, artifact.id)
+                      const content = artifact.media_type.startsWith('text/')
+                        || artifact.media_type === 'application/json'
+                        ? new TextDecoder().decode(bytes)
+                        : `该文件类型不支持内嵌预览，可下载后查看（${artifact.media_type}）`
+                      setPreview({ artifact, content })
+                    }}
+                  >
+                    预览
+                  </Button>,
+                  <Button
+                    aria-label={`下载 ${artifact.name}`}
+                    key="download"
+                    onClick={async () => {
+                      const bytes = await downloadArtifact(data.tenant_id, artifact.id)
+                      await getPlatformAdapter().saveFile({
+                        suggestedName: artifact.name,
+                        bytes,
+                      })
+                    }}
+                  >
+                    下载
+                  </Button>,
+                  <Button
+                    aria-label={`定位 ${artifact.name}`}
+                    key="locate"
+                    onClick={() => document
+                      .querySelector(`[data-artifact-id="${artifact.id}"]`)
+                      ?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+                  >
+                    定位
+                  </Button>,
+                  canExecuteRuns ? (
+                    <Button
+                      aria-label={`删除 ${artifact.name}`}
+                      danger
+                      key="delete"
+                      loading={deleteArtifact.isPending}
+                      onClick={() => deleteArtifact.mutate(artifact.id)}
+                    >
+                      删除
+                    </Button>
+                  ) : null,
+                ].filter(Boolean)}
+              >
+                <List.Item.Meta
+                  title={artifact.name}
+                  description={`${artifact.media_type} · ${artifact.size_bytes} 字节`}
+                />
+              </List.Item>
+            )}
+          />
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无任务产物" />
+        )}
+      </Card>
+      <Modal
+        title={preview?.artifact.name}
+        open={preview !== null}
+        footer={<Button onClick={() => setPreview(null)}>关闭</Button>}
+        onCancel={() => setPreview(null)}
+      >
+        <Typography.Paragraph className="run-artifact-preview">
+          {preview?.content}
+        </Typography.Paragraph>
+      </Modal>
     </section>
   )
 }

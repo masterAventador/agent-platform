@@ -45,6 +45,20 @@ class AppSettings(BaseSettings):
     minio_secret_key: str = "agent-platform-local-minio"
     minio_secure: bool = False
     skill_storage_bucket: str = "agent-platform-skills"
+    artifact_storage_bucket: str = "agent-platform-artifacts"
+    artifact_storage_provider: Literal["minio", "tencent-cos"] = "minio"
+    artifact_storage_operation_lease_seconds: int = Field(default=300, ge=3, le=3_600)
+    artifact_storage_operation_heartbeat_seconds: float = Field(default=30.0, ge=1, le=300)
+    artifact_storage_request_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+    artifact_storage_tombstone_observation_seconds: int = Field(default=45, ge=1, le=600)
+    artifact_storage_tombstone_rescan_seconds: int = Field(default=5, ge=1, le=60)
+    artifact_unbound_file_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
+    artifact_unbound_file_cleanup_interval_seconds: int = Field(default=300, ge=5, le=86_400)
+    cos_region: str | None = None
+    cos_secret_id: SecretStr = SecretStr("")
+    cos_secret_key: SecretStr = SecretStr("")
+    cos_token: SecretStr = SecretStr("")
+    cos_scheme: Literal["http", "https"] = "https"
     local_credentials_file: str | None = None
     local_credentials_repository_root: str | None = None
     sandbox_provider: Literal["local-controller"] = "local-controller"
@@ -73,9 +87,7 @@ class AppSettings(BaseSettings):
 
     @field_validator("llm_gateway_allowed_aliases")
     @classmethod
-    def validate_llm_gateway_allowed_aliases(
-        cls, aliases: frozenset[str]
-    ) -> frozenset[str]:
+    def validate_llm_gateway_allowed_aliases(cls, aliases: frozenset[str]) -> frozenset[str]:
         if not aliases:
             raise ValueError("model gateway alias allowlist must not be empty")
         for alias in aliases:
@@ -93,14 +105,28 @@ class AppSettings(BaseSettings):
             raise ValueError("runtime heartbeat must be shorter than runtime lease")
         if self.runtime_cancel_poll_initial_seconds > self.runtime_cancel_poll_max_seconds:
             raise ValueError("runtime cancel poll initial delay must not exceed maximum")
+        if (
+            self.artifact_storage_operation_heartbeat_seconds
+            >= self.artifact_storage_operation_lease_seconds
+        ):
+            raise ValueError("artifact storage heartbeat must be shorter than operation lease")
+        if self.artifact_storage_tombstone_observation_seconds < (
+            self.artifact_storage_request_timeout_seconds
+            + self.artifact_storage_tombstone_rescan_seconds
+        ):
+            raise ValueError("artifact tombstone observation must cover provider timeout")
         if self.auth_cookie_same_site == "none" and not self.auth_cookie_secure:
             raise ValueError("SameSite=None auth cookies must also be Secure")
         if self.app_environment == "production" and (
             not self.auth_cookie_secure or self.auth_cookie_same_site != "none"
         ):
-            raise ValueError(
-                "production auth cookies must be Secure and SameSite=None for Tauri"
-            )
+            raise ValueError("production auth cookies must be Secure and SameSite=None for Tauri")
         if "*" in self.cors_allowed_origins:
             raise ValueError("credentialed CORS must use exact origins")
+        if self.artifact_storage_provider == "tencent-cos" and (
+            not self.cos_region
+            or not self.cos_secret_id.get_secret_value()
+            or not self.cos_secret_key.get_secret_value()
+        ):
+            raise ValueError("Tencent COS requires region and credentials")
         return self

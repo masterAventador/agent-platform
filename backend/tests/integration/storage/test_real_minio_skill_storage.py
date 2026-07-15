@@ -8,6 +8,9 @@ from anyio import to_thread
 from minio import Minio
 from minio.error import S3Error
 
+from agent_platform.infrastructure.object_storage.artifacts import (
+    MinioArtifactStorageProvider,
+)
 from agent_platform.infrastructure.object_storage.minio import MinioSkillStorage
 
 
@@ -68,4 +71,31 @@ async def test_real_minio_round_trip_delete_and_automatic_bucket_creation() -> N
             await to_thread.run_sync(
                 partial(client.remove_object, bucket, object_name)
             )
+            await to_thread.run_sync(client.remove_bucket, bucket)
+
+
+@pytest.mark.asyncio
+async def test_real_minio_artifact_round_trip_preserves_bytes_and_deletes_object() -> None:
+    client = _real_minio_client()
+    bucket = f"test-artifact-storage-{uuid4().hex}"
+    object_name = f"tenants/{uuid4()}/runs/{uuid4()}/artifacts/result.txt"
+    content = "真实 MinIO 任务产物".encode()
+    storage = MinioArtifactStorageProvider(client=client, bucket=bucket)
+
+    try:
+        await storage.put(
+            key=object_name,
+            content=content,
+            media_type="text/plain; charset=utf-8",
+        )
+
+        assert await storage.get(key=object_name) == content
+
+        await storage.delete(key=object_name)
+
+        with pytest.raises(S3Error, match="NoSuchKey"):
+            await storage.get(key=object_name)
+    finally:
+        if await to_thread.run_sync(client.bucket_exists, bucket):
+            await to_thread.run_sync(partial(client.remove_object, bucket, object_name))
             await to_thread.run_sync(client.remove_bucket, bucket)

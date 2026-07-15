@@ -4,8 +4,10 @@ import os
 import re
 from dataclasses import dataclass
 
+from agent_platform.platform.artifacts.entities import MAX_FILE_SIZE_BYTES
+
 _DIGEST_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
-MAX_FILE_HARD_LIMIT = 16 * 1024 * 1024
+MAX_FILE_HARD_LIMIT = MAX_FILE_SIZE_BYTES
 
 
 @dataclass(frozen=True)
@@ -13,9 +15,9 @@ class ControllerSettings:
     bearer_secret: str
     sandbox_image: str
     platform: str = "linux/arm64"
-    max_file_bytes: int = 8 * 1024 * 1024
+    max_file_bytes: int = MAX_FILE_SIZE_BYTES
     max_output_bytes: int = 1024 * 1024
-    max_batch_bytes: int = 16 * 1024 * 1024
+    max_batch_bytes: int = 32 * 1024 * 1024
     max_timeout_seconds: int = 120
     tombstone_ttl_seconds: int = 3_600
     workspace_bytes: int = 64 * 1024 * 1024

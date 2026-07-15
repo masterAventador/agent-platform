@@ -74,7 +74,7 @@ def is_runnable_employee_definition(definition: Mapping[str, object]) -> bool:
         and isinstance(capabilities, Mapping)
         and isinstance(capabilities.get("conversation"), bool)
         and capabilities.get("scheduled_tasks") is False
-        and capabilities.get("file_upload") is False
+        and isinstance(capabilities.get("file_upload"), bool)
     )
 
 

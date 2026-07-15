@@ -206,11 +206,16 @@ bash "${MVP_SCRIPT}" start
 bash "${MVP_SCRIPT}" health
 
 POSTGRES_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" POSTGRES_PASSWORD)"
+MINIO_ROOT_USER="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_USER)"
+MINIO_ROOT_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_PASSWORD)"
 AGENT_PLATFORM_APP_ENVIRONMENT=development \
   AGENT_PLATFORM_DATABASE_URL="postgresql+asyncpg://agent_platform:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/agent_platform" \
+  AGENT_PLATFORM_MINIO_ENDPOINT="127.0.0.1:${MINIO_API_PORT}" \
+  AGENT_PLATFORM_MINIO_ACCESS_KEY="${MINIO_ROOT_USER}" \
+  AGENT_PLATFORM_MINIO_SECRET_KEY="${MINIO_ROOT_PASSWORD}" \
   uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
     python -m agent_platform.bootstrap.demo_seed
-unset POSTGRES_PASSWORD
+unset POSTGRES_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD
 
 LITELLM_WORKER_API_KEY="$(read_env_value "${RUNTIME_DIR}/litellm.env" LITELLM_WORKER_API_KEY)"
 AGENT_PLATFORM_LLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
@@ -220,25 +225,30 @@ AGENT_PLATFORM_LLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
 
 MVP_WEB_FLOW_RESULT_FILE="${RUNTIME_DIR}/mvp-web-flow-run-id"
 MVP_WEB_FLOW_FAILURE_RESULT_FILE="${RUNTIME_DIR}/mvp-web-flow-failure-run-id"
+MVP_WEB_FLOW_ARTIFACT_RESULT_FILE="${RUNTIME_DIR}/mvp-web-flow-artifact-result"
 PLAYWRIGHT_BIN="${ROOT_DIR}/frontend/node_modules/.bin/playwright"
 if [[ ! -x "${PLAYWRIGHT_BIN}" ]]; then
   printf 'MVP Web flow requires installed frontend dependencies; run pnpm install explicitly\n' >&2
   exit 2
 fi
-rm -f "${MVP_WEB_FLOW_RESULT_FILE}" "${MVP_WEB_FLOW_FAILURE_RESULT_FILE}"
+rm -f "${MVP_WEB_FLOW_RESULT_FILE}" "${MVP_WEB_FLOW_FAILURE_RESULT_FILE}" \
+  "${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}"
 (
   cd "${ROOT_DIR}/frontend"
   PLAYWRIGHT_MVP_BASE_URL="http://127.0.0.1:${PLATFORM_WEB_PORT}" \
     PLAYWRIGHT_MVP_RESULT_FILE="${MVP_WEB_FLOW_RESULT_FILE}" \
     PLAYWRIGHT_MVP_FAILURE_RESULT_FILE="${MVP_WEB_FLOW_FAILURE_RESULT_FILE}" \
+    PLAYWRIGHT_MVP_ARTIFACT_RESULT_FILE="${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}" \
     "${PLAYWRIGHT_BIN}" test --config playwright.mvp-profile.config.ts
 )
 
-(
-  cd "${ROOT_DIR}/frontend"
-  TAURI_MVP_WEB_URL="http://127.0.0.1:${PLATFORM_WEB_PORT}" \
-    pnpm test:tauri
-)
+if [[ "${MVP_PROFILE_SKIP_TAURI:-false}" != "true" ]]; then
+  (
+    cd "${ROOT_DIR}/frontend"
+    TAURI_MVP_WEB_URL="http://127.0.0.1:${PLATFORM_WEB_PORT}" \
+      pnpm test:tauri
+  )
+fi
 if [[ ! -f "${MVP_WEB_FLOW_RESULT_FILE}" ]]; then
   printf 'MVP Web flow did not record its run ID\n' >&2
   exit 1
@@ -314,6 +324,126 @@ if [[ "${MVP_WEB_FLOW_FAILURE_DATABASE_STATE}" != "failed|true|true|true" ]]; th
   exit 1
 fi
 printf 'MVP Web failure flow persisted a controlled Worker failure and workbench projection\n'
+
+if [[ ! -f "${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}" ]]; then
+  printf 'MVP artifact flow did not record run and artifact IDs\n' >&2
+  exit 1
+fi
+if ! IFS='|' read -r MVP_ARTIFACT_RUN_ID MVP_ARTIFACT_ID \
+  <"${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}"; then
+  printf 'MVP artifact flow could not read its result IDs\n' >&2
+  exit 1
+fi
+UUID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+if [[ ! "${MVP_ARTIFACT_RUN_ID}" =~ ${UUID_PATTERN} || \
+  ! "${MVP_ARTIFACT_ID}" =~ ${UUID_PATTERN} ]]; then
+  printf 'MVP artifact flow recorded invalid IDs\n' >&2
+  exit 1
+fi
+if ! MVP_ARTIFACT_DATABASE_STATE="$(docker compose -p "${PROFILE_NAME}-core" \
+  --env-file "${RUNTIME_DIR}/core.env" \
+  -f "${ROOT_DIR}/infra/compose/core.yml" \
+  exec -T postgres psql -U agent_platform -d agent_platform -At \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT r.status || '|' ||
+     EXISTS (
+       SELECT 1 FROM run_events e
+       WHERE e.run_id = r.id AND e.event_type = 'artifact.created'
+         AND e.payload ->> 'artifact_id' = '${MVP_ARTIFACT_ID}'
+     )::text || '|' ||
+     (NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.id = '${MVP_ARTIFACT_ID}'::uuid))::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM artifact_storage_operations o
+       WHERE o.entity_id = '${MVP_ARTIFACT_ID}'::uuid
+         AND o.action = 'put' AND o.status = 'completed'
+     )::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM artifact_storage_operations o
+       WHERE o.entity_id = '${MVP_ARTIFACT_ID}'::uuid
+         AND o.action = 'delete' AND o.status = 'completed'
+     )::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM task_attachments ta
+       JOIN files f ON f.tenant_id = ta.tenant_id AND f.id = ta.file_id
+       WHERE ta.run_id = r.id
+         AND f.name = 'brief.txt'
+         AND ta.workspace_path LIKE 'inputs/%/brief.txt'
+     )::text
+   FROM runs r WHERE r.id = '${MVP_ARTIFACT_RUN_ID}'::uuid")"; then
+  printf 'MVP artifact persistence/deletion query failed\n' >&2
+  exit 1
+fi
+if [[ "${MVP_ARTIFACT_DATABASE_STATE}" != "completed|true|true|true|true|true" ]]; then
+  printf 'MVP artifact persistence/deletion check failed: %s\n' \
+    "${MVP_ARTIFACT_DATABASE_STATE}" >&2
+  exit 1
+fi
+MVP_ARTIFACT_TENANT_ID="$(docker compose -p "${PROFILE_NAME}-core" \
+  --env-file "${RUNTIME_DIR}/core.env" \
+  -f "${ROOT_DIR}/infra/compose/core.yml" \
+  exec -T postgres psql -U agent_platform -d agent_platform -At \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT tenant_id FROM runs WHERE id = '${MVP_ARTIFACT_RUN_ID}'::uuid")"
+if [[ ! "${MVP_ARTIFACT_TENANT_ID}" =~ ${UUID_PATTERN} ]]; then
+  printf 'MVP artifact flow could not resolve its tenant\n' >&2
+  exit 1
+fi
+MVP_ATTACHMENT_FILE_ID="$(docker compose -p "${PROFILE_NAME}-core" \
+  --env-file "${RUNTIME_DIR}/core.env" \
+  -f "${ROOT_DIR}/infra/compose/core.yml" \
+  exec -T postgres psql -U agent_platform -d agent_platform -At \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT file_id FROM task_attachments
+   WHERE run_id = '${MVP_ARTIFACT_RUN_ID}'::uuid
+   ORDER BY created_at LIMIT 1")"
+if [[ ! "${MVP_ATTACHMENT_FILE_ID}" =~ ${UUID_PATTERN} ]]; then
+  printf 'MVP artifact flow could not resolve its attachment file\n' >&2
+  exit 1
+fi
+MINIO_ROOT_USER="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_USER)"
+MINIO_ROOT_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_PASSWORD)"
+if ! MVP_MINIO_ENDPOINT="127.0.0.1:${MINIO_API_PORT}" \
+  MVP_MINIO_ACCESS_KEY="${MINIO_ROOT_USER}" \
+  MVP_MINIO_SECRET_KEY="${MINIO_ROOT_PASSWORD}" \
+  MVP_ATTACHMENT_OBJECT_KEY="tenants/${MVP_ARTIFACT_TENANT_ID}/files/${MVP_ATTACHMENT_FILE_ID}" \
+  MVP_DELETED_ARTIFACT_OBJECT_KEY="tenants/${MVP_ARTIFACT_TENANT_ID}/runs/${MVP_ARTIFACT_RUN_ID}/artifacts/${MVP_ARTIFACT_ID}" \
+  uv run --project "${ROOT_DIR}/backend" --frozen --no-dev python - <<'PY'
+import os
+
+from minio import Minio
+from minio.error import S3Error
+
+client = Minio(
+    os.environ["MVP_MINIO_ENDPOINT"],
+    access_key=os.environ["MVP_MINIO_ACCESS_KEY"],
+    secret_key=os.environ["MVP_MINIO_SECRET_KEY"],
+    secure=False,
+)
+bucket = "agent-platform-artifacts"
+client.stat_object(bucket, os.environ["MVP_ATTACHMENT_OBJECT_KEY"])
+try:
+    client.stat_object(bucket, os.environ["MVP_DELETED_ARTIFACT_OBJECT_KEY"])
+except S3Error as exc:
+    if exc.code != "NoSuchKey":
+        raise
+else:
+    raise SystemExit("deleted artifact object still exists")
+PY
+then
+  printf 'MVP artifact MinIO object lifecycle check failed\n' >&2
+  exit 1
+fi
+unset MINIO_ROOT_USER MINIO_ROOT_PASSWORD
+printf 'MVP artifact flow persisted event/saga state and removed metadata/object through the real UI\n'
+
+POSTGRES_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" POSTGRES_PASSWORD)"
+TEST_DATABASE_URL="postgresql+asyncpg://agent_platform:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/agent_platform" \
+  uv run --project "${ROOT_DIR}/backend" --frozen \
+  pytest -q \
+  "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_artifact_repositories_enforce_composite_tenant_boundaries" \
+  "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protected"
+unset POSTGRES_PASSWORD
+printf 'MVP artifact tenant boundary and Saga claim/CAS/renewal passed under real PostgreSQL concurrency\n'
 
 docker compose -p "${PROFILE_NAME}-litellm" \
   --env-file "${RUNTIME_DIR}/litellm.env" \
