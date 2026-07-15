@@ -93,15 +93,22 @@ describe('B02 设备与平台账号中心', () => {
     vi.mocked(registerSocialDevice).mockResolvedValue(device)
   })
 
-  it('通过生产页面注册设备并调用 B02 类型化账号运行时', async () => {
+  it('设备平台入口只暴露后端支持的平台', async () => {
     const user = userEvent.setup()
-    const { platform, socialOperations } = createPlatform()
+    const { platform } = createPlatform()
     render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
 
     const [devicePlatformSelect] = screen.getAllByRole('combobox')
     await user.click(devicePlatformSelect)
+
     expect(screen.getByText('Windows')).toBeInTheDocument()
     expect(screen.queryByText('Linux')).not.toBeInTheDocument()
+  })
+
+  it('通过生产页面注册设备并调用 B02 类型化账号运行时', async () => {
+    const user = userEvent.setup()
+    const { platform, socialOperations } = createPlatform()
+    render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
 
     await user.type(screen.getByLabelText('设备 ID'), deviceId)
     await user.type(screen.getByLabelText('设备名称'), 'Marketing Mac')
