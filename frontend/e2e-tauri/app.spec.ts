@@ -1,4 +1,5 @@
 import { browser, expect } from '@wdio/globals'
+import { randomUUID } from 'node:crypto'
 
 const demoCredentials = {
   email: 'demo@example.com',
@@ -28,6 +29,34 @@ describe('Tauri 桌面客户端', () => {
     await expect(browser.tauri.execute(({ core }) => (
       core.invoke('credential_get', { key: '../../login.key' })
     ))).rejects.toThrow('invalid_key')
+  })
+
+  it('默认 ACL 在真实 Tauri WebView 授权社交账号命令', async () => {
+    const accountId = randomUUID()
+    const prepared = await browser.tauri.execute(({ core }, accountId) => (
+      core.invoke<{ circuit_open: boolean; session_revision: number; state: string }>(
+        'social_account_prepare',
+        { platform: 'douyin', accountId },
+      )
+    ), accountId)
+
+    expect(prepared).toEqual({
+      circuit_open: true,
+      session_revision: 0,
+      state: 'logged_out',
+    })
+
+    const awaitingScan = await browser.tauri.execute(({ core }, accountId) => (
+      core.invoke<{ state: string }>('social_account_login_signal', {
+        accountId,
+        signal: 'begin_qr',
+      })
+    ), accountId)
+    expect(awaitingScan.state).toBe('awaiting_scan')
+
+    await browser.tauri.execute(({ core }, accountId) => (
+      core.invoke('social_account_logout', { accountId })
+    ), accountId)
   })
 
   it('通过 App 私有数据跨启动恢复固定测试账号', async () => {

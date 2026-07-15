@@ -93,7 +93,10 @@ pub async fn remembered_login_delete(app: AppHandle) -> Result<(), RememberedLog
 mod tests {
     use super::{delete, read, write, FILE_NAME};
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_root() -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -101,8 +104,9 @@ mod tests {
             .expect("clock must be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "agent-platform-remembered-login-{}-{nonce}",
-            std::process::id()
+            "agent-platform-remembered-login-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed),
         ))
     }
 

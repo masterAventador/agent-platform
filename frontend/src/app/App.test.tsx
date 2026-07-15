@@ -4,17 +4,32 @@ import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { apiClient } from '../api/client'
 import type { Workspace } from '../features/workspaces/types'
 import { workspacePermissions } from '../features/workspaces/permissions'
 import { useWorkspaceStore } from '../features/workspaces/store'
 import { App } from './App'
+
+const socialPermissions = ['social.read', 'social.manage', 'social.execute'] as const
+const installedSocialCapability = {
+  capability_id: 'social-operations',
+  deployment_installed: true,
+  tenant_entitled: true,
+  frontend_entries: ['social.routes.v1'],
+  permissions: [...socialPermissions],
+}
+let capabilityRegistryResponse = {
+  schema_version: '1.0',
+  capabilities: [installedSocialCapability],
+}
+const apiGet = vi.spyOn(apiClient, 'get')
 
 const ownerWorkspace: Workspace = {
   id: '00000000-0000-0000-0000-000000000010',
   name: 'Owner workspace',
   slug: 'workspace-owner',
   role: 'owner',
-  permissions: Object.values(workspacePermissions),
+  permissions: [...Object.values(workspacePermissions), ...socialPermissions],
 }
 const adminWorkspace: Workspace = {
   id: '00000000-0000-0000-0000-000000000020',
@@ -60,9 +75,20 @@ vi.mock('../features/auth/api/auth', () => ({
 
 describe('App', () => {
   beforeEach(() => {
+    apiGet.mockClear()
     sessionStorage.clear()
     useWorkspaceStore.getState().clear()
     authState.workspaces = [ownerWorkspace]
+    capabilityRegistryResponse = {
+      schema_version: '1.0',
+      capabilities: [installedSocialCapability],
+    }
+    apiGet.mockImplementation(async (url) => {
+      if (url === '/capabilities/registry') {
+        return { data: capabilityRegistryResponse } as never
+      }
+      throw new Error(`unexpected API request: ${String(url)}`)
+    })
   })
 
   it('展示数字员工平台的基础导航和后端状态', async () => {
@@ -87,9 +113,116 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: '设备与平台账号' })).toHaveAttribute(
+      'href',
+      '/video/account',
+    )
     expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
       .toHaveTextContent('Owner workspace')
     expect(await screen.findByText('后端服务正常')).toBeInTheDocument()
+  })
+
+  it('从正式路由进入 B02 设备与平台账号中心', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { name: '设备与平台账号中心' }))
+      .toBeInTheDocument()
+  })
+
+  it('Core-only 部署未安装模块时隐藏入口且直达路由受控拒绝', async () => {
+    capabilityRegistryResponse = { schema_version: '1.0', capabilities: [] }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('当前部署未安装此能力')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '设备与平台账号' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '设备与平台账号中心' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('模块已安装但租户未授权时隐藏入口且直达路由受控拒绝', async () => {
+    capabilityRegistryResponse = {
+      schema_version: '1.0',
+      capabilities: [{ ...installedSocialCapability, tenant_entitled: false }],
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/tiktok/account']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('当前工作区未获此能力授权')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '设备与平台账号' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '设备与平台账号中心' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('租户已授权但用户缺少 social 权限时隐藏入口且直达路由受控拒绝', async () => {
+    authState.workspaces = [memberWorkspace]
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('无权访问此能力')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '设备与平台账号' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '设备与平台账号中心' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('部署、租户授权与 manifest 权限三层满足时才装配入口和路由', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByRole('link', { name: '设备与平台账号' }))
+      .toHaveAttribute('href', '/video/account')
+    expect(await screen.findByRole('heading', { name: '设备与平台账号中心' }))
+      .toBeInTheDocument()
+    expect(apiGet).toHaveBeenCalledWith(
+      '/capabilities/registry',
+      expect.objectContaining({ headers: { 'X-Tenant-ID': ownerWorkspace.id } }),
+    )
+  })
+
+  it('能力注册表请求失败时隐藏入口且直达路由失败关闭', async () => {
+    apiGet.mockRejectedValueOnce(new Error('registry unavailable'))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('无法确认能力授权')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '设备与平台账号' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '设备与平台账号中心' }))
+      .not.toBeInTheDocument()
   })
 
   it('普通成员不显示任务运维入口且直接访问时受控拒绝', async () => {
