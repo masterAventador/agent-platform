@@ -1,7 +1,7 @@
 import type { FrontendCapabilityModule } from '../../app/capability-registry/types'
 import { SocialOperationsRoute } from './route'
 
-export const socialOperationsModule = {
+const socialOperationsModule = {
   capabilityId: 'social-operations',
   frontendEntry: 'social.routes.v1',
   navigation: [
@@ -12,3 +12,5 @@ export const socialOperationsModule = {
     { path: '/tiktok/account', Page: SocialOperationsRoute },
   ],
 } satisfies FrontendCapabilityModule
+
+export default socialOperationsModule

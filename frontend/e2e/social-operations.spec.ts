@@ -1,11 +1,48 @@
 import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
 
 import { registerAndLogin } from './helpers/auth'
 
 const deviceId = '00000000-0000-4000-8000-000000000301'
 const accountId = '00000000-0000-4000-8000-000000000501'
+const socialPermissions = ['social.read', 'social.manage', 'social.execute']
+
+async function mockCapabilityRegistry(page: Page, tenantEntitled: boolean) {
+  await page.route('**/api/v1/capabilities/registry', (route) => route.fulfill({
+    contentType: 'application/json',
+    json: {
+      schema_version: '1.0',
+      capabilities: [{
+        capability_id: 'social-operations',
+        deployment_installed: true,
+        tenant_entitled: tenantEntitled,
+        frontend_entries: ['social.routes.v1'],
+        permissions: socialPermissions,
+      }],
+    },
+  }))
+}
+
+async function grantSocialPermissionsOnLogin(page: Page) {
+  await page.route('**/api/v1/auth/login', async (route) => {
+    const response = await route.fetch()
+    const user = await response.json()
+    await route.fulfill({
+      response,
+      json: {
+        ...user,
+        workspaces: user.workspaces.map((workspace: { permissions: string[] }) => ({
+          ...workspace,
+          permissions: [...workspace.permissions, ...socialPermissions],
+        })),
+      },
+    })
+  })
+}
 
 test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ page }) => {
+  await mockCapabilityRegistry(page, true)
+  await grantSocialPermissionsOnLogin(page)
   await page.addInitScript(() => {
     Reflect.set(globalThis, '__AGENT_PLATFORM_TEST_ADAPTER__', 'social-operations')
   })
@@ -68,4 +105,14 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
     expect.objectContaining({ command: 'local_executor_start' }),
     expect.objectContaining({ command: 'local_executor_invoke' }),
   ]))
+})
+
+test('B02 租户未授权时隐藏入口并拒绝直达账号路由', async ({ page }) => {
+  await mockCapabilityRegistry(page, false)
+  await registerAndLogin(page)
+
+  await expect(page.getByRole('link', { name: '设备与平台账号' })).toHaveCount(0)
+  await page.goto('/tiktok/account')
+  await expect(page.getByText('当前工作区未获此能力授权')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '设备与平台账号中心' })).toHaveCount(0)
 })

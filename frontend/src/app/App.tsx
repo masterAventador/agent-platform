@@ -13,7 +13,12 @@ import {
   workspacePermissions,
 } from '../features/workspaces/permissions'
 import { useWorkspaceSelection } from '../features/workspaces/store'
-import { socialOperationsModule } from '../features/social-operations/module'
+import { useCapabilityRegistry } from './capability-registry/queries'
+import {
+  resolveCapabilityAccess,
+  type CapabilityAccess,
+} from './capability-registry/registry'
+import type { FrontendCapabilityModule } from './capability-registry/types'
 import './app.css'
 
 const { Content, Sider } = Layout
@@ -83,8 +88,6 @@ const DeadLettersPage = lazy(() =>
     default: module.DeadLettersPage,
   })),
 )
-const capabilityModules = [socialOperationsModule] as const
-
 export function App() {
   return (
     <Suspense fallback={<RouteLoading />}>
@@ -117,6 +120,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { activeWorkspace, isReconciled, select } = useWorkspaceSelection(user)
+  const capabilityRegistry = useCapabilityRegistry(activeWorkspace?.id)
   const [workspaceSwitchWarning, setWorkspaceSwitchWarning] = useState<string>()
   const [isWorkspaceSwitching, setIsWorkspaceSwitching] = useState(false)
   const workspaceSwitchInFlight = useRef(false)
@@ -156,6 +160,25 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   }
 
   const capabilities = getWorkspaceCapabilities(activeWorkspace)
+  const capabilityRegistryPending = capabilityRegistry.registry.isPending
+    || (capabilityRegistry.registry.isSuccess && capabilityRegistry.modules.isPending)
+  const capabilityRegistryError = capabilityRegistry.registry.isError
+    || capabilityRegistry.modules.isError
+  const registeredCapabilities = capabilityRegistry.registry.data?.capabilities ?? []
+  const loadedModules = new Map(capabilityRegistry.modules.data ?? [])
+  const userPermissions = new Set(activeWorkspace.permissions)
+  const capabilityModules = registeredCapabilities.map((capability) => {
+    const module = loadedModules.get(capability.capability_id)
+    return {
+      access: resolveCapabilityAccess(capability, module, userPermissions),
+      module,
+    }
+  })
+  const availableModules = capabilityModules.filter(
+    (entry): entry is { access: 'allowed', module: FrontendCapabilityModule } => (
+      entry.access === 'allowed' && entry.module !== undefined
+    ),
+  )
 
   const switchWorkspace = async (workspaceId: string) => {
     if (workspaceId === activeWorkspace.id || workspaceSwitchInFlight.current) return
@@ -219,7 +242,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             {capabilities.canManageOperations && (
               <Link to="/operations/dead-letters">任务运维</Link>
             )}
-            {capabilityModules.flatMap((module) => module.navigation).map((entry) => (
+            {availableModules.flatMap(({ module }) => module.navigation).map((entry) => (
               <Link key={entry.path} to={entry.path}>{entry.label}</Link>
             ))}
           </Space>
@@ -358,17 +381,43 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
               </WorkspaceCapabilityGate>
             )}
           />
-          {capabilityModules.flatMap((module) => module.routes).map(({ path, Page }) => (
-            <Route
-              key={path}
-              path={path}
-              element={<Page workspaceId={activeWorkspace.id} />}
-            />
+          {capabilityModules.flatMap(({ access, module }) => (
+            module?.routes.map(({ path, Page }) => (
+              <Route
+                key={path}
+                path={path}
+                element={access === 'allowed'
+                  ? <Page workspaceId={activeWorkspace.id} />
+                  : <CapabilityAccessDenied access={access} />}
+              />
+            )) ?? []
           ))}
+          <Route
+            path="*"
+            element={capabilityRegistryPending
+              ? <RouteLoading />
+              : capabilityRegistryError
+                ? <Result status="error" title="无法确认能力授权" />
+                : (
+              <CapabilityAccessDenied
+                access={registeredCapabilities.length === 0 ? 'not-installed' : 'incompatible'}
+              />
+                )}
+          />
         </Routes>
       </Content>
     </Layout>
   )
+}
+
+function CapabilityAccessDenied({ access }: { access: Exclude<CapabilityAccess, 'allowed'> }) {
+  const title = {
+    forbidden: '无权访问此能力',
+    incompatible: '能力清单与客户端模块不兼容',
+    'not-entitled': '当前工作区未获此能力授权',
+    'not-installed': '当前部署未安装此能力',
+  }[access]
+  return <Result status="403" title={title} />
 }
 
 function RouteLoading() {
