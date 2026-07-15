@@ -4,6 +4,7 @@ import importlib.util
 import json
 import threading
 import unittest
+from urllib.error import HTTPError
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,24 @@ class OpenAiStubProtocolTest(unittest.TestCase):
         choice = response["choices"][0]
         self.assertEqual(choice["finish_reason"], "tool_calls")
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "get_status")
+
+    def test_mvp_failure_scenario_returns_a_deterministic_upstream_error(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.post_completion(
+                {
+                    "model": "primary-test",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": json.dumps({"message": "mvp-web-flow-failure"}),
+                        }
+                    ],
+                }
+            )
+
+        self.assertEqual(raised.exception.code, 500)
+        error = json.loads(raised.exception.read())
+        self.assertEqual(error["error"]["type"], "mvp_controlled_failure")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ import { isTenantMutationFor } from '../api/tenant'
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
-import { BackendStatus } from '../features/system/components/BackendStatus'
 import { WorkspaceCapabilityGate } from '../features/workspaces/components/WorkspaceCapabilityGate'
 import {
   getWorkspaceCapabilities,
@@ -23,6 +22,11 @@ const LoginPage = lazy(() =>
 const RegisterPage = lazy(() =>
   import('../features/auth/pages/RegisterPage').then((module) => ({
     default: module.RegisterPage,
+  })),
+)
+const DashboardPage = lazy(() =>
+  import('../features/dashboard/pages/DashboardPage').then((module) => ({
+    default: module.DashboardPage,
   })),
 )
 const EmployeesPage = lazy(() =>
@@ -240,7 +244,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
           <Alert type="warning" showIcon title={workspaceSwitchWarning} />
         )}
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<DashboardPage />} />
           <Route
             path="/employees"
             element={<EmployeesPage canManageEmployees={capabilities.canManageEmployees} />}
@@ -352,18 +356,6 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
         </Routes>
       </Content>
     </Layout>
-  )
-}
-
-function Dashboard() {
-  return (
-    <section>
-      <Typography.Title level={2}>工作台</Typography.Title>
-      <Typography.Paragraph type="secondary">
-        平台基础工程已就绪，后续功能将按前后端纵向切片逐步接入。
-      </Typography.Paragraph>
-      <BackendStatus />
-    </section>
   )
 }
 

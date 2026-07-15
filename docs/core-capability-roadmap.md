@@ -59,7 +59,7 @@
 | --- | --- | --- | --- |
 | 工程质量基线 | 已完成 | 后端 0 失败；真实依赖跳过项均明确标注所需外部依赖 | C01 |
 | Tauri 桌面客户端 | 未实现 | 无 `src-tauri`、`PlatformAdapter`、安装包和桌面能力 | C02 |
-| 全栈真实验收与工作台 | 部分完成 | 尚未完成整栈真实闭环；工作台仍为占位内容 | C03 |
+| 全栈真实验收与工作台 | 部分完成 | 本地 Stub 的成功/受控失败整栈闭环与工作台真实数据已完成；真实 TokenHub 和 Tauri 内核心流程仍待完成 | C03 |
 | 文件与产物 | 未实现 | 文件上传关闭，运行时 `get_artifacts()` 返回空列表 | C04 |
 | 多轮会话 | 部分完成 | 主要是一次性任务，没有完整消息、追加输入和恢复体验 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
@@ -379,9 +379,10 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 验证项 | 当前结果 |
 | --- | --- |
 | 后端 Pytest | 收集 585 项：550 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
+| 后端 Unit + Contract | 580 项通过；包含 Core API route manifest 与工作台严格响应契约 |
 | Ruff | 通过 |
-| Mypy | 144 个源码文件通过 |
-| 前端 Vitest | 20 个测试文件、89 项测试通过；含 PlatformAdapter 契约与架构边界测试 |
+| Mypy | 159 个源码文件通过 |
+| 前端 Vitest | 23 个测试文件、98 项测试通过；含 PlatformAdapter、工作台 API/查询/页面与架构边界测试 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
@@ -390,10 +391,10 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 2 项真实应用启动、IPC 与失败关闭冒烟通过；正式构建无 WebDriver 测试标记 |
 | 历史百炼最小真实请求 | `qwen-plus` 成功，12 Token；仅作为历史证据 |
-| 无付费模型默认回归 | LiteLLM 配置契约 17 项、Stub HTTP 协议 2 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目 |
+| 无付费模型默认回归 | LiteLLM 配置契约 17 项、Stub HTTP 协议 3 项通过；本地 Stub 协议矩阵通过并自动清理临时 Compose 项目；包含仅由显式测试场景触发的确定性 HTTP 500 响应 |
 | TokenHub 最小真实请求 | 尚未执行，纳入 C03 |
-| C03 MVP Profile 基础设施验收 | 隔离唯一随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、状态查询、重复启动、故障健康检查、保留卷停止、失败重启清理与恢复、同 Profile 并发拒绝、工作树镜像隔离及最终容器/网络/卷清理通过；dotenv 不执行、运行目录/权限/端口/网络配置校验通过；行为回归额外覆盖无 `rg` 时预存卷保护、重复启动失败不拆既有容器、缺失环境状态时停止失败关闭、LiteLLM 网络检查异常失败关闭、外来网络拒绝删除、网络删除失败传播、Compose `up` 前分组端口占用拒绝，以及启动期间 `INT`/`TERM`/`ERR` 的退出码、差集清理和锁释放；正式 Playwright 业务纵切完成注册、登录、员工创建/发布、任务创建、生产 Worker 经 LiteLLM Stub 推理、事件持久化、页面终态与刷新恢复；RAGFlow 未启动 |
-| 完整本机栈 E2E | 本地 Stub 下的注册、登录、员工发布、任务执行、PostgreSQL 事件持久化和 Web UI 终态纵切已通过，且测试后容器、网络和卷零残留；真实 TokenHub、工作台真实数据卡片和 Tauri 内核心流程仍待 C03 后续纵切 |
+| C03 MVP Profile 基础设施验收 | 隔离唯一随机端口真实启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；生产 `LiteLLMChatModelFactory → LiteLLM → Stub` 调用、状态查询、重复启动、故障健康检查、保留卷停止、失败重启清理与恢复、同 Profile 并发拒绝、工作树镜像隔离及最终容器/网络/卷清理通过；dotenv 不执行、运行目录/权限/端口/网络配置校验通过；平台契约 34 项通过；行为回归额外覆盖无 `rg` 时预存卷保护、重复启动失败不拆既有容器、缺失环境状态时停止失败关闭、LiteLLM 网络检查异常失败关闭、外来网络拒绝删除、网络删除失败传播、Compose `up` 前分组端口占用拒绝，以及启动期间 `INT`/`TERM`/`ERR` 的退出码、差集清理和锁释放；正式 Playwright 业务纵切完成成功与受控模型失败两条真实链路，并验证工作台聚合、事件持久化、页面终态与刷新恢复；RAGFlow 未启动 |
+| 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数；后端工作台契约/映射 8 项、前端工作台 9 项通过，测试后容器、网络和卷零残留；真实 TokenHub 和 Tauri 内核心流程仍待 C03 后续纵切 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
 当前已知失败：无。
@@ -404,7 +405,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | --- | --- | --- | --- | --- | --- |
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
-| C03 | 进行中 | 2026-07-14 | — | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（33 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、2 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖注册、登录、员工创建/发布、任务创建、生产 Dispatcher/Worker/LiteLLM、事件持久化、Web UI 终态和刷新恢复，并确认测试资源零残留。真实 TokenHub、工作台真实数据卡片和 Tauri 内核心流程仍未完成，不得标记 C03 完成 |
+| C03 | 进行中 | 2026-07-14 | — | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（34 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，主题 token 通过组件样式 API 真实落入 DOM，严格响应契约拒绝计数类型强制转换以及顶层/嵌套未知字段，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件，测试资源零残留。真实 TokenHub 和 Tauri 内核心流程仍未完成，不得标记 C03 完成 |
 | C04-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

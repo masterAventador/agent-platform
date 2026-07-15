@@ -16,6 +16,7 @@ from agent_platform.api.routes.model_gateway import router as model_gateway_rout
 from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import mcp_router, tool_router
+from agent_platform.api.routes.workbench import router as workbench_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.object_storage.minio import (
@@ -118,6 +119,7 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(tool_router)
     app.include_router(model_gateway_router)
+    app.include_router(workbench_router)
 
     @app.exception_handler(KnowledgeProviderUnavailable)
     @app.exception_handler(InvalidKnowledgeProviderResponse)
