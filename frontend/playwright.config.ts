@@ -1,11 +1,15 @@
 import { defineConfig } from '@playwright/test'
 
-const webPort = process.env.PLAYWRIGHT_WEB_PORT ?? '15173'
-const apiPort = process.env.PLAYWRIGHT_API_PORT ?? '18000'
-const ragflowPort = process.env.PLAYWRIGHT_RAGFLOW_PORT ?? '29380'
-const postgresPort = process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'
-const redisPort = process.env.PLAYWRIGHT_REDIS_PORT ?? '6379'
-const minioApiPort = process.env.PLAYWRIGHT_MINIO_API_PORT ?? '9000'
+import {
+  composeEnvironment,
+  minioApiPort,
+  postgresDatabaseUrl,
+  redisDatabaseUrl,
+} from './e2e/helpers/compose-core'
+
+const webPort = process.env.PLAYWRIGHT_WEB_PORT ?? process.env.PLATFORM_WEB_PORT ?? '15173'
+const apiPort = process.env.PLAYWRIGHT_API_PORT ?? process.env.PLATFORM_API_PORT ?? '18000'
+const ragflowPort = process.env.PLAYWRIGHT_RAGFLOW_PORT ?? process.env.RAGFLOW_PORT ?? '29380'
 
 export default defineConfig({
   testDir: './e2e',
@@ -37,10 +41,9 @@ export default defineConfig({
       command: `uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port ${apiPort}`,
       cwd: '../backend',
       env: {
-        AGENT_PLATFORM_DATABASE_URL:
-          `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${postgresPort}/agent_platform_e2e`,
-        AGENT_PLATFORM_REDIS_URL:
-          `redis://:agent-platform-local-redis@127.0.0.1:${redisPort}/2`,
+        ...composeEnvironment,
+        AGENT_PLATFORM_DATABASE_URL: postgresDatabaseUrl('agent_platform_e2e'),
+        AGENT_PLATFORM_REDIS_URL: redisDatabaseUrl(2),
         AGENT_PLATFORM_RAGFLOW_URL: `http://127.0.0.1:${ragflowPort}`,
         AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-e2e-key',
         AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioApiPort}`,
