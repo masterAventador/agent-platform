@@ -160,9 +160,9 @@ class AuditPort(Protocol):
 class DeviceAccountStateStore(Protocol):
     """Capability persistence seam; the Core PostgreSQL adapter is wired centrally."""
 
-    def load(self) -> Mapping[str, Any] | None: ...
+    def load(self) -> tuple[int, Mapping[str, Any]] | None: ...
 
-    def save(self, state: Mapping[str, Any]) -> None: ...
+    def save(self, state: Mapping[str, Any], *, expected_revision: int) -> int: ...
 
 
 class DeviceAccountService:
@@ -189,8 +189,12 @@ class DeviceAccountService:
         self._tasks: dict[UUID, LocalTask] = {}
         self._accounts: dict[UUID, PlatformAccount] = {}
         self._audit_outbox: list[AuditEvent] = []
+        self._state_revision = 0
         if state_store is not None:
-            self._restore_state(state_store.load())
+            snapshot = state_store.load()
+            if snapshot is not None:
+                self._state_revision, state = snapshot
+                self._restore_state(state)
             self._drain_audit_outbox()
 
     def register_device(
@@ -638,7 +642,7 @@ class DeviceAccountService:
     def _persist_state(self) -> None:
         if self._state_store is None:
             return
-        self._state_store.save(
+        self._state_revision = self._state_store.save(
             {
                 "devices": [
                     {
@@ -699,7 +703,8 @@ class DeviceAccountService:
                     }
                     for event in self._audit_outbox
                 ],
-            }
+            },
+            expected_revision=self._state_revision,
         )
 
     def _restore_state(self, state: Mapping[str, Any] | None) -> None:

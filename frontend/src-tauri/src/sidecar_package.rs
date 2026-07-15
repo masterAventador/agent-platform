@@ -34,6 +34,13 @@ pub struct SignedSidecarManifest {
     pub package_size: u64,
 }
 
+#[derive(Debug)]
+pub struct VerifiedSidecarExecutable {
+    pub path: PathBuf,
+    pub file: std::fs::File,
+    pub contents: Vec<u8>,
+}
+
 impl SignedSidecarManifest {
     pub fn for_current(version: &str, package: &[u8]) -> Result<Self, SidecarPackageError> {
         validate_version(version)?;
@@ -236,6 +243,14 @@ impl TrustedSidecarInstaller {
     }
 
     pub fn installed_current_verified(&self) -> Result<Option<PathBuf>, SidecarPackageError> {
+        Ok(self
+            .installed_current_verified_executable()?
+            .map(|executable| executable.path))
+    }
+
+    pub fn installed_current_verified_executable(
+        &self,
+    ) -> Result<Option<VerifiedSidecarExecutable>, SidecarPackageError> {
         let Some(version) = self.current_version()? else {
             return Ok(None);
         };
@@ -249,9 +264,14 @@ impl TrustedSidecarInstaller {
             return Err(SidecarPackageError::SignatureInvalid);
         }
         let executable = version_dir.join("social-operations-sidecar");
-        let package = read_private_bounded(&executable, self.max_package_bytes)?;
+        let (file, package) =
+            read_private_bounded_with_stable_identity(&executable, self.max_package_bytes)?;
         self.verify_manifest_package(&manifest, &package, &signature)?;
-        Ok(Some(executable))
+        Ok(Some(VerifiedSidecarExecutable {
+            path: executable,
+            file,
+            contents: package,
+        }))
     }
 
     fn verify_manifest_package(
@@ -384,6 +404,77 @@ fn read_private_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, Sideca
         return Err(SidecarPackageError::PackageTooLarge);
     }
     Ok(contents)
+}
+
+fn read_private_bounded_with_stable_identity(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<(std::fs::File, Vec<u8>), SidecarPackageError> {
+    let mut file = open_private_read(path)?;
+    let before = file_identity(&file)?;
+    let mut contents = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut contents)
+        .map_err(|_| SidecarPackageError::IoUnavailable)?;
+    if contents.len() > max_bytes || file_identity(&file)? != before {
+        return Err(SidecarPackageError::IoUnavailable);
+    }
+    let current = open_private_read(path)?;
+    if file_identity(&current)? != before {
+        return Err(SidecarPackageError::IoUnavailable);
+    }
+    Ok((file, contents))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    file: u64,
+    length: u64,
+}
+
+#[cfg(unix)]
+fn file_identity(file: &std::fs::File) -> Result<FileIdentity, SidecarPackageError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .metadata()
+        .map_err(|_| SidecarPackageError::IoUnavailable)?;
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        file: metadata.ino(),
+        length: metadata.len(),
+    })
+}
+
+#[cfg(windows)]
+fn file_identity(file: &std::fs::File) -> Result<FileIdentity, SidecarPackageError> {
+    use std::mem::zeroed;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
+        return Err(SidecarPackageError::IoUnavailable);
+    }
+    Ok(FileIdentity {
+        device: u64::from(information.dwVolumeSerialNumber),
+        file: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        length: (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow),
+    })
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn file_identity(file: &std::fs::File) -> Result<FileIdentity, SidecarPackageError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| SidecarPackageError::IoUnavailable)?;
+    Ok(FileIdentity {
+        device: 0,
+        file: 0,
+        length: metadata.len(),
+    })
 }
 
 fn write_private_atomic(
@@ -542,6 +633,12 @@ fn open_private_read(path: &Path) -> Result<std::fs::File, SidecarPackageError> 
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        options.share_mode(FILE_SHARE_READ);
     }
     options
         .open(path)

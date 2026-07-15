@@ -31,3 +31,20 @@ commands.allow = [
   "local_executor_status",
   "local_executor_stop",
 ]
+
+[[permission]]
+identifier = "allow-social-operations"
+description = "允许主窗口管理已授权的自动运营 Sidecar、账号会话与紧急停止"
+commands.allow = [
+  "social_sidecar_install",
+  "social_sidecar_download",
+  "social_account_prepare",
+  "social_account_login_signal",
+  "social_account_store_cookies",
+  "social_account_has_cookies",
+  "social_account_start",
+  "social_account_invoke",
+  "social_account_logout",
+  "social_account_emergency_stop",
+  "social_executor_take_safe_diagnostics",
+]

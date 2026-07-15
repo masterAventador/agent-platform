@@ -28,6 +28,7 @@
             "allow-secure-credentials",
             "allow-remembered-login-storage",
             "allow-local-executor",
+            "allow-social-operations",
             "dialog:allow-open",
             "dialog:allow-save",
             "fs:allow-read-file",

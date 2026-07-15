@@ -22,6 +22,7 @@ from agent_platform.capabilities.social_operations.device_account_service import
     ActorContext,
     AuditEvent,
     AuthorizationError,
+    ConflictError,
     DeviceAccountService,
     DevicePlatform,
     DeviceStatus,
@@ -51,16 +52,23 @@ class MutableClock:
 class MemoryStore:
     def __init__(self) -> None:
         self.state: Mapping[str, Any] | None = None
+        self.revision = 0
         self.fail_next_save = False
 
-    def load(self) -> Mapping[str, Any] | None:
-        return deepcopy(self.state)
+    def load(self) -> tuple[int, Mapping[str, Any]] | None:
+        if self.state is None:
+            return None
+        return self.revision, deepcopy(self.state)
 
-    def save(self, state: Mapping[str, Any]) -> None:
+    def save(self, state: Mapping[str, Any], *, expected_revision: int) -> int:
         if self.fail_next_save:
             self.fail_next_save = False
             raise OSError("storage unavailable")
+        if expected_revision != self.revision:
+            raise ConflictError("persisted state revision changed")
+        self.revision += 1
         self.state = deepcopy(state)
+        return self.revision
 
 
 class FailingAuditSink:
@@ -420,3 +428,79 @@ def test_sqlite_detects_leaf_replacement_between_validation_and_connect(
 
     with pytest.raises(ValueError, match="changed while opening|symbolic link"):
         store.load()
+
+
+def test_sqlite_multi_instance_stale_heartbeat_cannot_overwrite_emergency_stop(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.db"
+    clock = MutableClock()
+    first = DeviceAccountService(
+        clock=clock,
+        audit_sink=InMemoryAuditSink(),
+        offline_after=timedelta(seconds=30),
+        claim_lease=timedelta(seconds=10),
+        state_store=SqliteDeviceAccountStateStore(state_path),
+    )
+    register(first)
+    stale = DeviceAccountService(
+        clock=clock,
+        audit_sink=InMemoryAuditSink(),
+        offline_after=timedelta(seconds=30),
+        claim_lease=timedelta(seconds=10),
+        state_store=SqliteDeviceAccountStateStore(state_path),
+    )
+
+    first.emergency_stop(
+        actor(), DEVICE_ID, reason=EmergencyStopReason.OPERATOR_REQUESTED
+    )
+
+    with pytest.raises(ConflictError, match="state.*changed|revision"):
+        stale.heartbeat(
+            actor(),
+            device_id=DEVICE_ID,
+            app_version="0.2.0",
+            executor_version="1.1.0",
+            heartbeat_sequence=1,
+        )
+
+    recovered = DeviceAccountService(
+        clock=clock,
+        audit_sink=InMemoryAuditSink(),
+        offline_after=timedelta(seconds=30),
+        claim_lease=timedelta(seconds=10),
+        state_store=SqliteDeviceAccountStateStore(state_path),
+    )
+    assert recovered.get_device(actor(), DEVICE_ID).status is DeviceStatus.EMERGENCY_STOPPED
+
+
+def test_sqlite_multi_instance_compare_and_swap_has_one_atomic_winner(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.db"
+    first = SqliteDeviceAccountStateStore(state_path)
+    second = SqliteDeviceAccountStateStore(state_path)
+    revision = first.save({"writer": "initial"}, expected_revision=0)
+    barrier = Barrier(2)
+
+    def write(store: SqliteDeviceAccountStateStore, writer: str) -> str:
+        barrier.wait()
+        try:
+            store.save({"writer": writer}, expected_revision=revision)
+        except ConflictError:
+            return "conflict"
+        return "saved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda item: write(*item),
+                ((first, "first"), (second, "second")),
+            )
+        )
+
+    assert sorted(results) == ["conflict", "saved"]
+    snapshot = SqliteDeviceAccountStateStore(state_path).load()
+    assert snapshot is not None
+    assert snapshot[0] == revision + 1
+    assert snapshot[1]["writer"] in {"first", "second"}

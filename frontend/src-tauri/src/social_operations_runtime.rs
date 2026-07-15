@@ -47,8 +47,11 @@ impl From<BrowserSessionError> for SocialRuntimeError {
 }
 
 impl From<LocalExecutorError> for SocialRuntimeError {
-    fn from(_: LocalExecutorError) -> Self {
-        Self::ExecutorUnavailable
+    fn from(error: LocalExecutorError) -> Self {
+        match error {
+            LocalExecutorError::LaunchVerificationFailed => Self::PackageRejected,
+            _ => Self::ExecutorUnavailable,
+        }
     }
 }
 
@@ -171,7 +174,7 @@ impl SocialOperationsRuntime {
         &mut self,
         account_id: &str,
         signal: LoginSignal,
-        executor: &mut LocalExecutorManager,
+        executor: &LocalExecutorManager,
     ) -> Result<LoginSnapshot, SocialRuntimeError> {
         let fail_safe = matches!(
             signal,
@@ -225,7 +228,7 @@ impl SocialOperationsRuntime {
     pub fn start_account(
         &mut self,
         account_id: &str,
-        executor: &mut LocalExecutorManager,
+        executor: &LocalExecutorManager,
     ) -> Result<LocalExecutorStatus, SocialRuntimeError> {
         if self
             .active_account
@@ -241,22 +244,40 @@ impl SocialOperationsRuntime {
         if snapshot.circuit_open {
             return Err(SocialRuntimeError::AccountCircuitOpen);
         }
-        let executable = self
-            .installed_sidecar
-            .clone()
-            .ok_or(SocialRuntimeError::PackageRejected)?;
-        let status = executor.start_installed(executable)?;
+        if self.installed_sidecar.is_none() {
+            return Err(SocialRuntimeError::PackageRejected);
+        }
+        let root = self.root.clone();
+        let verifying_key = self
+            .verifying_key
+            .ok_or(SocialRuntimeError::TrustAnchorUnavailable)?;
+        let max_package_bytes = self.max_package_bytes;
+        let verifier = move || {
+            TrustedSidecarInstaller::new(&root, verifying_key, max_package_bytes)
+                .and_then(|installer| installer.installed_current_verified_executable())
+                .ok()
+                .flatten()
+                .ok_or(LocalExecutorError::LaunchVerificationFailed)
+        };
+        let status = executor.start_verified(verifier)?;
         self.active_account = Some(account_id.to_owned());
         Ok(status)
     }
 
     pub fn invoke_account(
-        &mut self,
+        &self,
         account_id: &str,
-        executor: &mut LocalExecutorManager,
+        executor: &LocalExecutorManager,
         request: Value,
         timeout: Duration,
     ) -> Result<Value, SocialRuntimeError> {
+        self.authorize_account_invoke(account_id)?;
+        executor
+            .invoke_with_timeout(request, timeout)
+            .map_err(Into::into)
+    }
+
+    pub fn authorize_account_invoke(&self, account_id: &str) -> Result<(), SocialRuntimeError> {
         if self.active_account.as_deref() != Some(account_id) {
             return Err(SocialRuntimeError::InvalidAccount);
         }
@@ -267,15 +288,13 @@ impl SocialOperationsRuntime {
         if snapshot.circuit_open {
             return Err(SocialRuntimeError::AccountCircuitOpen);
         }
-        executor
-            .invoke_with_timeout(request, timeout)
-            .map_err(Into::into)
+        Ok(())
     }
 
     pub fn logout_account(
         &mut self,
         account_id: &str,
-        executor: &mut LocalExecutorManager,
+        executor: &LocalExecutorManager,
     ) -> Result<(), SocialRuntimeError> {
         let profile = {
             let account = self
@@ -307,7 +326,7 @@ impl SocialOperationsRuntime {
     pub fn emergency_stop(
         &mut self,
         account_id: &str,
-        executor: &mut LocalExecutorManager,
+        executor: &LocalExecutorManager,
     ) -> Result<(), SocialRuntimeError> {
         self.apply_login_signal_with_executor(account_id, LoginSignal::RiskControl, executor)
             .map(|_| ())
@@ -336,12 +355,33 @@ fn lock_runtime<'a>(
         .map_err(|_| SocialRuntimeError::RuntimeUnavailable)
 }
 
-fn lock_executor<'a>(
-    state: &'a State<'_, Mutex<LocalExecutorManager>>,
-) -> Result<std::sync::MutexGuard<'a, LocalExecutorManager>, SocialRuntimeError> {
-    state
+pub fn invoke_managed_account(
+    runtime: &Mutex<SocialOperationsRuntime>,
+    executor: &LocalExecutorManager,
+    account_id: &str,
+    request: Value,
+    timeout: Duration,
+) -> Result<Value, SocialRuntimeError> {
+    {
+        let runtime = runtime
+            .lock()
+            .map_err(|_| SocialRuntimeError::RuntimeUnavailable)?;
+        runtime.authorize_account_invoke(account_id)?;
+    }
+    executor
+        .invoke_with_timeout(request, timeout)
+        .map_err(Into::into)
+}
+
+pub fn emergency_stop_managed_account(
+    runtime: &Mutex<SocialOperationsRuntime>,
+    executor: &LocalExecutorManager,
+    account_id: &str,
+) -> Result<(), SocialRuntimeError> {
+    runtime
         .lock()
-        .map_err(|_| SocialRuntimeError::RuntimeUnavailable)
+        .map_err(|_| SocialRuntimeError::RuntimeUnavailable)?
+        .emergency_stop(account_id, executor)
 }
 
 #[tauri::command]
@@ -380,17 +420,12 @@ pub fn social_account_prepare(
 #[tauri::command]
 pub fn social_account_login_signal(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
     account_id: String,
     signal: String,
 ) -> Result<LoginSnapshot, SocialRuntimeError> {
     let mut runtime = lock_runtime(&runtime)?;
-    let mut executor = lock_executor(&executor)?;
-    runtime.apply_login_signal_with_executor(
-        &account_id,
-        parse_login_signal(&signal)?,
-        &mut executor,
-    )
+    runtime.apply_login_signal_with_executor(&account_id, parse_login_signal(&signal)?, &executor)
 }
 
 #[tauri::command]
@@ -415,51 +450,51 @@ pub fn social_account_has_cookies(
 #[tauri::command]
 pub fn social_account_start(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
     account_id: String,
 ) -> Result<LocalExecutorStatus, SocialRuntimeError> {
     let mut runtime = lock_runtime(&runtime)?;
-    let mut executor = lock_executor(&executor)?;
-    runtime.start_account(&account_id, &mut executor)
+    runtime.start_account(&account_id, &executor)
 }
 
 #[tauri::command]
 pub fn social_account_invoke(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
     account_id: String,
     request: Value,
 ) -> Result<Value, SocialRuntimeError> {
-    let mut runtime = lock_runtime(&runtime)?;
-    let mut executor = lock_executor(&executor)?;
-    runtime.invoke_account(&account_id, &mut executor, request, Duration::from_secs(30))
+    invoke_managed_account(
+        runtime.inner(),
+        executor.inner(),
+        &account_id,
+        request,
+        Duration::from_secs(30),
+    )
 }
 
 #[tauri::command]
 pub fn social_account_logout(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
     account_id: String,
 ) -> Result<(), SocialRuntimeError> {
     let mut runtime = lock_runtime(&runtime)?;
-    let mut executor = lock_executor(&executor)?;
-    runtime.logout_account(&account_id, &mut executor)
+    runtime.logout_account(&account_id, &executor)
 }
 
 #[tauri::command]
 pub fn social_account_emergency_stop(
     runtime: State<'_, Mutex<SocialOperationsRuntime>>,
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
     account_id: String,
 ) -> Result<(), SocialRuntimeError> {
-    let mut runtime = lock_runtime(&runtime)?;
-    let mut executor = lock_executor(&executor)?;
-    runtime.emergency_stop(&account_id, &mut executor)
+    emergency_stop_managed_account(runtime.inner(), executor.inner(), &account_id)
 }
 
 #[tauri::command]
 pub fn social_executor_take_safe_diagnostics(
-    executor: State<'_, Mutex<LocalExecutorManager>>,
+    executor: State<'_, LocalExecutorManager>,
 ) -> Result<Vec<String>, SocialRuntimeError> {
-    Ok(lock_executor(&executor)?.take_safe_diagnostics())
+    Ok(executor.take_safe_diagnostics())
 }

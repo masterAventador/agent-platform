@@ -107,9 +107,7 @@ fn sidecar_verifying_key() -> Option<[u8; 32]> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
-        .manage(std::sync::Mutex::new(
-            local_executor::LocalExecutorManager::default(),
-        ))
+        .manage(local_executor::LocalExecutorManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
@@ -182,6 +180,20 @@ pub fn run() {
 mod tests {
     use super::validated_url;
 
+    const SOCIAL_COMMANDS: [&str; 11] = [
+        "social_sidecar_install",
+        "social_sidecar_download",
+        "social_account_prepare",
+        "social_account_login_signal",
+        "social_account_store_cookies",
+        "social_account_has_cookies",
+        "social_account_start",
+        "social_account_invoke",
+        "social_account_logout",
+        "social_account_emergency_stop",
+        "social_executor_take_safe_diagnostics",
+    ];
+
     #[test]
     fn runtime_urls_allow_https_and_loopback_http_only() {
         assert_eq!(
@@ -204,5 +216,26 @@ mod tests {
             validated_url("https://user@example.com/api/v1", Some("/api/v1")),
             None
         );
+    }
+
+    #[test]
+    fn registered_social_commands_are_authorized_by_desktop_capabilities() {
+        let command_permissions = include_str!("../permissions/app-commands.toml");
+        let default_capability = include_str!("../capabilities/default.json");
+        let test_capability = include_str!("../tauri.test.conf.json");
+        let registered_commands = include_str!("lib.rs");
+
+        assert!(default_capability.contains("allow-social-operations"));
+        assert!(test_capability.contains("allow-social-operations"));
+        for command in SOCIAL_COMMANDS {
+            assert!(
+                registered_commands.contains(&format!("social_operations_runtime::{command}")),
+                "{command} must be registered"
+            );
+            assert!(
+                command_permissions.contains(&format!("\"{command}\"")),
+                "{command} must be authorized"
+            );
+        }
     }
 }

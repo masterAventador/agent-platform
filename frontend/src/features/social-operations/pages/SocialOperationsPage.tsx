@@ -363,12 +363,17 @@ export function SocialOperationsPage({
               'begin-qr',
               () => requireAccount().signalLogin('begin_qr'),
               '已进入扫码等待。',
-            )}>开始扫码</Button>
+            )} disabled={accountSnapshot?.state !== 'logged_out'}>开始扫码</Button>
+            <Button onClick={() => void accountAction(
+              'qr-scanned',
+              () => requireAccount().signalLogin('qr_scanned'),
+              '已识别扫码，等待平台确认登录。',
+            )} disabled={accountSnapshot?.state !== 'awaiting_scan'}>确认已完成扫码</Button>
             <Button onClick={() => void accountAction(
               'authenticated',
               () => requireAccount().signalLogin('authenticated'),
               '已记录受控登录结果。',
-            )}>确认已登录</Button>
+            )} disabled={accountSnapshot?.state !== 'awaiting_confirmation'}>确认已登录</Button>
             <Button danger onClick={() => void accountAction(
               'captcha',
               () => requireAccount().signalLogin('captcha_required'),

@@ -1,4 +1,9 @@
-import type { JsonValue, PlatformAdapter, SocialLoginSignal } from './types'
+import type {
+  JsonValue,
+  PlatformAdapter,
+  SocialAccountSnapshot,
+  SocialLoginSignal,
+} from './types'
 import { createWebPlatformAdapter } from './web'
 
 function record(command: string, args?: unknown): void {
@@ -8,7 +13,45 @@ function record(command: string, args?: unknown): void {
 
 export function createSocialOperationsTestAdapter(): PlatformAdapter {
   const web = createWebPlatformAdapter()
+  const accounts = new Map<string, SocialAccountSnapshot>()
+  const runningAccounts = new Set<string>()
   Reflect.set(globalThis, '__socialCommands', [])
+
+  const transition = (
+    accountId: string,
+    signal: SocialLoginSignal,
+  ): SocialAccountSnapshot => {
+    const current = accounts.get(accountId)
+    if (current === undefined) throw new Error('account is not prepared')
+    let next: SocialAccountSnapshot
+    if (['captcha_required', 'risk_control', 'login_expired'].includes(signal)) {
+      next = { ...current, state: 'human_handoff', circuit_open: true }
+      runningAccounts.delete(accountId)
+    } else if (signal === 'begin_qr' && current.state === 'logged_out') {
+      next = { ...current, state: 'awaiting_scan', circuit_open: true }
+    } else if (signal === 'qr_scanned' && current.state === 'awaiting_scan') {
+      next = { ...current, state: 'awaiting_confirmation', circuit_open: true }
+    } else if (signal === 'authenticated' && current.state === 'awaiting_confirmation') {
+      next = { ...current, state: 'healthy', circuit_open: false }
+    } else if (signal === 'operator_resume' && current.state === 'human_handoff') {
+      next = {
+        state: 'awaiting_scan',
+        circuit_open: true,
+        session_revision: current.session_revision + 1,
+      }
+    } else if (signal === 'logout') {
+      next = {
+        state: 'logged_out',
+        circuit_open: true,
+        session_revision: current.session_revision + 1,
+      }
+      runningAccounts.delete(accountId)
+    } else {
+      throw new Error('invalid login transition')
+    }
+    accounts.set(accountId, next)
+    return next
+  }
 
   return {
     ...web,
@@ -27,11 +70,17 @@ export function createSocialOperationsTestAdapter(): PlatformAdapter {
       },
       prepareAccount: async (platform, accountId) => {
         record('social_account_prepare', { platform, accountId })
-        return { state: 'logged_out', circuit_open: true, session_revision: 0 }
+        const snapshot = {
+          state: 'logged_out' as const,
+          circuit_open: true,
+          session_revision: 0,
+        }
+        accounts.set(accountId, snapshot)
+        return snapshot
       },
       signalLogin: async (accountId, signal: SocialLoginSignal) => {
         record('social_account_login_signal', { accountId, signal })
-        return { state: 'healthy', circuit_open: false, session_revision: 1 }
+        return transition(accountId, signal)
       },
       storeCookies: async (accountId, cookies) => {
         record('social_account_store_cookies', { accountId, cookies })
@@ -42,6 +91,11 @@ export function createSocialOperationsTestAdapter(): PlatformAdapter {
       },
       startAccount: async (accountId) => {
         record('social_account_start', { accountId })
+        const snapshot = accounts.get(accountId)
+        if (snapshot?.state !== 'healthy' || snapshot.circuit_open) {
+          throw new Error('account is not healthy')
+        }
+        runningAccounts.add(accountId)
         return {
           running: true,
           protocolVersion: '1.0',
@@ -50,13 +104,16 @@ export function createSocialOperationsTestAdapter(): PlatformAdapter {
       },
       invokeAccount: async (accountId, request: JsonValue) => {
         record('social_account_invoke', { accountId, request })
+        if (!runningAccounts.has(accountId)) throw new Error('executor is not running')
         return { status: 'accepted' }
       },
       logoutAccount: async (accountId) => {
         record('social_account_logout', { accountId })
+        transition(accountId, 'logout')
       },
       emergencyStop: async (accountId) => {
         record('social_account_emergency_stop', { accountId })
+        transition(accountId, 'risk_control')
       },
       takeSafeDiagnostics: async () => {
         record('social_executor_take_safe_diagnostics')

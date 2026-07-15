@@ -10,6 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from agent_platform.capabilities.social_operations.device_account_service import (
+    ConflictError,
+)
+
 
 class SqliteDeviceAccountStateStore:
     """Capability-owned durable adapter used until Core wires PostgreSQL migrations."""
@@ -38,11 +42,11 @@ class SqliteDeviceAccountStateStore:
                 """
             )
 
-    def load(self) -> Mapping[str, Any] | None:
+    def load(self) -> tuple[int, Mapping[str, Any]] | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT schema_version, payload
+                SELECT schema_version, revision, payload
                 FROM social_device_account_state
                 WHERE singleton_id = 1
                 """
@@ -51,28 +55,48 @@ class SqliteDeviceAccountStateStore:
             return None
         if int(row[0]) != self._SCHEMA_VERSION:
             raise ValueError("unsupported Social Operations state schema")
-        payload = json.loads(str(row[1]))
+        payload = json.loads(str(row[2]))
         if not isinstance(payload, dict):
             raise ValueError("invalid Social Operations state payload")
-        return payload
+        return int(row[1]), payload
 
-    def save(self, state: Mapping[str, Any]) -> None:
+    def save(self, state: Mapping[str, Any], *, expected_revision: int) -> int:
         payload = json.dumps(state, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO social_device_account_state (
-                    singleton_id, schema_version, revision, payload
-                ) VALUES (1, ?, 1, ?)
-                ON CONFLICT(singleton_id) DO UPDATE SET
-                    schema_version = excluded.schema_version,
-                    revision = social_device_account_state.revision + 1,
-                    payload = excluded.payload
-                """,
-                (self._SCHEMA_VERSION, payload),
-            )
+            next_revision = expected_revision + 1
+            if expected_revision == 0:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO social_device_account_state (
+                        singleton_id, schema_version, revision, payload
+                    )
+                    SELECT 1, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM social_device_account_state WHERE singleton_id = 1
+                    )
+                    """,
+                    (self._SCHEMA_VERSION, next_revision, payload),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE social_device_account_state
+                    SET schema_version = ?, revision = ?, payload = ?
+                    WHERE singleton_id = 1 AND revision = ?
+                    """,
+                    (
+                        self._SCHEMA_VERSION,
+                        next_revision,
+                        payload,
+                        expected_revision,
+                    ),
+                )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise ConflictError("persisted state revision changed")
             connection.commit()
+            return next_revision
 
     def _connect(self) -> sqlite3.Connection:
         before = self._secure_file_identity()

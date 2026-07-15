@@ -1,4 +1,6 @@
-use crate::sidecar_package::{redact_log_line, CrashRecoveryAction, CrashRecoveryPolicy};
+use crate::sidecar_package::{
+    redact_log_line, CrashRecoveryAction, CrashRecoveryPolicy, VerifiedSidecarExecutable,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -31,6 +33,7 @@ pub enum LocalExecutorError {
     ProcessUnavailable,
     IpcUnavailable,
     InvocationTimedOut,
+    LaunchVerificationFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -50,6 +53,8 @@ struct SidecarEnvelope {
 
 struct RunningSidecar {
     child: Child,
+    terminator: ProcessTerminator,
+    _prepared_executable: Option<PreparedVerifiedExecutable>,
     stdin: ChildStdin,
     responses: mpsc::Receiver<String>,
     session_token: String,
@@ -59,6 +64,9 @@ struct RunningSidecar {
 struct LaunchSpec {
     executable: PathBuf,
     arguments: Vec<String>,
+    verifier: Option<
+        Arc<dyn Fn() -> Result<VerifiedSidecarExecutable, LocalExecutorError> + Send + Sync>,
+    >,
 }
 
 #[derive(Default)]
@@ -109,18 +117,20 @@ enum SupervisorCommand {
 struct SupervisorHandle {
     commands: mpsc::Sender<SupervisorCommand>,
     state: Arc<Mutex<SupervisorState>>,
+    terminator: Arc<Mutex<ProcessTerminator>>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
 pub struct LocalExecutorManager {
-    supervisor: Option<SupervisorHandle>,
+    supervisor: Arc<Mutex<Option<SupervisorHandle>>>,
     safe_diagnostics: Arc<Mutex<SafeDiagnostics>>,
 }
 
 impl Default for LocalExecutorManager {
     fn default() -> Self {
         Self {
-            supervisor: None,
+            supervisor: Arc::new(Mutex::new(None)),
             safe_diagnostics: Arc::new(Mutex::new(SafeDiagnostics::default())),
         }
     }
@@ -128,14 +138,19 @@ impl Default for LocalExecutorManager {
 
 impl Drop for LocalExecutorManager {
     fn drop(&mut self) {
-        let _ = self.stop();
+        if Arc::strong_count(&self.supervisor) == 1 {
+            let _ = self.stop();
+        }
     }
 }
 
 impl LocalExecutorManager {
     fn status(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
-        let running = self
+        let supervisor = self
             .supervisor
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+        let running = supervisor
             .as_ref()
             .map(|supervisor| {
                 supervisor
@@ -153,33 +168,53 @@ impl LocalExecutorManager {
         })
     }
 
-    fn start(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+    fn start(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
         let executable =
             std::env::current_exe().map_err(|_| LocalExecutorError::ProcessUnavailable)?;
         self.start_launch(LaunchSpec {
             executable,
             arguments: vec![SIDECAR_ARGUMENT.to_owned()],
+            verifier: None,
         })
     }
 
     pub fn start_installed(
-        &mut self,
+        &self,
         executable: impl AsRef<Path>,
     ) -> Result<LocalExecutorStatus, LocalExecutorError> {
         self.start_launch(LaunchSpec {
             executable: executable.as_ref().to_path_buf(),
             arguments: Vec::new(),
+            verifier: None,
+        })
+    }
+
+    pub fn start_verified<F>(&self, verifier: F) -> Result<LocalExecutorStatus, LocalExecutorError>
+    where
+        F: Fn() -> Result<VerifiedSidecarExecutable, LocalExecutorError> + Send + Sync + 'static,
+    {
+        let verifier = Arc::new(verifier);
+        let executable = verifier()?.path;
+        self.start_launch(LaunchSpec {
+            executable,
+            arguments: Vec::new(),
+            verifier: Some(verifier),
         })
     }
 
     fn start_launch(
-        &mut self,
+        &self,
         launch_spec: LaunchSpec,
     ) -> Result<LocalExecutorStatus, LocalExecutorError> {
         if self.status()?.running {
             return Err(LocalExecutorError::AlreadyRunning);
         }
-        if self.supervisor.is_some() {
+        if self
+            .supervisor
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?
+            .is_some()
+        {
             self.stop()?;
         }
         let sidecar = spawn_sidecar(&launch_spec, Arc::clone(&self.safe_diagnostics))?;
@@ -187,36 +222,53 @@ impl LocalExecutorManager {
         let state = Arc::new(Mutex::new(SupervisorState { running: true }));
         let watchdog_state = Arc::clone(&state);
         let diagnostics = Arc::clone(&self.safe_diagnostics);
+        let terminator = Arc::new(Mutex::new(sidecar.terminator.clone()));
+        let supervisor_terminator = Arc::clone(&terminator);
         let thread = std::thread::spawn(move || {
-            supervise_sidecar(sidecar, launch_spec, receiver, watchdog_state, diagnostics);
+            supervise_sidecar(
+                sidecar,
+                launch_spec,
+                receiver,
+                watchdog_state,
+                diagnostics,
+                supervisor_terminator,
+            );
         });
-        self.supervisor = Some(SupervisorHandle {
+        let mut supervisor = self
+            .supervisor
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+        *supervisor = Some(SupervisorHandle {
             commands,
             state,
+            terminator,
             thread: Some(thread),
         });
+        drop(supervisor);
         self.status()
     }
 
-    pub fn invoke(&mut self, request: Value) -> Result<Value, LocalExecutorError> {
+    pub fn invoke(&self, request: Value) -> Result<Value, LocalExecutorError> {
         self.invoke_with_timeout(request, Duration::from_secs(30))
     }
 
     pub fn invoke_with_timeout(
-        &mut self,
+        &self,
         request: Value,
         timeout: Duration,
     ) -> Result<Value, LocalExecutorError> {
         if !self.status()?.running {
             return Err(LocalExecutorError::NotRunning);
         }
-        let supervisor = self
+        let commands = self
             .supervisor
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?
             .as_ref()
+            .map(|supervisor| supervisor.commands.clone())
             .ok_or(LocalExecutorError::NotRunning)?;
         let (reply, response) = mpsc::channel();
-        supervisor
-            .commands
+        commands
             .send(SupervisorCommand::Invoke {
                 request,
                 timeout,
@@ -228,7 +280,7 @@ impl LocalExecutorManager {
             .map_err(|_| LocalExecutorError::NotRunning)?
     }
 
-    pub fn status_snapshot(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+    pub fn status_snapshot(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
         self.status()
     }
 
@@ -239,8 +291,19 @@ impl LocalExecutorManager {
             .unwrap_or_default()
     }
 
-    pub fn stop(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
-        if let Some(mut supervisor) = self.supervisor.take() {
+    pub fn stop(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        let supervisor = self
+            .supervisor
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?
+            .take();
+        if let Some(mut supervisor) = supervisor {
+            let terminator = supervisor
+                .terminator
+                .lock()
+                .map_err(|_| LocalExecutorError::ProcessUnavailable)?
+                .clone();
+            terminator.terminate_tree()?;
             let (reply, response) = mpsc::channel();
             let stop_result = if supervisor
                 .commands
@@ -278,22 +341,38 @@ fn spawn_sidecar(
     diagnostics: Arc<Mutex<SafeDiagnostics>>,
 ) -> Result<RunningSidecar, LocalExecutorError> {
     let session_token = new_session_token()?;
-    let mut child = Command::new(&launch.executable)
+    let verified_executable = launch
+        .verifier
+        .as_ref()
+        .map(|verifier| verifier())
+        .transpose()?;
+    let prepared_executable = verified_executable
+        .map(prepare_verified_execution)
+        .transpose()?;
+    let executable = prepared_executable
+        .as_ref()
+        .map(|prepared| prepared.path.clone())
+        .unwrap_or_else(|| launch.executable.clone());
+    let mut command = Command::new(&executable);
+    command
         .args(&launch.arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_process_isolation(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+    let terminator = ProcessTerminator::attach(&child)?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (Some(mut stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
-        let _ = terminate_sidecar(&mut child);
+        let _ = terminate_process_tree(&terminator, &mut child);
         return Err(LocalExecutorError::IpcUnavailable);
     };
     if writeln!(stdin, "{session_token}").is_err() || stdin.flush().is_err() {
-        let _ = terminate_sidecar(&mut child);
+        let _ = terminate_process_tree(&terminator, &mut child);
         return Err(LocalExecutorError::IpcUnavailable);
     }
     let (response_sender, responses) = mpsc::channel();
@@ -318,6 +397,8 @@ fn spawn_sidecar(
     });
     Ok(RunningSidecar {
         child,
+        terminator,
+        _prepared_executable: prepared_executable,
         stdin,
         responses,
         session_token,
@@ -346,7 +427,7 @@ fn invoke_sidecar(
     let response = match sidecar.responses.recv_timeout(timeout) {
         Ok(response) => response,
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            terminate_sidecar(&mut sidecar.child)?;
+            terminate_sidecar(sidecar)?;
             return Err(LocalExecutorError::InvocationTimedOut);
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -365,6 +446,7 @@ fn supervise_sidecar(
     commands: mpsc::Receiver<SupervisorCommand>,
     state: Arc<Mutex<SupervisorState>>,
     diagnostics: Arc<Mutex<SafeDiagnostics>>,
+    current_terminator: Arc<Mutex<ProcessTerminator>>,
 ) {
     let mut recovery = CrashRecoveryPolicy::new(2);
     loop {
@@ -383,13 +465,13 @@ fn supervise_sidecar(
                 }
             }
             Ok(SupervisorCommand::Stop { reply }) => {
-                let result = terminate_sidecar(&mut sidecar.child);
+                let result = terminate_sidecar(&mut sidecar);
                 set_running(&state, false);
                 let _ = reply.send(result);
                 return;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = terminate_sidecar(&mut sidecar.child);
+                let _ = terminate_sidecar(&mut sidecar);
                 set_running(&state, false);
                 return;
             }
@@ -406,10 +488,24 @@ fn supervise_sidecar(
         if !exited {
             continue;
         }
+        if terminate_sidecar(&mut sidecar).is_err() {
+            set_running(&state, false);
+            return;
+        }
         match recovery.on_unexpected_exit() {
             CrashRecoveryAction::Restart => {
                 match spawn_sidecar(&launch, Arc::clone(&diagnostics)) {
-                    Ok(restarted) => sidecar = restarted,
+                    Ok(restarted) => {
+                        if let Ok(mut terminator) = current_terminator.lock() {
+                            *terminator = restarted.terminator.clone();
+                        } else {
+                            let mut restarted = restarted;
+                            let _ = terminate_sidecar(&mut restarted);
+                            set_running(&state, false);
+                            return;
+                        }
+                        sidecar = restarted;
+                    }
                     Err(_) => {
                         set_running(&state, false);
                         return;
@@ -430,7 +526,15 @@ fn set_running(state: &Arc<Mutex<SupervisorState>>, running: bool) {
     }
 }
 
-fn terminate_sidecar(child: &mut Child) -> Result<(), LocalExecutorError> {
+fn terminate_sidecar(sidecar: &mut RunningSidecar) -> Result<(), LocalExecutorError> {
+    terminate_process_tree(&sidecar.terminator, &mut sidecar.child)
+}
+
+fn terminate_process_tree(
+    terminator: &ProcessTerminator,
+    child: &mut Child,
+) -> Result<(), LocalExecutorError> {
+    terminator.terminate_tree()?;
     match child
         .try_wait()
         .map_err(|_| LocalExecutorError::ProcessUnavailable)?
@@ -438,13 +542,260 @@ fn terminate_sidecar(child: &mut Child) -> Result<(), LocalExecutorError> {
         Some(_) => Ok(()),
         None => {
             child
-                .kill()
-                .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
-            child
                 .wait()
                 .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
             Ok(())
         }
+    }
+}
+
+#[derive(Clone)]
+struct ProcessTerminator {
+    termination_requested: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(unix)]
+    process_group_id: i32,
+    #[cfg(windows)]
+    job: Arc<WindowsJob>,
+}
+
+impl ProcessTerminator {
+    #[cfg(unix)]
+    fn attach(child: &Child) -> Result<Self, LocalExecutorError> {
+        let process_group_id =
+            i32::try_from(child.id()).map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+        Ok(Self {
+            termination_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            process_group_id,
+        })
+    }
+
+    #[cfg(windows)]
+    fn attach(child: &Child) -> Result<Self, LocalExecutorError> {
+        WindowsJob::attach(child).map(|job| Self {
+            termination_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            job: Arc::new(job),
+        })
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    fn attach(_child: &Child) -> Result<Self, LocalExecutorError> {
+        Err(LocalExecutorError::ProcessUnavailable)
+    }
+
+    #[cfg(unix)]
+    fn terminate_tree(&self) -> Result<(), LocalExecutorError> {
+        if self
+            .termination_requested
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+        let result = unsafe { libc::kill(-self.process_group_id, libc::SIGKILL) };
+        if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            self.termination_requested
+                .store(false, std::sync::atomic::Ordering::Release);
+            Err(LocalExecutorError::ProcessUnavailable)
+        }
+    }
+
+    #[cfg(windows)]
+    fn terminate_tree(&self) -> Result<(), LocalExecutorError> {
+        if self
+            .termination_requested
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+        let result = self.job.terminate();
+        if result.is_err() {
+            self.termination_requested
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    fn terminate_tree(&self) -> Result<(), LocalExecutorError> {
+        Err(LocalExecutorError::ProcessUnavailable)
+    }
+}
+
+#[cfg(unix)]
+fn configure_process_isolation(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_isolation(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    command.creation_flags(CREATE_SUSPENDED);
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn configure_process_isolation(_command: &mut Command) {}
+
+struct PreparedVerifiedExecutable {
+    path: PathBuf,
+    _verified: VerifiedSidecarExecutable,
+    #[cfg(unix)]
+    _staged: tempfile::NamedTempFile,
+}
+
+#[cfg(unix)]
+fn prepare_verified_execution(
+    executable: VerifiedSidecarExecutable,
+) -> Result<PreparedVerifiedExecutable, LocalExecutorError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = executable
+        .path
+        .parent()
+        .ok_or(LocalExecutorError::LaunchVerificationFailed)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".verified-launch-")
+        .tempfile_in(parent)
+        .map_err(|_| LocalExecutorError::LaunchVerificationFailed)?;
+    staged
+        .write_all(&executable.contents)
+        .and_then(|_| staged.flush())
+        .and_then(|_| {
+            staged
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
+        })
+        .map_err(|_| LocalExecutorError::LaunchVerificationFailed)?;
+    Ok(PreparedVerifiedExecutable {
+        path: staged.path().to_path_buf(),
+        _verified: executable,
+        _staged: staged,
+    })
+}
+
+#[cfg(windows)]
+fn prepare_verified_execution(
+    executable: VerifiedSidecarExecutable,
+) -> Result<PreparedVerifiedExecutable, LocalExecutorError> {
+    Ok(PreparedVerifiedExecutable {
+        path: executable.path.clone(),
+        _verified: executable,
+    })
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn prepare_verified_execution(
+    _executable: VerifiedSidecarExecutable,
+) -> Result<PreparedVerifiedExecutable, LocalExecutorError> {
+    Err(LocalExecutorError::LaunchVerificationFailed)
+}
+
+#[cfg(windows)]
+struct WindowsJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+unsafe impl Sync for WindowsJob {}
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn attach(child: &Child) -> Result<Self, LocalExecutorError> {
+        use std::mem::{size_of, zeroed};
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            unsafe { TerminateProcess(child.as_raw_handle() as _, 1) };
+            return Err(LocalExecutorError::ProcessUnavailable);
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        let assigned = configured != FALSE
+            && unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as _) } != FALSE;
+        if !assigned || resume_suspended_process(child.id()).is_err() {
+            unsafe {
+                TerminateProcess(child.as_raw_handle() as _, 1);
+                CloseHandle(handle);
+            }
+            return Err(LocalExecutorError::ProcessUnavailable);
+        }
+        Ok(Self { handle })
+    }
+
+    fn terminate(&self) -> Result<(), LocalExecutorError> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+            Err(LocalExecutorError::ProcessUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(process_id: u32) -> Result<(), LocalExecutorError> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(LocalExecutorError::ProcessUnavailable);
+    }
+    let mut entry: THREADENTRY32 = unsafe { zeroed() };
+    entry.dwSize = size_of::<THREADENTRY32>() as u32;
+    let mut found = false;
+    let mut has_entry = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while has_entry {
+        if entry.th32OwnerProcessID == process_id {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if !thread.is_null() {
+                found = true;
+                unsafe {
+                    ResumeThread(thread);
+                    CloseHandle(thread);
+                }
+            }
+        }
+        has_entry = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    if found {
+        Ok(())
+    } else {
+        Err(LocalExecutorError::ProcessUnavailable)
     }
 }
 
@@ -582,47 +933,39 @@ fn require_capability(capability_id: &str) -> Result<(), LocalExecutorError> {
     }
 }
 
-fn manager<'a>(
-    state: &'a State<'_, Mutex<LocalExecutorManager>>,
-) -> Result<std::sync::MutexGuard<'a, LocalExecutorManager>, LocalExecutorError> {
-    state
-        .lock()
-        .map_err(|_| LocalExecutorError::ProcessUnavailable)
-}
-
 #[tauri::command]
 pub fn local_executor_start(
     capability_id: String,
-    state: State<'_, Mutex<LocalExecutorManager>>,
+    state: State<'_, LocalExecutorManager>,
 ) -> Result<LocalExecutorStatus, LocalExecutorError> {
     require_capability(&capability_id)?;
-    manager(&state)?.start()
+    state.start()
 }
 
 #[tauri::command]
 pub fn local_executor_invoke(
     capability_id: String,
     request: Value,
-    state: State<'_, Mutex<LocalExecutorManager>>,
+    state: State<'_, LocalExecutorManager>,
 ) -> Result<Value, LocalExecutorError> {
     require_capability(&capability_id)?;
-    manager(&state)?.invoke(request)
+    state.invoke(request)
 }
 
 #[tauri::command]
 pub fn local_executor_status(
     capability_id: String,
-    state: State<'_, Mutex<LocalExecutorManager>>,
+    state: State<'_, LocalExecutorManager>,
 ) -> Result<LocalExecutorStatus, LocalExecutorError> {
     require_capability(&capability_id)?;
-    manager(&state)?.status()
+    state.status()
 }
 
 #[tauri::command]
 pub fn local_executor_stop(
     capability_id: String,
-    state: State<'_, Mutex<LocalExecutorManager>>,
+    state: State<'_, LocalExecutorManager>,
 ) -> Result<LocalExecutorStatus, LocalExecutorError> {
     require_capability(&capability_id)?;
-    manager(&state)?.stop()
+    state.stop()
 }

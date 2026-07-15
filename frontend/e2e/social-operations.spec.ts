@@ -100,6 +100,13 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
   await page.getByLabel('平台账号 ID').fill(accountId)
   await page.getByRole('button', { name: '准备账号环境' }).click()
   await expect(page.getByText('账号私有目录已准备。')).toBeVisible()
+  await expect(page.getByText('已注销')).toBeVisible()
+  await page.getByRole('button', { name: '开始扫码' }).click()
+  await expect(page.getByText('等待扫码')).toBeVisible()
+  await page.getByRole('button', { name: '确认已完成扫码' }).click()
+  await expect(page.getByText('等待确认')).toBeVisible()
+  await page.getByRole('button', { name: '确认已登录' }).click()
+  await expect(page.getByText('健康', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '启动本地执行器' }).click()
   await expect(page.getByText('执行器运行中')).toBeVisible()
   await page.getByRole('button', { name: '执行无副作用健康检查' }).click()
@@ -112,6 +119,18 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
   const commands = await page.evaluate(() => Reflect.get(globalThis, '__socialCommands'))
   expect(commands).toEqual(expect.arrayContaining([
     expect.objectContaining({ command: 'social_account_prepare' }),
+    expect.objectContaining({
+      command: 'social_account_login_signal',
+      args: expect.objectContaining({ signal: 'begin_qr' }),
+    }),
+    expect.objectContaining({
+      command: 'social_account_login_signal',
+      args: expect.objectContaining({ signal: 'qr_scanned' }),
+    }),
+    expect.objectContaining({
+      command: 'social_account_login_signal',
+      args: expect.objectContaining({ signal: 'authenticated' }),
+    }),
     expect.objectContaining({ command: 'social_account_start' }),
     expect.objectContaining({ command: 'social_account_invoke' }),
     expect.objectContaining({ command: 'social_executor_take_safe_diagnostics' }),

@@ -2,7 +2,12 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { PlatformAdapter, SocialOperationsBridge } from '../../../platform'
+import type {
+  PlatformAdapter,
+  SocialLoginSignal,
+  SocialLoginState,
+  SocialOperationsBridge,
+} from '../../../platform'
 import { listSocialDevices, registerSocialDevice } from '../api/device-accounts'
 import { SocialOperationsPage } from './SocialOperationsPage'
 
@@ -30,11 +35,7 @@ const device = {
 }
 
 function createPlatform(supported = true) {
-  const snapshot = {
-    state: 'healthy' as const,
-    circuit_open: false,
-    session_revision: 2,
-  }
+  let loginState: SocialLoginState = 'logged_out'
   const socialOperations = {
     installSidecar: vi.fn().mockResolvedValue('1.2.3'),
     downloadSidecar: vi.fn().mockResolvedValue('1.2.3'),
@@ -43,7 +44,25 @@ function createPlatform(supported = true) {
       circuit_open: true,
       session_revision: 0,
     }),
-    signalLogin: vi.fn().mockResolvedValue(snapshot),
+    signalLogin: vi.fn(async (_accountId: string, signal: SocialLoginSignal) => {
+      if (signal === 'begin_qr' && loginState === 'logged_out') {
+        loginState = 'awaiting_scan'
+        return { state: loginState, circuit_open: true, session_revision: 0 }
+      }
+      if (signal === 'qr_scanned' && loginState === 'awaiting_scan') {
+        loginState = 'awaiting_confirmation'
+        return { state: loginState, circuit_open: true, session_revision: 0 }
+      }
+      if (signal === 'authenticated' && loginState === 'awaiting_confirmation') {
+        loginState = 'healthy'
+        return { state: loginState, circuit_open: false, session_revision: 0 }
+      }
+      if (signal === 'captcha_required' || signal === 'risk_control') {
+        loginState = 'human_handoff'
+        return { state: loginState, circuit_open: true, session_revision: 0 }
+      }
+      throw new Error('invalid login transition')
+    }),
     storeCookies: vi.fn().mockResolvedValue(undefined),
     hasCookies: vi.fn().mockResolvedValue(true),
     startAccount: vi.fn().mockResolvedValue({
@@ -91,6 +110,7 @@ describe('B02 设备与平台账号中心', () => {
     await user.type(screen.getByLabelText('平台账号 ID'), accountId)
     await user.click(screen.getByRole('button', { name: '准备账号环境' }))
     await user.click(screen.getByRole('button', { name: '开始扫码' }))
+    await user.click(screen.getByRole('button', { name: '确认已完成扫码' }))
     await user.click(screen.getByRole('button', { name: '确认已登录' }))
     await user.click(screen.getByRole('button', { name: '启动本地执行器' }))
     await user.click(screen.getByRole('button', { name: '检查 Cookie' }))
@@ -101,7 +121,8 @@ describe('B02 设备与平台账号中心', () => {
 
     expect(socialOperations.prepareAccount).toHaveBeenCalledWith('douyin', accountId)
     expect(socialOperations.signalLogin).toHaveBeenNthCalledWith(1, accountId, 'begin_qr')
-    expect(socialOperations.signalLogin).toHaveBeenNthCalledWith(2, accountId, 'authenticated')
+    expect(socialOperations.signalLogin).toHaveBeenNthCalledWith(2, accountId, 'qr_scanned')
+    expect(socialOperations.signalLogin).toHaveBeenNthCalledWith(3, accountId, 'authenticated')
     expect(socialOperations.startAccount).toHaveBeenCalledWith(accountId)
     expect(socialOperations.hasCookies).toHaveBeenCalledWith(accountId)
     expect(socialOperations.storeCookies).toHaveBeenCalledWith(
