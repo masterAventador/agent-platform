@@ -13,6 +13,7 @@ import {
   workspacePermissions,
 } from '../features/workspaces/permissions'
 import { useWorkspaceSelection } from '../features/workspaces/store'
+import { socialOperationsModule } from '../features/social-operations/module'
 import './app.css'
 
 const { Content, Sider } = Layout
@@ -82,6 +83,7 @@ const DeadLettersPage = lazy(() =>
     default: module.DeadLettersPage,
   })),
 )
+const capabilityModules = [socialOperationsModule] as const
 
 export function App() {
   return (
@@ -217,6 +219,9 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             {capabilities.canManageOperations && (
               <Link to="/operations/dead-letters">任务运维</Link>
             )}
+            {capabilityModules.flatMap((module) => module.navigation).map((entry) => (
+              <Link key={entry.path} to={entry.path}>{entry.label}</Link>
+            ))}
           </Space>
         </nav>
       </Sider>
@@ -353,6 +358,13 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
               </WorkspaceCapabilityGate>
             )}
           />
+          {capabilityModules.flatMap((module) => module.routes).map(({ path, Page }) => (
+            <Route
+              key={path}
+              path={path}
+              element={<Page workspaceId={activeWorkspace.id} />}
+            />
+          ))}
         </Routes>
       </Content>
     </Layout>

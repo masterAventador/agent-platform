@@ -87,9 +87,30 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '设备与平台账号' })).toHaveAttribute(
+      'href',
+      '/video/account',
+    )
     expect(screen.getByLabelText('当前工作区').closest('.ant-select'))
       .toHaveTextContent('Owner workspace')
     expect(await screen.findByText('后端服务正常')).toBeInTheDocument()
+  })
+
+  it('从正式路由进入 B02 设备与平台账号中心', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/video/account']}>
+          <App />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { name: '设备与平台账号中心' }))
+      .toBeInTheDocument()
   })
 
   it('普通成员不显示任务运维入口且直接访问时受控拒绝', async () => {

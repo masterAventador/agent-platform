@@ -1,6 +1,7 @@
 import { isTauri } from '@tauri-apps/api/core'
 
 import { createTauriPlatformAdapter } from './tauri'
+import { createSocialOperationsTestAdapter } from './test-adapter'
 import type { PlatformAdapter } from './types'
 import { createWebPlatformAdapter } from './web'
 
@@ -11,8 +12,16 @@ export function createPlatformAdapter(tauriRuntime: boolean): PlatformAdapter {
 }
 
 export function getPlatformAdapter(): PlatformAdapter {
-  activeAdapter ??= createPlatformAdapter(isTauri())
+  activeAdapter ??= createRequestedTestAdapter()
+    ?? createPlatformAdapter(isTauri())
   return activeAdapter
+}
+
+function createRequestedTestAdapter(): PlatformAdapter | undefined {
+  if (!import.meta.env.DEV) return undefined
+  return Reflect.get(globalThis, '__AGENT_PLATFORM_TEST_ADAPTER__') === 'social-operations'
+    ? createSocialOperationsTestAdapter()
+    : undefined
 }
 
 export type {
