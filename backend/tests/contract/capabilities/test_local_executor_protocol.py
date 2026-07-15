@@ -24,7 +24,18 @@ PROTOCOL_ROOT = (
 SCHEMA_PATH = (
     REPOSITORY_ROOT / "contracts/capabilities/social-operations/local-executor-v1.schema.json"
 )
-SEMANTIC_ONLY_INVALID_FIXTURES = frozenset({"deadline-before-send.json"})
+PROTOCOL_DOC_PATH = (
+    REPOSITORY_ROOT / "contracts/capabilities/social-operations/local-executor-v1.md"
+)
+SEMANTIC_ONLY_INVALID_FIXTURES = frozenset(
+    {
+        "control-event-cookie-assignment.json",
+        "control-event-inline-data.json",
+        "deadline-before-send.json",
+        "diagnostic-sensitive-field.json",
+        "diagnostic-unsafe-message.json",
+    }
+)
 
 
 def _fixture_payload(path: Path) -> dict[str, object]:
@@ -140,6 +151,9 @@ def test_protocol_version_must_be_explicit_in_every_wire_message() -> None:
         "LocalTaskCancel",
         "LocalTaskResponse",
         "LocalTaskError",
+        "LocalStepProgress",
+        "LocalHandoffRequested",
+        "LocalDiagnosticEvent",
     ):
         version_schema = schema["$defs"][message_name]["properties"]["protocol_version"]
         assert "default" not in version_schema
@@ -178,6 +192,19 @@ def test_standard_json_schema_rejects_structural_invalid_fixtures(
     )
 
     assert list(validator.iter_errors(_fixture_payload(fixture_path)))
+
+
+def test_protocol_document_lists_the_exact_fixture_validation_layers() -> None:
+    document = PROTOCOL_DOC_PATH.read_text(encoding="utf-8")
+    invalid_fixtures = frozenset(path.name for path in (PROTOCOL_ROOT / "invalid").glob("*.json"))
+
+    assert len(invalid_fixtures) == 25
+    assert len(SEMANTIC_ONLY_INVALID_FIXTURES) == 5
+    assert invalid_fixtures > SEMANTIC_ONLY_INVALID_FIXTURES
+    for fixture_name in SEMANTIC_ONLY_INVALID_FIXTURES:
+        assert f"`{fixture_name}`" in document
+    assert "5 个语义层无效样例" in document
+    assert "其余 20 个无效样例" in document
 
 
 def test_deadline_order_is_an_explicit_post_schema_semantic_validation() -> None:

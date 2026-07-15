@@ -1,0 +1,26 @@
+{
+  "protocol_version": "1.0",
+  "message_type": "step.progress",
+  "message_id": "00000000-0000-4000-8000-000000000200",
+  "sent_at": "2026-07-15T05:00:00Z",
+  "identity": {
+    "task_id": "00000000-0000-4000-8000-000000000101",
+    "correlation_id": "00000000-0000-4000-8000-000000000102",
+    "tenant_id": "00000000-0000-4000-8000-000000000103",
+    "capability_id": "social-operations",
+    "target_device_id": "00000000-0000-4000-8000-000000000104"
+  },
+  "governance": {
+    "audit_correlation_id": "00000000-0000-4000-8000-000000000201",
+    "approval_id": "00000000-0000-4000-8000-000000000107"
+  },
+  "executor_id": "00000000-0000-4000-8000-000000000122",
+  "event_sequence": 1,
+  "step_id": "00000000-0000-4000-8000-000000000210",
+  "step_code": "social.publish.open_page",
+  "status": "started",
+  "progress_percent": 0,
+  "safe_message": "Opening the authorized publishing page.",
+  "artifact_refs": [],
+  "extensions": {}
+}
