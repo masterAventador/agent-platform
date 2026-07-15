@@ -30,6 +30,27 @@
       "type": "object"
     },
     "JsonValue": {},
+    "LocalArtifactReference_Literal__evidence___": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "usage": {
+          "const": "evidence",
+          "title": "Usage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "usage"
+      ],
+      "title": "LocalArtifactReference[Literal['evidence']]",
+      "type": "object"
+    },
     "LocalArtifactReference_Literal__input___": {
       "additionalProperties": false,
       "properties": {
@@ -73,6 +94,438 @@
         "usage"
       ],
       "title": "LocalArtifactReference[Literal['output', 'evidence']]",
+      "type": "object"
+    },
+    "LocalDiagnosticEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/LocalArtifactReference_Literal__evidence___"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "diagnostic_id": {
+          "format": "uuid",
+          "title": "Diagnostic Id",
+          "type": "string"
+        },
+        "event_sequence": {
+          "minimum": 1,
+          "title": "Event Sequence",
+          "type": "integer"
+        },
+        "executor_id": {
+          "format": "uuid",
+          "title": "Executor Id",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "diagnostic.event",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "safe_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "title": "Safe Message",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "step_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Step Id"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "executor_id",
+        "event_sequence",
+        "artifact_refs",
+        "message_type",
+        "diagnostic_id",
+        "step_id",
+        "severity",
+        "code",
+        "safe_message"
+      ],
+      "title": "LocalDiagnosticEvent",
+      "type": "object"
+    },
+    "LocalHandoffRequested": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/LocalArtifactReference_Literal__evidence___"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "event_sequence": {
+          "minimum": 1,
+          "title": "Event Sequence",
+          "type": "integer"
+        },
+        "executor_id": {
+          "format": "uuid",
+          "title": "Executor Id",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "handoff_id": {
+          "format": "uuid",
+          "title": "Handoff Id",
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "handoff.requested",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "reason_code": {
+          "enum": [
+            "captcha_required",
+            "qr_code_expired",
+            "risk_control",
+            "element_drift",
+            "permission_required",
+            "unknown"
+          ],
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "safe_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "title": "Safe Message",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        },
+        "status": {
+          "const": "required",
+          "title": "Status",
+          "type": "string"
+        },
+        "step_id": {
+          "format": "uuid",
+          "title": "Step Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "executor_id",
+        "event_sequence",
+        "artifact_refs",
+        "message_type",
+        "handoff_id",
+        "step_id",
+        "status",
+        "reason_code",
+        "safe_message"
+      ],
+      "title": "LocalHandoffRequested",
+      "type": "object"
+    },
+    "LocalStepProgress": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "started"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "progress_percent": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "completed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "progress_percent": {
+                "const": 100
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/LocalArtifactReference_Literal__evidence___"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "event_sequence": {
+          "minimum": 1,
+          "title": "Event Sequence",
+          "type": "integer"
+        },
+        "executor_id": {
+          "format": "uuid",
+          "title": "Executor Id",
+          "type": "string"
+        },
+        "extensions": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^social\\.[a-z0-9_]+(?:[.-][a-z0-9_]+)*$": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "governance": {
+          "$ref": "#/$defs/GovernanceReferences"
+        },
+        "identity": {
+          "$ref": "#/$defs/LocalTaskIdentity"
+        },
+        "message_id": {
+          "format": "uuid",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "message_type": {
+          "const": "step.progress",
+          "title": "Message Type",
+          "type": "string"
+        },
+        "progress_percent": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Progress Percent",
+          "type": "integer"
+        },
+        "protocol_version": {
+          "const": "1.0",
+          "title": "Protocol Version",
+          "type": "string"
+        },
+        "safe_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
+          "title": "Safe Message",
+          "type": "string"
+        },
+        "sent_at": {
+          "format": "date-time",
+          "title": "Sent At",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "started",
+            "in_progress",
+            "waiting_for_human",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "step_code": {
+          "pattern": "^social\\.[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "title": "Step Code",
+          "type": "string"
+        },
+        "step_id": {
+          "format": "uuid",
+          "title": "Step Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "message_id",
+        "sent_at",
+        "identity",
+        "governance",
+        "executor_id",
+        "event_sequence",
+        "artifact_refs",
+        "message_type",
+        "step_id",
+        "step_code",
+        "status",
+        "progress_percent",
+        "safe_message"
+      ],
+      "title": "LocalStepProgress",
       "type": "object"
     },
     "LocalTaskCancel": {
@@ -244,6 +697,7 @@
         "safe_message": {
           "maxLength": 512,
           "minLength": 1,
+          "pattern": "^[^\\x00-\\x1f\\x7f\\u202a-\\u202e\\u2066-\\u2069]+$",
           "title": "Safe Message",
           "type": "string"
         },
@@ -488,6 +942,9 @@
   "description": "Discriminated, JSON-serializable Social Operations local executor frame.",
   "discriminator": {
     "mapping": {
+      "diagnostic.event": "#/$defs/LocalDiagnosticEvent",
+      "handoff.requested": "#/$defs/LocalHandoffRequested",
+      "step.progress": "#/$defs/LocalStepProgress",
       "task.cancel": "#/$defs/LocalTaskCancel",
       "task.error": "#/$defs/LocalTaskError",
       "task.request": "#/$defs/LocalTaskRequest",
@@ -507,7 +964,21 @@
     },
     {
       "$ref": "#/$defs/LocalTaskError"
+    },
+    {
+      "$ref": "#/$defs/LocalStepProgress"
+    },
+    {
+      "$ref": "#/$defs/LocalHandoffRequested"
+    },
+    {
+      "$ref": "#/$defs/LocalDiagnosticEvent"
     }
   ],
-  "title": "LocalExecutorMessage"
+  "title": "LocalExecutorMessage",
+  "x-semantic-validation-required": [
+    "extension keys must not name sensitive data",
+    "safe_message must not contain credential or local path markers",
+    "control event string extensions must not contain credential or local path markers"
+  ]
 }

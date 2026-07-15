@@ -490,7 +490,7 @@ deployment_installed && tenant_entitled && user_permitted
 | 项目 | 当前结果 |
 | --- | --- |
 | `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；业务实现尚未开始 |
-| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest 与本地执行器 v1 协议；Sidecar、IPC 和业务实现尚未开始 |
+| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest 与本地执行器 v1 协议，协议已覆盖任务、步骤进度、人工接管和脱敏诊断事件及 Mock Host 严格回放；Sidecar、IPC 和业务实现尚未开始 |
 | Core 前置条件 | C01-C02 已完成；C03-C20 继续串行，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
@@ -501,7 +501,7 @@ deployment_installed && tenant_entitled && user_permitted
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 平台/版本 | 验证证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| B01 | 进行中 | 2026-07-14 | — | 本任务提交 | Mock Host / JSON Schema | 首个纵切实现版本化 Manifest、隔离装配、依赖方向与四组合门禁；三轮审计修复补齐相对导入（含 `memory`）、模块段边界和动态导入严格原语门禁（禁止受保护业务目录使用 `importlib`、`__import__` 与 `builtins.__import__`，不模拟执行或数据流，插件加载限 bootstrap/注册表层），以及稳定公开错误、安全诊断上下文、canonical 路由、与能力身份绑定且由 Host 独占的资源命名空间、从 Core 权限与事件定义派生的资源命名空间及真实 API 路由根集中保留契约、控制字符拒绝、架构协议一致性门禁及内置供应商无关精确协议快照；新增 Social Operations 本地执行器 v1 Pydantic 单一来源、Draft 2020-12 JSON Schema 与 5 个有效/12 个无效回放样例，锁定任务/租户/能力/设备身份、显式协议版本、幂等、截止时间、取消、Artifact 引用、审批/审计关联、错误及未知字段兼容策略，且扩展键仅允许能力包所有的 `social.*` 命名空间；标准 Schema + RFC3339 FormatChecker 拒绝结构/格式无效样例，跨字段截止时间规则由 `x-semantic-validation-required` 和独立语义层明确约束；能力包与协议定向测试 158 项、后端单元测试加协议契约 522 项通过，项目 Mypy（153 个源码文件）、Ruff 和改动范围格式检查通过；静态依赖门禁不作为安全沙箱，设备注册与任务持久化、受认证 Tauri IPC、Sidecar、C17 与 B17 真实组合回归仍未完成，因此保持进行中 |
+| B01 | 进行中 | 2026-07-14 | — | 本任务提交 | Mock Host / JSON Schema | 首个纵切实现版本化 Manifest、隔离装配、依赖方向与四组合门禁；三轮审计修复补齐相对导入（含 `memory`）、模块段边界和动态导入严格原语门禁（禁止受保护业务目录使用 `importlib`、`__import__` 与 `builtins.__import__`，不模拟执行或数据流，插件加载限 bootstrap/注册表层），以及稳定公开错误、安全诊断上下文、canonical 路由、与能力身份绑定且由 Host 独占的资源命名空间、从 Core 权限与事件定义派生的资源命名空间及真实 API 路由根集中保留契约、控制字符拒绝、架构协议一致性门禁及内置供应商无关精确协议快照；Social Operations 本地执行器 v1 以 Pydantic 为单一来源并导出 Draft 2020-12 JSON Schema，10 个有效/25 个无效样例覆盖任务、步骤进度、人工接管和脱敏诊断事件，锁定任务/租户/能力/设备/执行器身份、显式协议版本、幂等、截止时间、取消、唯一消息 ID、连续事件序号、稳定步骤/接管/诊断 ID、严格步骤状态、Artifact 引用、审批/审计关联、错误及未知字段兼容策略；`started=0` 与 `completed=100` 同时进入 Pydantic 和标准 Schema `if/then`，序号与进度禁止布尔/字符串强转；人工接管理由只允许验证码、扫码失效、风控、元素漂移、权限和未知异常，不表达绕过；扩展键仅允许 `social.*` 且语义层拒绝敏感字段名（含 `api_key`、`private_key`、`access_token`、`refresh_token`、`session_cookie`、`api_token`、`api_file_path`、`result_object_key`、`temp_signed_url` 等下划线组合），控制事件扩展值仅允许平坦安全 JSON 标量并拒绝嵌套 Cookie、内联截图和本机路径 payload，数值拒绝 `NaN`、正负无穷和 `1e309` 溢出，字符串进一步拒绝赋值式凭据、Bearer、Data URI、Base64 内联载荷、`file://`、私有 POSIX/Windows 绝对路径以及任何可解析为 JSON object/array 的标量内嵌套，同时保留普通 URL/API 路由、状态/type 描述、花括号叙述和 JSON 标量字面量；这些规则只作为纵深防御，生产者仍须先行脱敏；任务请求/响应 JSON 载荷兼容性保持不变；Mock Host 仅做内存协议回放，验证身份、执行器、治理关联与时间顺序稳定、消息 ID 唯一、进度单调、状态迁移、接管前置和诊断引用，不实现设备、IPC、Sidecar 或 RPA，畸形 payload 统一为不含原始输入/cause/context 的稳定错误；25 个 invalid fixture 明确分为 5 个语义层样例和 20 个标准结构/格式层样例，并由文档契约测试锁定清单；跨字段截止时间、敏感扩展与安全展示消息规则由 `x-semantic-validation-required` 和独立语义层明确约束；四文件定向命令（两份 capability contract + 两份 Mock Host unit）185 项、后端全部单元与契约测试 694 项通过，项目 Mypy（154 个源码文件）、Ruff、改动范围格式和 Schema 导出一致性检查通过；静态依赖门禁不作为安全沙箱，设备注册与任务持久化、受认证 Tauri IPC、Sidecar、C17 与 B17 真实组合回归仍未完成，因此保持进行中 |
 | B02-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。
