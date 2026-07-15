@@ -1,9 +1,11 @@
 import { defineConfig } from '@playwright/test'
 
+const webPort = process.env.PLAYWRIGHT_WEB_PORT ?? '15173'
 const apiPort = process.env.PLAYWRIGHT_API_PORT ?? '18000'
-const postgresPort = process.env.POSTGRES_PORT ?? '5432'
-const redisPort = process.env.REDIS_PORT ?? '6379'
-const minioPort = process.env.MINIO_API_PORT ?? '9000'
+const ragflowPort = process.env.PLAYWRIGHT_RAGFLOW_PORT ?? '29380'
+const postgresPort = process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'
+const redisPort = process.env.PLAYWRIGHT_REDIS_PORT ?? '6379'
+const minioApiPort = process.env.PLAYWRIGHT_MINIO_API_PORT ?? '9000'
 
 export default defineConfig({
   testDir: './e2e',
@@ -20,15 +22,15 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:15173',
+    baseURL: `http://127.0.0.1:${webPort}`,
     channel: 'chrome',
     trace: 'retain-on-failure',
   },
   webServer: [
     {
-      command: 'uv run uvicorn tests.fixtures.ragflow_stub:app --host 127.0.0.1 --port 29380',
+      command: `uv run uvicorn tests.fixtures.ragflow_stub:app --host 127.0.0.1 --port ${ragflowPort}`,
       cwd: '../backend',
-      url: 'http://127.0.0.1:29380/health',
+      url: `http://127.0.0.1:${ragflowPort}/health`,
       reuseExistingServer: false,
     },
     {
@@ -39,9 +41,9 @@ export default defineConfig({
           `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${postgresPort}/agent_platform_e2e`,
         AGENT_PLATFORM_REDIS_URL:
           `redis://:agent-platform-local-redis@127.0.0.1:${redisPort}/2`,
-        AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioPort}`,
-        AGENT_PLATFORM_RAGFLOW_URL: 'http://127.0.0.1:29380',
+        AGENT_PLATFORM_RAGFLOW_URL: `http://127.0.0.1:${ragflowPort}`,
         AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-e2e-key',
+        AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioApiPort}`,
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
       },
@@ -49,10 +51,10 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: 'pnpm dev --host 127.0.0.1 --port 15173',
+      command: `pnpm dev --host 127.0.0.1 --port ${webPort}`,
       cwd: '.',
       env: { VITE_API_PROXY_TARGET: `http://127.0.0.1:${apiPort}` },
-      url: 'http://127.0.0.1:15173',
+      url: `http://127.0.0.1:${webPort}`,
       reuseExistingServer: false,
     },
   ],
