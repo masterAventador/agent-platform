@@ -10,8 +10,10 @@
 - `task_id`、`tenant_id`、`approval_id`、`audit_correlation_id` 和 `artifact_id` 都是 Core 资源的稳定引用，本协议不复制 Core Run、Approval、Audit 或 Artifact 领域模型；
 - B01 传输层由 Tauri 父进程通过匿名管道启动同源 Sidecar，256 位随机会话令牌只经 stdin bootstrap 传递，不进入参数、环境变量、日志或响应；每个后续 envelope 都必须携带该令牌，且不开放 TCP 监听；
 - B02 能力服务对设备、账号和本地任务执行租户、所有者及权限校验，并提供 SQLite 隔离持久化适配器；生产 PostgreSQL、Entitlement、Core Audit 和能力宿主注册分别等待 Core 迁移、C17/C14 等主线门禁，不能把隔离适配器视为平台事实源；
-- B02 Sidecar 包只接受 HTTPS（测试可用 loopback HTTP）、Ed25519 有效签名、受限包大小和安全版本号，校验成功后才写入 App 私有目录；符号链接目录、无效签名、超限包和公共 HTTP 必须在落盘前拒绝；
-- Tauri 父进程对意外退出最多自动重启两次，显式停止不重启；成功业务往返后才重置崩溃计数，避免无限崩溃循环；诊断文本进入日志前必须移除 Bearer、Cookie、Token、密码和私有路径。
+- B02 Sidecar 包只接受 HTTPS（测试可用 loopback HTTP），每个重定向跳点与最终 URL 都重新验证，连接和总请求均有超时；公共 HTTP、含凭据 URL、恶意重定向和挂起下载必须在落盘前拒绝；
+- Ed25519 签名覆盖规范化 Manifest 的版本、平台、架构、SHA-256、包大小；验签、摘要、目标平台/架构和防降级检查全部通过后才用唯一 staging 原子安装。App 私有目录的每级祖先都拒绝符号链接，Unix 文件使用 `O_NOFOLLOW` 与 `0600/0700`，Windows 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` 和私有 ACL；
+- Tauri 应用只启动上述已安装路径，父进程对意外退出最多自动重启两次，显式停止不重启；成功业务往返后才重置崩溃计数，避免无限崩溃循环；每次调用有界等待，挂起调用必须杀死 Sidecar 并关闭期望运行状态；
+- Sidecar 的真实 stderr 读取链在保存诊断前移除 Bearer、Cookie/Set-Cookie、Token、密码、JSON/查询凭据和私有路径；脱敏不是只存在于独立工具函数或测试桩。
 
 跨语言消费者必须按以下顺序校验，禁止只生成类型后直接执行任务：
 

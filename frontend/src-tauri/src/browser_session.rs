@@ -1,7 +1,8 @@
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -83,6 +84,18 @@ impl BrowserProfile {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn remove(&self) -> Result<(), BrowserSessionError> {
+        ensure_no_symlink_ancestors(&self.path)?;
+        match self.path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                Err(BrowserSessionError::InvalidRoot)
+            }
+            Ok(_) => fs::remove_dir_all(&self.path).map_err(|_| BrowserSessionError::IoUnavailable),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(BrowserSessionError::IoUnavailable),
+        }
+    }
 }
 
 pub struct EncryptedCookieVault {
@@ -91,6 +104,32 @@ pub struct EncryptedCookieVault {
 }
 
 impl EncryptedCookieVault {
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, BrowserSessionError> {
+        let storage = create_private_child(root.as_ref(), "social-operations")?;
+        let state_root = create_private_child(&storage, "browser-state")?;
+        let key_path = state_root.join(".cookie-key");
+        let key = match read_private_file(&key_path) {
+            Ok(key) => key,
+            Err(BrowserSessionError::IoUnavailable) if !key_path.exists() => {
+                let mut key = [0_u8; 32];
+                getrandom::fill(&mut key)
+                    .map_err(|_| BrowserSessionError::CookieEncryptionFailed)?;
+                match create_private_file(&key_path, &key) {
+                    Ok(()) => key.to_vec(),
+                    Err(BrowserSessionError::IoUnavailable) if key_path.exists() => {
+                        read_private_file(&key_path)?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let key: [u8; 32] = key
+            .try_into()
+            .map_err(|_| BrowserSessionError::CookieDecryptionFailed)?;
+        Self::new(root, key)
+    }
+
     pub fn new(
         root: impl AsRef<Path>,
         encryption_key: [u8; 32],
@@ -117,20 +156,24 @@ impl EncryptedCookieVault {
                 },
             )
             .map_err(|_| BrowserSessionError::CookieEncryptionFailed)?;
-        let staging = path.with_extension("cookies.staging");
+        reject_symlink_file(&path)?;
+        let mut staging_suffix = [0_u8; 8];
+        getrandom::fill(&mut staging_suffix)
+            .map_err(|_| BrowserSessionError::CookieEncryptionFailed)?;
+        let suffix: String = staging_suffix
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let staging = path.with_extension(format!("cookies.{suffix}.staging"));
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staging)
-                .map_err(|_| BrowserSessionError::IoUnavailable)?;
+            let mut file = open_new_private(&staging)?;
             file.write_all(COOKIE_MAGIC)
                 .and_then(|_| file.write_all(&nonce))
                 .and_then(|_| file.write_all(&ciphertext))
                 .and_then(|_| file.sync_all())
                 .map_err(|_| BrowserSessionError::IoUnavailable)?;
             set_private_file_permissions(&staging)?;
-            fs::rename(&staging, &path).map_err(|_| BrowserSessionError::IoUnavailable)?;
+            atomic_replace(&staging, &path)?;
             Ok(path)
         })();
         if result.is_err() {
@@ -141,11 +184,12 @@ impl EncryptedCookieVault {
 
     pub fn load(&self, account_id: &str) -> Result<Option<Vec<u8>>, BrowserSessionError> {
         let path = self.path_for_test(account_id)?;
-        let stored = match fs::read(path) {
-            Ok(stored) => stored,
+        match path.symlink_metadata() {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(BrowserSessionError::IoUnavailable),
-        };
+            Ok(_) => {}
+        }
+        let stored = read_private_file(&path)?;
         if stored.len() <= COOKIE_MAGIC.len() + COOKIE_NONCE_BYTES
             || &stored[..COOKIE_MAGIC.len()] != COOKIE_MAGIC
         {
@@ -167,6 +211,7 @@ impl EncryptedCookieVault {
 
     pub fn logout(&self, account_id: &str) -> Result<(), BrowserSessionError> {
         let path = self.path_for_test(account_id)?;
+        ensure_no_symlink_ancestors(&path)?;
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -178,6 +223,104 @@ impl EncryptedCookieVault {
         validate_account_id(account_id)?;
         Ok(self.root.join(format!("{account_id}.cookies")))
     }
+}
+
+fn reject_symlink_file(path: &Path) -> Result<(), BrowserSessionError> {
+    ensure_no_symlink_ancestors(path)?;
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(BrowserSessionError::InvalidRoot)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(BrowserSessionError::IoUnavailable),
+    }
+}
+
+fn create_private_file(path: &Path, contents: &[u8]) -> Result<(), BrowserSessionError> {
+    let mut file = open_new_private(path)?;
+    file.write_all(contents)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| BrowserSessionError::IoUnavailable)?;
+    set_private_file_permissions(path)
+}
+
+fn read_private_file(path: &Path) -> Result<Vec<u8>, BrowserSessionError> {
+    reject_symlink_file(path)?;
+    let mut file = open_private_read(path)?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(|_| BrowserSessionError::IoUnavailable)?;
+    Ok(contents)
+}
+
+fn open_new_private(path: &Path) -> Result<std::fs::File, BrowserSessionError> {
+    ensure_no_symlink_ancestors(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .map_err(|_| BrowserSessionError::IoUnavailable)
+}
+
+fn open_private_read(path: &Path) -> Result<std::fs::File, BrowserSessionError> {
+    ensure_no_symlink_ancestors(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .map_err(|_| BrowserSessionError::IoUnavailable)
+}
+
+#[cfg(unix)]
+fn atomic_replace(staging: &Path, destination: &Path) -> Result<(), BrowserSessionError> {
+    fs::rename(staging, destination).map_err(|_| BrowserSessionError::IoUnavailable)
+}
+
+#[cfg(windows)]
+fn atomic_replace(staging: &Path, destination: &Path) -> Result<(), BrowserSessionError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = staging
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(BrowserSessionError::IoUnavailable)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn atomic_replace(staging: &Path, destination: &Path) -> Result<(), BrowserSessionError> {
+    fs::rename(staging, destination).map_err(|_| BrowserSessionError::IoUnavailable)
 }
 
 fn validate_account_id(account_id: &str) -> Result<(), BrowserSessionError> {
@@ -208,6 +351,7 @@ fn create_private_child(parent: &Path, child: &str) -> Result<PathBuf, BrowserSe
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), BrowserSessionError> {
+    ensure_no_symlink_ancestors(path)?;
     match path.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return Err(BrowserSessionError::InvalidRoot)
@@ -221,6 +365,37 @@ fn ensure_private_directory(path: &Path) -> Result<(), BrowserSessionError> {
     set_private_directory_permissions(path)
 }
 
+fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), BrowserSessionError> {
+    let mut absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| BrowserSessionError::IoUnavailable)?
+            .join(path)
+    };
+    #[cfg(target_os = "macos")]
+    for alias in ["var", "tmp", "etc"] {
+        let prefix = Path::new("/").join(alias);
+        if let Ok(suffix) = absolute.strip_prefix(&prefix) {
+            absolute = Path::new("/private").join(alias).join(suffix);
+            break;
+        }
+    }
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        current.push(component.as_os_str());
+        match current.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(BrowserSessionError::InvalidRoot)
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(BrowserSessionError::IoUnavailable),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), BrowserSessionError> {
     use std::os::unix::fs::PermissionsExt;
@@ -228,9 +403,14 @@ fn set_private_directory_permissions(path: &Path) -> Result<(), BrowserSessionEr
         .map_err(|_| BrowserSessionError::IoUnavailable)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_directory_permissions(path: &Path) -> Result<(), BrowserSessionError> {
+    apply_windows_acl(path, true)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_private_directory_permissions(_path: &Path) -> Result<(), BrowserSessionError> {
-    Ok(())
+    Err(BrowserSessionError::IoUnavailable)
 }
 
 #[cfg(unix)]
@@ -240,12 +420,39 @@ fn set_private_file_permissions(path: &Path) -> Result<(), BrowserSessionError> 
         .map_err(|_| BrowserSessionError::IoUnavailable)
 }
 
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), BrowserSessionError> {
-    Ok(())
+#[cfg(windows)]
+fn set_private_file_permissions(path: &Path) -> Result<(), BrowserSessionError> {
+    apply_windows_acl(path, false)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(all(not(unix), not(windows)))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), BrowserSessionError> {
+    Err(BrowserSessionError::IoUnavailable)
+}
+
+#[cfg(windows)]
+fn apply_windows_acl(path: &Path, directory: bool) -> Result<(), BrowserSessionError> {
+    let username = std::env::var("USERNAME").map_err(|_| BrowserSessionError::IoUnavailable)?;
+    let grant = if directory {
+        format!("{username}:(OI)(CI)F")
+    } else {
+        format!("{username}:(F)")
+    };
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(grant)
+        .status()
+        .map_err(|_| BrowserSessionError::IoUnavailable)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(BrowserSessionError::IoUnavailable)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LoginState {
     LoggedOut,
     AwaitingScan,
@@ -254,7 +461,8 @@ pub enum LoginState {
     HumanHandoff,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LoginSignal {
     BeginQr,
     QrScanned,
@@ -265,7 +473,7 @@ pub enum LoginSignal {
     Logout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LoginSnapshot {
     pub state: LoginState,
     pub circuit_open: bool,

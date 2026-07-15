@@ -1,11 +1,12 @@
 use agent_platform_desktop::sidecar_package::{
     redact_log_line, CrashRecoveryAction, CrashRecoveryPolicy, SidecarPackageError,
-    TrustedSidecarInstaller,
+    SignedSidecarManifest, TrustedSidecarInstaller,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn signed_package() -> (SigningKey, Vec<u8>, Vec<u8>) {
@@ -13,6 +14,19 @@ fn signed_package() -> (SigningKey, Vec<u8>, Vec<u8>) {
     let package = b"signed social operations sidecar".to_vec();
     let signature = signing_key.sign(&package).to_bytes().to_vec();
     (signing_key, package, signature)
+}
+
+fn signed_manifest(
+    signing_key: &SigningKey,
+    version: &str,
+    package: &[u8],
+) -> (SignedSidecarManifest, Vec<u8>) {
+    let manifest = SignedSidecarManifest::for_current(version, package).expect("manifest");
+    let signature = signing_key
+        .sign(&manifest.signing_bytes())
+        .to_bytes()
+        .to_vec();
+    (manifest, signature)
 }
 
 #[test]
@@ -131,4 +145,143 @@ fn installer_rejects_symlinked_sidecar_directory_without_writing_outside_root() 
         SidecarPackageError::InvalidRoot
     );
     assert!(!outside.path().join("1.2.3").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_rejects_a_symlink_in_any_root_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let (signing_key, _, _) = signed_package();
+    let root = tempdir().expect("root");
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).expect("real");
+    let linked = root.path().join("linked");
+    symlink(&real, &linked).expect("linked");
+
+    assert_eq!(
+        TrustedSidecarInstaller::new(
+            linked.join("nested"),
+            signing_key.verifying_key().to_bytes(),
+            1024,
+        )
+        .map(|_| ())
+        .expect_err("ancestor symlink must fail"),
+        SidecarPackageError::InvalidRoot
+    );
+}
+
+#[test]
+fn signed_manifest_binds_digest_version_platform_arch_and_blocks_rollback() {
+    let (signing_key, package, _) = signed_package();
+    let root = tempdir().expect("temp root");
+    let installer =
+        TrustedSidecarInstaller::new(root.path(), signing_key.verifying_key().to_bytes(), 1024)
+            .expect("installer");
+    let (manifest, signature) = signed_manifest(&signing_key, "2.0.0", &package);
+
+    installer
+        .install_manifest(&manifest, &package, &signature)
+        .expect("signed manifest install");
+
+    let mut wrong_digest = SignedSidecarManifest::for_current("2.0.1", b"other").unwrap();
+    wrong_digest.sha256 = manifest.sha256.clone();
+    let wrong_digest_signature = signing_key
+        .sign(&wrong_digest.signing_bytes())
+        .to_bytes()
+        .to_vec();
+    assert_eq!(
+        installer
+            .install_manifest(&wrong_digest, b"other", &wrong_digest_signature)
+            .expect_err("digest mismatch"),
+        SidecarPackageError::DigestMismatch
+    );
+
+    let (rollback, rollback_signature) = signed_manifest(&signing_key, "1.9.9", &package);
+    assert_eq!(
+        installer
+            .install_manifest(&rollback, &package, &rollback_signature)
+            .expect_err("rollback must fail"),
+        SidecarPackageError::RollbackRejected
+    );
+
+    let mut wrong_platform = SignedSidecarManifest::for_current("2.0.1", &package).unwrap();
+    wrong_platform.platform = "unsupported".to_owned();
+    let wrong_platform_signature = signing_key
+        .sign(&wrong_platform.signing_bytes())
+        .to_bytes()
+        .to_vec();
+    assert_eq!(
+        installer
+            .install_manifest(&wrong_platform, &package, &wrong_platform_signature)
+            .expect_err("platform mismatch"),
+        SidecarPackageError::PlatformMismatch
+    );
+}
+
+#[test]
+fn redaction_covers_set_cookie_json_and_query_credentials() {
+    let safe = redact_log_line(
+        r#"Set-Cookie: sid=abc123; token=xyz {\"password\":\"hunter2\"} https://x.test?a=1&access_token=secret"#,
+    );
+    for secret in ["abc123", "xyz", "hunter2", "secret"] {
+        assert!(!safe.contains(secret));
+    }
+}
+
+#[test]
+fn download_rejects_an_untrusted_redirect_hop() {
+    let (signing_key, _, signature) = signed_package();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("listener address");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).expect("read request");
+        write!(
+            stream,
+            "HTTP/1.1 302 Found\r\nLocation: http://example.com/sidecar\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write redirect");
+    });
+    let root = tempdir().expect("temp root");
+    let installer =
+        TrustedSidecarInstaller::new(root.path(), signing_key.verifying_key().to_bytes(), 1024)
+            .expect("installer");
+
+    assert_eq!(
+        installer
+            .download_and_install(&format!("http://{address}/redirect"), "1.2.3", &signature)
+            .expect_err("redirect hop must be validated"),
+        SidecarPackageError::UntrustedDownloadUrl
+    );
+    server.join().expect("server join");
+}
+
+#[test]
+fn sidecar_download_has_a_total_request_timeout() {
+    let (signing_key, _, signature) = signed_package();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("listener address");
+    let server = thread::spawn(move || {
+        let (_stream, _) = listener.accept().expect("accept request");
+        thread::sleep(Duration::from_millis(200));
+    });
+    let root = tempdir().expect("temp root");
+    let installer = TrustedSidecarInstaller::new_with_timeouts(
+        root.path(),
+        signing_key.verifying_key().to_bytes(),
+        1024,
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    )
+    .expect("installer");
+
+    assert_eq!(
+        installer
+            .download_and_install(&format!("http://{address}/hang"), "1.2.3", &signature)
+            .expect_err("hung download must time out"),
+        SidecarPackageError::DownloadFailed
+    );
+    server.join().expect("server join");
 }

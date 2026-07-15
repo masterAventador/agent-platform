@@ -1,9 +1,11 @@
-use crate::sidecar_package::{CrashRecoveryAction, CrashRecoveryPolicy};
+use crate::sidecar_package::{redact_log_line, CrashRecoveryAction, CrashRecoveryPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 use tauri::State;
 
 const PROTOCOL_VERSION: &str = "1.0";
@@ -22,12 +24,13 @@ pub enum LocalExecutorError {
     NotRunning,
     ProcessUnavailable,
     IpcUnavailable,
+    InvocationTimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalExecutorStatus {
-    running: bool,
+    pub running: bool,
     protocol_version: &'static str,
     capability_id: &'static str,
 }
@@ -42,14 +45,22 @@ struct SidecarEnvelope {
 struct RunningSidecar {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    responses: mpsc::Receiver<String>,
     session_token: String,
+}
+
+#[derive(Clone)]
+struct LaunchSpec {
+    executable: PathBuf,
+    arguments: Vec<String>,
 }
 
 pub struct LocalExecutorManager {
     sidecar: Option<RunningSidecar>,
     desired_running: bool,
     recovery_policy: CrashRecoveryPolicy,
+    launch_spec: Option<LaunchSpec>,
+    safe_diagnostics: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for LocalExecutorManager {
@@ -58,6 +69,8 @@ impl Default for LocalExecutorManager {
             sidecar: None,
             desired_running: false,
             recovery_policy: CrashRecoveryPolicy::new(2),
+            launch_spec: None,
+            safe_diagnostics: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -83,7 +96,7 @@ impl LocalExecutorManager {
             if self.desired_running {
                 match self.recovery_policy.on_unexpected_exit() {
                     CrashRecoveryAction::Restart => {
-                        if let Err(error) = self.spawn_sidecar() {
+                        if let Err(error) = self.spawn_configured_sidecar() {
                             self.desired_running = false;
                             return Err(error);
                         }
@@ -105,33 +118,60 @@ impl LocalExecutorManager {
     }
 
     fn start(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        let executable =
+            std::env::current_exe().map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+        self.start_launch(LaunchSpec {
+            executable,
+            arguments: vec![SIDECAR_ARGUMENT.to_owned()],
+        })
+    }
+
+    pub fn start_installed(
+        &mut self,
+        executable: impl AsRef<Path>,
+    ) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        self.start_launch(LaunchSpec {
+            executable: executable.as_ref().to_path_buf(),
+            arguments: Vec::new(),
+        })
+    }
+
+    fn start_launch(
+        &mut self,
+        launch_spec: LaunchSpec,
+    ) -> Result<LocalExecutorStatus, LocalExecutorError> {
         self.refresh()?;
         if self.sidecar.is_some() {
             return Err(LocalExecutorError::AlreadyRunning);
         }
         self.recovery_policy.reset_after_stable_start();
         self.desired_running = true;
-        if let Err(error) = self.spawn_sidecar() {
+        self.launch_spec = Some(launch_spec);
+        if let Err(error) = self.spawn_configured_sidecar() {
             self.desired_running = false;
+            self.launch_spec = None;
             return Err(error);
         }
         self.status()
     }
 
-    fn spawn_sidecar(&mut self) -> Result<(), LocalExecutorError> {
+    fn spawn_configured_sidecar(&mut self) -> Result<(), LocalExecutorError> {
         let session_token = new_session_token()?;
-        let executable =
-            std::env::current_exe().map_err(|_| LocalExecutorError::ProcessUnavailable)?;
-        let mut child = Command::new(executable)
-            .arg(SIDECAR_ARGUMENT)
+        let launch = self
+            .launch_spec
+            .clone()
+            .ok_or(LocalExecutorError::ProcessUnavailable)?;
+        let mut child = Command::new(&launch.executable)
+            .args(&launch.arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
-        let (Some(mut stdin), Some(stdout)) = (stdin, stdout) else {
+        let stderr = child.stderr.take();
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
             let _ = child.kill();
             let _ = child.wait();
             return Err(LocalExecutorError::IpcUnavailable);
@@ -141,16 +181,45 @@ impl LocalExecutorManager {
             let _ = child.wait();
             return Err(LocalExecutorError::IpcUnavailable);
         }
+        let (response_sender, responses) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if response_sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let diagnostics = Arc::clone(&self.safe_diagnostics);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Ok(mut retained) = diagnostics.lock() {
+                    retained.push(redact_log_line(&line));
+                }
+            }
+        });
         self.sidecar = Some(RunningSidecar {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            responses,
             session_token,
         });
         Ok(())
     }
 
-    fn invoke(&mut self, request: Value) -> Result<Value, LocalExecutorError> {
+    pub fn invoke(&mut self, request: Value) -> Result<Value, LocalExecutorError> {
+        self.invoke_with_timeout(request, Duration::from_secs(30))
+    }
+
+    pub fn invoke_with_timeout(
+        &mut self,
+        request: Value,
+        timeout: Duration,
+    ) -> Result<Value, LocalExecutorError> {
         self.refresh()?;
         let sidecar = self
             .sidecar
@@ -171,11 +240,16 @@ impl LocalExecutorManager {
             .and_then(|_| sidecar.stdin.flush())
             .map_err(|_| LocalExecutorError::IpcUnavailable)?;
 
-        let mut response = String::new();
-        sidecar
-            .stdout
-            .read_line(&mut response)
-            .map_err(|_| LocalExecutorError::IpcUnavailable)?;
+        let response = match sidecar.responses.recv_timeout(timeout) {
+            Ok(response) => response,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.terminate_after_timeout();
+                return Err(LocalExecutorError::InvocationTimedOut);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(LocalExecutorError::IpcUnavailable)
+            }
+        };
         if response.is_empty() || response.len() > MAX_MESSAGE_BYTES {
             return Err(LocalExecutorError::IpcUnavailable);
         }
@@ -185,8 +259,29 @@ impl LocalExecutorManager {
         Ok(response)
     }
 
-    fn stop(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+    fn terminate_after_timeout(&mut self) {
         self.desired_running = false;
+        self.launch_spec = None;
+        if let Some(mut sidecar) = self.sidecar.take() {
+            let _ = sidecar.child.kill();
+            let _ = sidecar.child.wait();
+        }
+    }
+
+    pub fn status_snapshot(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        self.status()
+    }
+
+    pub fn take_safe_diagnostics(&self) -> Vec<String> {
+        self.safe_diagnostics
+            .lock()
+            .map(|mut diagnostics| std::mem::take(&mut *diagnostics))
+            .unwrap_or_default()
+    }
+
+    pub fn stop(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        self.desired_running = false;
+        self.launch_spec = None;
         let _ = self.recovery_policy.on_clean_stop();
         if let Some(mut sidecar) = self.sidecar.take() {
             sidecar

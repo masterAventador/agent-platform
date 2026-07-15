@@ -3,8 +3,10 @@ pub mod credentials;
 pub mod local_executor;
 pub mod remembered_login;
 pub mod sidecar_package;
+pub mod social_operations_runtime;
 
 use serde::Serialize;
+use tauri::Manager;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +91,19 @@ fn platform_capabilities() -> PlatformCapabilities {
     }
 }
 
+fn sidecar_verifying_key() -> Option<[u8; 32]> {
+    let encoded = option_env!("AGENT_PLATFORM_SIDECAR_VERIFYING_KEY_HEX")?;
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut key = [0_u8; 32];
+    for (index, slot) in key.iter_mut().enumerate() {
+        let start = index * 2;
+        *slot = u8::from_str_radix(&encoded[start..start + 2], 16).ok()?;
+    }
+    Some(key)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -107,6 +122,15 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            let social_runtime = social_operations_runtime::SocialOperationsRuntime::new(
+                app_data_dir,
+                sidecar_verifying_key(),
+                64 * 1024 * 1024,
+            )
+            .map_err(|error| std::io::Error::other(format!("social runtime: {error:?}")))?;
+            app.manage(std::sync::Mutex::new(social_runtime));
+
             #[cfg(all(debug_assertions, not(feature = "desktop-test")))]
             {
                 app.handle().plugin(
@@ -138,6 +162,17 @@ pub fn run() {
             local_executor::local_executor_invoke,
             local_executor::local_executor_status,
             local_executor::local_executor_stop,
+            social_operations_runtime::social_sidecar_install,
+            social_operations_runtime::social_sidecar_download,
+            social_operations_runtime::social_account_prepare,
+            social_operations_runtime::social_account_login_signal,
+            social_operations_runtime::social_account_store_cookies,
+            social_operations_runtime::social_account_has_cookies,
+            social_operations_runtime::social_account_start,
+            social_operations_runtime::social_account_invoke,
+            social_operations_runtime::social_account_logout,
+            social_operations_runtime::social_account_emergency_stop,
+            social_operations_runtime::social_executor_take_safe_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

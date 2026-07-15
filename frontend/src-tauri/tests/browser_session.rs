@@ -123,3 +123,61 @@ fn browser_profile_rejects_symlinked_storage_parent() {
     );
     assert!(!outside.path().join("browser-profiles").exists());
 }
+
+#[test]
+fn cookie_vault_key_survives_restart_and_repeated_writes_replace_atomically() {
+    let root = tempdir().expect("temp root");
+    let vault = EncryptedCookieVault::open(root.path()).expect("open vault");
+    vault
+        .store(ACCOUNT_ID, b"first-cookie")
+        .expect("first write");
+    vault
+        .store(ACCOUNT_ID, b"second-cookie")
+        .expect("replace write");
+    drop(vault);
+
+    let reopened = EncryptedCookieVault::open(root.path()).expect("reopen vault");
+    assert_eq!(
+        reopened.load(ACCOUNT_ID).expect("load"),
+        Some(b"second-cookie".to_vec())
+    );
+    let state_dir = root.path().join("social-operations/browser-state");
+    assert!(!std::fs::read_dir(state_dir)
+        .expect("state files")
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().contains("staging")));
+}
+
+#[test]
+fn deleting_browser_profile_removes_account_directory_only() {
+    let root = tempdir().expect("temp root");
+    let profile =
+        BrowserProfile::prepare(root.path(), SocialPlatform::Douyin, ACCOUNT_ID).expect("profile");
+    std::fs::write(profile.path().join("state"), b"private").expect("profile state");
+    profile.remove().expect("remove profile");
+
+    assert!(!profile.path().exists());
+    assert!(root
+        .path()
+        .join("social-operations/browser-profiles/douyin")
+        .is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_storage_rejects_a_symlink_in_any_root_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().expect("root");
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).expect("real");
+    let linked = root.path().join("linked");
+    symlink(&real, &linked).expect("linked");
+
+    assert_eq!(
+        EncryptedCookieVault::new(linked.join("nested"), [9_u8; 32])
+            .map(|_| ())
+            .expect_err("ancestor symlink must fail"),
+        BrowserSessionError::InvalidRoot
+    );
+}

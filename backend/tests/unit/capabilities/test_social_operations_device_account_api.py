@@ -203,3 +203,15 @@ def test_api_maps_permission_failure_without_resource_or_exception_leak(tmp_path
 
     assert response.status_code == 403
     assert response.json() == {"detail": "missing permission: social.execute"}
+
+
+def test_api_rejects_free_form_emergency_stop_reason(tmp_path: Path) -> None:
+    client = make_client(make_service(tmp_path / "social-operations.db"))
+    response = client.post(
+        f"/api/v1/social-operations/devices/{DEVICE_ID}/emergency-stop",
+        json={"reason": "token=must-not-enter-audit"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid emergency stop reason"}
+    assert "token" not in response.text.casefold()

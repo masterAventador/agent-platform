@@ -5,8 +5,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from threading import RLock
-from typing import Any, Protocol
-from uuid import UUID
+from typing import Any, Protocol, TypeVar
+from uuid import UUID, uuid4
+
+_ResultT = TypeVar("_ResultT")
 
 
 class AuthorizationError(PermissionError):
@@ -60,6 +62,19 @@ class AccountHealthSignal(StrEnum):
     LOGIN_EXPIRED = "login_expired"
 
 
+class EmergencyStopReason(StrEnum):
+    OPERATOR_REQUESTED = "operator_requested"
+    POLICY_VIOLATION = "policy_violation"
+    DEVICE_COMPROMISE_SUSPECTED = "device_compromise_suspected"
+
+
+class AccountHandoffReason(StrEnum):
+    CAPTCHA_REQUIRED = "captcha_required"
+    RISK_CONTROL = "risk_control"
+    LOGIN_EXPIRED = "login_expired"
+    DEVICE_EMERGENCY_STOPPED = "device_emergency_stopped"
+
+
 @dataclass(frozen=True, slots=True)
 class ActorContext:
     tenant_id: UUID
@@ -106,13 +121,14 @@ class PlatformAccount:
     display_name: str
     status: AccountStatus
     circuit_open: bool
-    handoff_reason: str | None
+    handoff_reason: AccountHandoffReason | None
     session_revision: int
     updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class AuditEvent:
+    event_id: UUID
     action: str
     tenant_id: UUID
     actor_user_id: UUID
@@ -126,8 +142,12 @@ class InMemoryAuditSink:
 
     def __init__(self) -> None:
         self.events: list[AuditEvent] = []
+        self._event_ids: set[UUID] = set()
 
     def record(self, event: AuditEvent) -> None:
+        if event.event_id in self._event_ids:
+            return
+        self._event_ids.add(event.event_id)
         self.events.append(event)
 
 
@@ -168,8 +188,10 @@ class DeviceAccountService:
         self._devices: dict[UUID, Device] = {}
         self._tasks: dict[UUID, LocalTask] = {}
         self._accounts: dict[UUID, PlatformAccount] = {}
+        self._audit_outbox: list[AuditEvent] = []
         if state_store is not None:
             self._restore_state(state_store.load())
+            self._drain_audit_outbox()
 
     def register_device(
         self,
@@ -188,34 +210,50 @@ class DeviceAccountService:
         self._validate_text(executor_version, "executor version")
         if heartbeat_sequence != 0:
             raise ValueError("initial heartbeat sequence must be zero")
-        existing = self._devices.get(device_id)
-        if existing is not None and (
-            existing.tenant_id != actor.tenant_id or existing.owner_user_id != actor.user_id
-        ):
-            raise ConflictError("device identifier is already registered")
-        now = self._clock()
-        device = Device(
-            device_id=device_id,
-            tenant_id=actor.tenant_id,
-            owner_user_id=actor.user_id,
-            display_name=display_name,
-            platform=platform,
-            app_version=app_version,
-            executor_version=executor_version,
-            registered_at=existing.registered_at if existing else now,
-            last_seen_at=now,
-            status=(
-                DeviceStatus.EMERGENCY_STOPPED
-                if existing is not None
-                and existing.status is DeviceStatus.EMERGENCY_STOPPED
-                else DeviceStatus.ONLINE
-            ),
-            heartbeat_sequence=heartbeat_sequence,
-        )
-        self._devices[device_id] = device
-        self._persist_state()
-        self._audit(actor, "social.device.registered", device_id, platform=platform.value)
-        return device
+        with self._lock:
+            existing = self._devices.get(device_id)
+            if existing is not None and (
+                existing.tenant_id != actor.tenant_id
+                or existing.owner_user_id != actor.user_id
+            ):
+                raise ConflictError("device identifier is already registered")
+            if existing is not None and existing.platform is not platform:
+                raise ConflictError("device platform cannot be changed")
+            now = self._clock()
+            effective_existing = (
+                self._device_with_online_state(existing) if existing is not None else None
+            )
+            device = Device(
+                device_id=device_id,
+                tenant_id=actor.tenant_id,
+                owner_user_id=actor.user_id,
+                display_name=display_name,
+                platform=platform,
+                app_version=app_version,
+                executor_version=executor_version,
+                registered_at=existing.registered_at if existing else now,
+                last_seen_at=existing.last_seen_at if existing else now,
+                status=(
+                    effective_existing.status
+                    if effective_existing is not None
+                    else DeviceStatus.ONLINE
+                ),
+                heartbeat_sequence=(
+                    existing.heartbeat_sequence if existing else heartbeat_sequence
+                ),
+            )
+
+            def mutate() -> Device:
+                self._devices[device_id] = device
+                return device
+
+            return self._commit_with_audit(
+                actor,
+                "social.device.registered",
+                device_id,
+                mutate,
+                platform=platform.value,
+            )
 
     def heartbeat(
         self,
@@ -237,7 +275,7 @@ class DeviceAccountService:
                     and app_version == device.app_version
                     and executor_version == device.executor_version
                 ):
-                    return device
+                    return self._device_with_online_state(device)
                 raise ConflictError("heartbeat sequence is stale or conflicting")
             status = (
                 DeviceStatus.EMERGENCY_STOPPED
@@ -252,14 +290,14 @@ class DeviceAccountService:
                 status=status,
                 heartbeat_sequence=heartbeat_sequence,
             )
-            self._devices[device_id] = updated
-            self._persist_state()
-            return updated
+            return self._commit_state(
+                lambda: self._replace_device(device_id, updated)
+            )
 
     def get_device(self, actor: ActorContext, device_id: UUID) -> Device:
         self._require_permission(actor, "social.read")
         with self._lock:
-            return self._device_with_online_state(self._tenant_device(actor, device_id))
+            return self._device_with_online_state(self._owned_device(actor, device_id))
 
     def list_devices(self, actor: ActorContext) -> tuple[Device, ...]:
         self._require_permission(actor, "social.read")
@@ -268,6 +306,7 @@ class DeviceAccountService:
                 self._device_with_online_state(device)
                 for device in sorted(self._devices.values(), key=lambda item: item.device_id.int)
                 if device.tenant_id == actor.tenant_id
+                and device.owner_user_id == actor.user_id
             )
 
     def enqueue_task(
@@ -279,25 +318,34 @@ class DeviceAccountService:
         task_type: str,
     ) -> LocalTask:
         self._require_permission(actor, "social.execute")
-        device = self._tenant_device(actor, target_device_id)
-        if device.status is DeviceStatus.EMERGENCY_STOPPED:
-            raise AuthorizationError("device emergency stop is active")
-        if task_id in self._tasks:
-            raise ConflictError("task identifier already exists")
         self._validate_text(task_type, "task type")
-        task = LocalTask(
-            task_id=task_id,
-            tenant_id=actor.tenant_id,
-            requested_by_user_id=actor.user_id,
-            target_device_id=target_device_id,
-            task_type=task_type,
-            status=LocalTaskStatus.QUEUED,
-            created_at=self._clock(),
-        )
-        self._tasks[task_id] = task
-        self._persist_state()
-        self._audit(actor, "social.local_task.queued", task_id, device_id=str(target_device_id))
-        return task
+        with self._lock:
+            device = self._owned_device(actor, target_device_id)
+            if device.status is DeviceStatus.EMERGENCY_STOPPED:
+                raise AuthorizationError("device emergency stop is active")
+            if task_id in self._tasks:
+                raise ConflictError("task identifier already exists")
+            task = LocalTask(
+                task_id=task_id,
+                tenant_id=actor.tenant_id,
+                requested_by_user_id=actor.user_id,
+                target_device_id=target_device_id,
+                task_type=task_type,
+                status=LocalTaskStatus.QUEUED,
+                created_at=self._clock(),
+            )
+
+            def mutate() -> LocalTask:
+                self._tasks[task_id] = task
+                return task
+
+            return self._commit_with_audit(
+                actor,
+                "social.local_task.queued",
+                task_id,
+                mutate,
+                device_id=str(target_device_id),
+            )
 
     def claim_tasks(
         self,
@@ -310,17 +358,20 @@ class DeviceAccountService:
         if limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         with self._lock:
-            device = self._owned_device(actor, device_id)
-            if device.status is DeviceStatus.EMERGENCY_STOPPED:
+            device = self._device_with_online_state(self._owned_device(actor, device_id))
+            if device.status is not DeviceStatus.ONLINE:
                 return ()
             now = self._clock()
-            for task_id, task in tuple(self._tasks.items()):
+            proposed_tasks = self._tasks.copy()
+            for task_id, task in tuple(proposed_tasks.items()):
                 if (
-                    task.status is LocalTaskStatus.CLAIMED
+                    task.tenant_id == actor.tenant_id
+                    and task.target_device_id == device_id
+                    and task.status is LocalTaskStatus.CLAIMED
                     and task.lease_expires_at is not None
-                    and task.lease_expires_at < now
+                    and task.lease_expires_at <= now
                 ):
-                    self._tasks[task_id] = replace(
+                    proposed_tasks[task_id] = replace(
                         task,
                         status=LocalTaskStatus.QUEUED,
                         claimed_at=None,
@@ -329,7 +380,7 @@ class DeviceAccountService:
             candidates = sorted(
                 (
                     task
-                    for task in self._tasks.values()
+                    for task in proposed_tasks.values()
                     if task.tenant_id == actor.tenant_id
                     and task.target_device_id == device_id
                     and task.status is LocalTaskStatus.QUEUED
@@ -346,39 +397,80 @@ class DeviceAccountService:
                 )
                 for task in candidates
             )
-            self._tasks.update({task.task_id: task for task in claimed})
-            self._persist_state()
-            return claimed
+            if not claimed:
+                return ()
+
+            def mutate() -> tuple[LocalTask, ...]:
+                proposed_tasks.update({task.task_id: task for task in claimed})
+                self._tasks = proposed_tasks
+                return claimed
+
+            return self._commit_state(mutate)
 
     def get_task(self, actor: ActorContext, task_id: UUID) -> LocalTask:
         self._require_permission(actor, "social.read")
-        task = self._tasks.get(task_id)
-        if task is None or task.tenant_id != actor.tenant_id:
-            raise ResourceNotFoundError("local task not found")
-        return task
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None or task.tenant_id != actor.tenant_id:
+                raise ResourceNotFoundError("local task not found")
+            self._owned_device(actor, task.target_device_id)
+            return task
 
     def emergency_stop(
         self,
         actor: ActorContext,
         device_id: UUID,
         *,
-        reason: str,
+        reason: EmergencyStopReason,
     ) -> Device:
         self._require_permission(actor, "social.manage")
-        self._validate_text(reason, "reason")
-        device = self._tenant_device(actor, device_id)
-        stopped = replace(device, status=DeviceStatus.EMERGENCY_STOPPED)
-        self._devices[device_id] = stopped
-        for task_id, task in tuple(self._tasks.items()):
-            if (
-                task.tenant_id == actor.tenant_id
-                and task.target_device_id == device_id
-                and task.status in {LocalTaskStatus.QUEUED, LocalTaskStatus.CLAIMED}
-            ):
-                self._tasks[task_id] = replace(task, status=LocalTaskStatus.CANCELLED)
-        self._persist_state()
-        self._audit(actor, "social.device.emergency_stopped", device_id, reason=reason)
-        return stopped
+        if not isinstance(reason, EmergencyStopReason):
+            raise ValueError("invalid emergency stop reason")
+        with self._lock:
+            device = self._owned_device(actor, device_id)
+            stopped = replace(device, status=DeviceStatus.EMERGENCY_STOPPED)
+            now = self._clock()
+
+            def mutate() -> Device:
+                self._devices[device_id] = stopped
+                for task_id, task in tuple(self._tasks.items()):
+                    if (
+                        task.tenant_id == actor.tenant_id
+                        and task.target_device_id == device_id
+                        and task.status
+                        in {LocalTaskStatus.QUEUED, LocalTaskStatus.CLAIMED}
+                    ):
+                        self._tasks[task_id] = replace(
+                            task, status=LocalTaskStatus.CANCELLED
+                        )
+                for account_id, account in tuple(self._accounts.items()):
+                    if account.device_id != device_id:
+                        continue
+                    self._accounts[account_id] = replace(
+                        account,
+                        status=(
+                            AccountStatus.LOGGED_OUT
+                            if account.status is AccountStatus.LOGGED_OUT
+                            else AccountStatus.HUMAN_HANDOFF
+                        ),
+                        circuit_open=True,
+                        handoff_reason=(
+                            None
+                            if account.status is AccountStatus.LOGGED_OUT
+                            else AccountHandoffReason.DEVICE_EMERGENCY_STOPPED
+                        ),
+                        session_revision=account.session_revision + 1,
+                        updated_at=now,
+                    )
+                return stopped
+
+            return self._commit_with_audit(
+                actor,
+                "social.device.emergency_stopped",
+                device_id,
+                mutate,
+                reason=reason.value,
+            )
 
     def bind_account(
         self,
@@ -390,27 +482,36 @@ class DeviceAccountService:
         device_id: UUID,
     ) -> PlatformAccount:
         self._require_permission(actor, "social.manage")
-        device = self._tenant_device(actor, device_id)
         self._validate_text(display_name, "display name")
-        if account_id in self._accounts:
-            raise ConflictError("account identifier already exists")
-        account = PlatformAccount(
-            account_id=account_id,
-            tenant_id=actor.tenant_id,
-            owner_user_id=actor.user_id,
-            device_id=device.device_id,
-            platform=platform,
-            display_name=display_name,
-            status=AccountStatus.AWAITING_SCAN,
-            circuit_open=False,
-            handoff_reason=None,
-            session_revision=0,
-            updated_at=self._clock(),
-        )
-        self._accounts[account_id] = account
-        self._persist_state()
-        self._audit(actor, "social.account.bound", account_id, platform=platform.value)
-        return account
+        with self._lock:
+            device = self._owned_device(actor, device_id)
+            if account_id in self._accounts:
+                raise ConflictError("account identifier already exists")
+            account = PlatformAccount(
+                account_id=account_id,
+                tenant_id=actor.tenant_id,
+                owner_user_id=actor.user_id,
+                device_id=device.device_id,
+                platform=platform,
+                display_name=display_name,
+                status=AccountStatus.AWAITING_SCAN,
+                circuit_open=True,
+                handoff_reason=None,
+                session_revision=0,
+                updated_at=self._clock(),
+            )
+
+            def mutate() -> PlatformAccount:
+                self._accounts[account_id] = account
+                return account
+
+            return self._commit_with_audit(
+                actor,
+                "social.account.bound",
+                account_id,
+                mutate,
+                platform=platform.value,
+            )
 
     def report_account_health(
         self,
@@ -420,34 +521,40 @@ class DeviceAccountService:
         signal: AccountHealthSignal,
     ) -> PlatformAccount:
         self._require_permission(actor, "social.execute")
-        account = self._owned_account(actor, account_id)
-        if (
-            account.status is AccountStatus.HUMAN_HANDOFF
-            and signal is AccountHealthSignal.AUTHENTICATED
-        ):
-            raise AuthorizationError("human handoff requires explicit operator resume")
-        if signal is AccountHealthSignal.AUTHENTICATED:
-            updated = replace(
-                account,
-                status=AccountStatus.HEALTHY,
-                circuit_open=False,
-                handoff_reason=None,
-                updated_at=self._clock(),
+        with self._lock:
+            account = self._owned_account(actor, account_id)
+            self._require_device_online(actor, account.device_id)
+            if (
+                account.status is AccountStatus.HUMAN_HANDOFF
+                and signal is AccountHealthSignal.AUTHENTICATED
+            ):
+                raise AuthorizationError("human handoff requires explicit operator resume")
+            if signal is AccountHealthSignal.AUTHENTICATED:
+                updated = replace(
+                    account,
+                    status=AccountStatus.HEALTHY,
+                    circuit_open=False,
+                    handoff_reason=None,
+                    updated_at=self._clock(),
+                )
+                action = "social.account.health_changed"
+            else:
+                updated = replace(
+                    account,
+                    status=AccountStatus.HUMAN_HANDOFF,
+                    circuit_open=True,
+                    handoff_reason=AccountHandoffReason(signal.value),
+                    updated_at=self._clock(),
+                )
+                action = "social.account.handoff_requested"
+
+            def mutate() -> PlatformAccount:
+                self._accounts[account_id] = updated
+                return updated
+
+            return self._commit_with_audit(
+                actor, action, account_id, mutate, signal=signal.value
             )
-            action = "social.account.health_changed"
-        else:
-            updated = replace(
-                account,
-                status=AccountStatus.HUMAN_HANDOFF,
-                circuit_open=True,
-                handoff_reason=signal.value,
-                updated_at=self._clock(),
-            )
-            action = "social.account.handoff_requested"
-        self._accounts[account_id] = updated
-        self._persist_state()
-        self._audit(actor, action, account_id, signal=signal.value)
-        return updated
 
     def resume_account_after_handoff(
         self,
@@ -455,21 +562,27 @@ class DeviceAccountService:
         account_id: UUID,
     ) -> PlatformAccount:
         self._require_permission(actor, "social.manage")
-        account = self._tenant_account(actor, account_id)
-        if account.status is not AccountStatus.HUMAN_HANDOFF:
-            raise ConflictError("account is not waiting for human handoff")
-        updated = replace(
-            account,
-            status=AccountStatus.AWAITING_SCAN,
-            circuit_open=False,
-            handoff_reason=None,
-            session_revision=account.session_revision + 1,
-            updated_at=self._clock(),
-        )
-        self._accounts[account_id] = updated
-        self._persist_state()
-        self._audit(actor, "social.account.handoff_resumed", account_id)
-        return updated
+        with self._lock:
+            account = self._owned_account(actor, account_id)
+            self._require_device_online(actor, account.device_id)
+            if account.status is not AccountStatus.HUMAN_HANDOFF:
+                raise ConflictError("account is not waiting for human handoff")
+            updated = replace(
+                account,
+                status=AccountStatus.AWAITING_SCAN,
+                circuit_open=True,
+                handoff_reason=None,
+                session_revision=account.session_revision + 1,
+                updated_at=self._clock(),
+            )
+
+            def mutate() -> PlatformAccount:
+                self._accounts[account_id] = updated
+                return updated
+
+            return self._commit_with_audit(
+                actor, "social.account.handoff_resumed", account_id, mutate
+            )
 
     def require_account_executable(
         self,
@@ -477,15 +590,17 @@ class DeviceAccountService:
         account_id: UUID,
     ) -> PlatformAccount:
         self._require_permission(actor, "social.execute")
-        account = self._tenant_account(actor, account_id)
-        if account.circuit_open or account.status is not AccountStatus.HEALTHY:
-            raise AuthorizationError("account circuit is open")
-        return account
+        with self._lock:
+            account = self._owned_account(actor, account_id)
+            self._require_device_online(actor, account.device_id)
+            if account.circuit_open or account.status is not AccountStatus.HEALTHY:
+                raise AuthorizationError("account circuit is open")
+            return account
 
     def get_account(self, actor: ActorContext, account_id: UUID) -> PlatformAccount:
         self._require_permission(actor, "social.read")
         with self._lock:
-            return self._tenant_account(actor, account_id)
+            return self._owned_account(actor, account_id)
 
     def list_accounts(self, actor: ActorContext) -> tuple[PlatformAccount, ...]:
         self._require_permission(actor, "social.read")
@@ -496,23 +611,29 @@ class DeviceAccountService:
                     self._accounts.values(), key=lambda item: item.account_id.int
                 )
                 if account.tenant_id == actor.tenant_id
+                and account.owner_user_id == actor.user_id
             )
 
     def logout_account(self, actor: ActorContext, account_id: UUID) -> PlatformAccount:
         self._require_permission(actor, "social.manage")
-        account = self._tenant_account(actor, account_id)
-        updated = replace(
-            account,
-            status=AccountStatus.LOGGED_OUT,
-            circuit_open=True,
-            handoff_reason=None,
-            session_revision=account.session_revision + 1,
-            updated_at=self._clock(),
-        )
-        self._accounts[account_id] = updated
-        self._persist_state()
-        self._audit(actor, "social.account.logged_out", account_id)
-        return updated
+        with self._lock:
+            account = self._owned_account(actor, account_id)
+            updated = replace(
+                account,
+                status=AccountStatus.LOGGED_OUT,
+                circuit_open=True,
+                handoff_reason=None,
+                session_revision=account.session_revision + 1,
+                updated_at=self._clock(),
+            )
+
+            def mutate() -> PlatformAccount:
+                self._accounts[account_id] = updated
+                return updated
+
+            return self._commit_with_audit(
+                actor, "social.account.logged_out", account_id, mutate
+            )
 
     def _persist_state(self) -> None:
         if self._state_store is None:
@@ -566,6 +687,18 @@ class DeviceAccountService:
                     }
                     for account in self._accounts.values()
                 ],
+                "audit_outbox": [
+                    {
+                        "event_id": str(event.event_id),
+                        "action": event.action,
+                        "tenant_id": str(event.tenant_id),
+                        "actor_user_id": str(event.actor_user_id),
+                        "resource_id": str(event.resource_id),
+                        "occurred_at": event.occurred_at.isoformat(),
+                        "details": [list(detail) for detail in event.details],
+                    }
+                    for event in self._audit_outbox
+                ],
             }
         )
 
@@ -612,7 +745,7 @@ class DeviceAccountService:
                 status=AccountStatus(str(raw["status"])),
                 circuit_open=bool(raw["circuit_open"]),
                 handoff_reason=(
-                    str(raw["handoff_reason"])
+                    AccountHandoffReason(str(raw["handoff_reason"]))
                     if raw.get("handoff_reason") is not None
                     else None
                 ),
@@ -620,6 +753,28 @@ class DeviceAccountService:
                 updated_at=datetime.fromisoformat(str(raw["updated_at"])),
             )
             self._accounts[account.account_id] = account
+        for raw in self._records(state, "audit_outbox"):
+            raw_details = raw.get("details", ())
+            if not isinstance(raw_details, list | tuple):
+                raise ValueError("invalid persisted audit outbox")
+            details = tuple(
+                (str(detail[0]), str(detail[1]))
+                for detail in raw_details
+                if isinstance(detail, list | tuple) and len(detail) == 2
+            )
+            if len(details) != len(raw_details):
+                raise ValueError("invalid persisted audit outbox")
+            self._audit_outbox.append(
+                AuditEvent(
+                    event_id=UUID(str(raw["event_id"])),
+                    action=str(raw["action"]),
+                    tenant_id=UUID(str(raw["tenant_id"])),
+                    actor_user_id=UUID(str(raw["actor_user_id"])),
+                    resource_id=UUID(str(raw["resource_id"])),
+                    occurred_at=datetime.fromisoformat(str(raw["occurred_at"])),
+                    details=details,
+                )
+            )
 
     @staticmethod
     def _records(state: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], ...]:
@@ -680,20 +835,87 @@ class DeviceAccountService:
             raise ResourceNotFoundError("account not found")
         return account
 
-    def _audit(
+    def _require_device_online(self, actor: ActorContext, device_id: UUID) -> Device:
+        device = self._device_with_online_state(self._owned_device(actor, device_id))
+        if device.status is not DeviceStatus.ONLINE:
+            raise AuthorizationError("device is not online")
+        return device
+
+    def _replace_device(self, device_id: UUID, device: Device) -> Device:
+        self._devices[device_id] = device
+        return device
+
+    def _commit_state(self, mutation: Callable[[], _ResultT]) -> _ResultT:
+        devices_before = self._devices.copy()
+        tasks_before = self._tasks.copy()
+        accounts_before = self._accounts.copy()
+        outbox_before = self._audit_outbox.copy()
+        try:
+            result = mutation()
+            self._persist_state()
+        except Exception:
+            self._devices = devices_before
+            self._tasks = tasks_before
+            self._accounts = accounts_before
+            self._audit_outbox = outbox_before
+            raise
+        return result
+
+    def _commit_with_audit(
         self,
         actor: ActorContext,
         action: str,
         resource_id: UUID,
+        mutation: Callable[[], _ResultT],
         **details: str,
-    ) -> None:
-        self._audit_sink.record(
-            AuditEvent(
-                action=action,
-                tenant_id=actor.tenant_id,
-                actor_user_id=actor.user_id,
-                resource_id=resource_id,
-                occurred_at=self._clock(),
-                details=tuple(sorted(details.items())),
-            )
+    ) -> _ResultT:
+        event = AuditEvent(
+            event_id=uuid4(),
+            action=action,
+            tenant_id=actor.tenant_id,
+            actor_user_id=actor.user_id,
+            resource_id=resource_id,
+            occurred_at=self._clock(),
+            details=tuple(sorted(details.items())),
         )
+
+        def mutate_and_enqueue() -> _ResultT:
+            result = mutation()
+            self._audit_outbox.append(event)
+            return result
+
+        devices_before = self._devices.copy()
+        tasks_before = self._tasks.copy()
+        accounts_before = self._accounts.copy()
+        outbox_before = self._audit_outbox.copy()
+        try:
+            result = mutate_and_enqueue()
+            self._persist_state()
+            if self._state_store is None:
+                self._audit_sink.record(event)
+                self._audit_outbox.pop()
+                return result
+        except Exception:
+            self._devices = devices_before
+            self._tasks = tasks_before
+            self._accounts = accounts_before
+            self._audit_outbox = outbox_before
+            raise
+        self._drain_audit_outbox()
+        return result
+
+    def _drain_audit_outbox(self) -> None:
+        if self._state_store is None:
+            return
+        while self._audit_outbox:
+            event = self._audit_outbox[0]
+            try:
+                self._audit_sink.record(event)
+            except Exception:
+                return
+            self._audit_outbox.pop(0)
+            try:
+                self._persist_state()
+            except Exception:
+                self._audit_outbox.insert(0, event)
+                return

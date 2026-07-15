@@ -15,6 +15,7 @@ from agent_platform.capabilities.social_operations.device_account_service import
     DeviceAccountService,
     DevicePlatform,
     DeviceStatus,
+    EmergencyStopReason,
     InMemoryAuditSink,
     LocalTaskStatus,
     ResourceNotFoundError,
@@ -139,7 +140,9 @@ def test_task_claim_is_device_scoped_and_emergency_stop_cancels_work(
     assert len(claimed) == 1
     assert claimed[0].status is LocalTaskStatus.CLAIMED
 
-    stopped = service.emergency_stop(actor(), DEVICE_ID, reason="operator_requested")
+    stopped = service.emergency_stop(
+        actor(), DEVICE_ID, reason=EmergencyStopReason.OPERATOR_REQUESTED
+    )
     assert stopped.status is DeviceStatus.EMERGENCY_STOPPED
     assert service.get_task(actor(), TASK_ID).status is LocalTaskStatus.CANCELLED
     with pytest.raises(AuthorizationError, match="emergency stop"):
@@ -191,6 +194,7 @@ def test_account_risk_requires_human_handoff_and_opens_circuit(
     assert bound.owner_user_id == USER_ID
     assert bound.device_id == DEVICE_ID
     assert bound.status is AccountStatus.AWAITING_SCAN
+    assert bound.circuit_open is True
 
     authenticated = service.report_account_health(
         actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
@@ -317,7 +321,7 @@ def test_operator_must_explicitly_resume_account_after_handoff(
 
     resumed = service.resume_account_after_handoff(actor(), ACCOUNT_ID)
     assert resumed.status is AccountStatus.AWAITING_SCAN
-    assert resumed.circuit_open is False
+    assert resumed.circuit_open is True
     assert resumed.session_revision == 1
     authenticated = service.report_account_health(
         actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
@@ -332,7 +336,9 @@ def test_platform_account_requires_supported_platform_enum() -> None:
 
 def test_reregister_cannot_clear_device_emergency_stop(service: DeviceAccountService) -> None:
     register_device(service)
-    service.emergency_stop(actor(), DEVICE_ID, reason="operator_requested")
+    service.emergency_stop(
+        actor(), DEVICE_ID, reason=EmergencyStopReason.OPERATOR_REQUESTED
+    )
 
     replay = service.register_device(
         actor(),

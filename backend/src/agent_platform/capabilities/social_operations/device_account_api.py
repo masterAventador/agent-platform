@@ -14,6 +14,7 @@ from agent_platform.capabilities.social_operations.device_account_service import
     ConflictError,
     DeviceAccountService,
     DevicePlatform,
+    EmergencyStopReason,
     ResourceNotFoundError,
     SocialPlatform,
 )
@@ -38,7 +39,9 @@ class HeartbeatRequest(_Request):
 
 
 class EmergencyStopRequest(_Request):
-    reason: str = Field(min_length=1, max_length=128)
+    reason: str = Field(
+        json_schema_extra={"enum": [reason.value for reason in EmergencyStopReason]}
+    )
 
 
 class EnqueueTaskRequest(_Request):
@@ -107,9 +110,16 @@ def create_device_account_router(
 
     @router.post("/devices/{device_id}/emergency-stop")
     def emergency_stop(device_id: UUID, request: EmergencyStopRequest) -> Any:
+        try:
+            reason = EmergencyStopReason(request.reason)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="invalid emergency stop reason",
+            ) from None
         return _call(
             lambda: service.emergency_stop(
-                actor_provider(), device_id, reason=request.reason
+                actor_provider(), device_id, reason=reason
             )
         )
 
@@ -184,6 +194,6 @@ def _call(operation: Callable[[], Any]) -> Any:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from None
     except ValueError as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(error),
         ) from None
