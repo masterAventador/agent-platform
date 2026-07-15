@@ -47,6 +47,8 @@ class AppSettings(BaseSettings):
     skill_storage_bucket: str = "agent-platform-skills"
     artifact_storage_bucket: str = "agent-platform-artifacts"
     artifact_storage_provider: Literal["minio", "tencent-cos"] = "minio"
+    artifact_storage_operation_lease_seconds: int = Field(default=300, ge=3, le=3_600)
+    artifact_storage_operation_heartbeat_seconds: float = Field(default=30.0, ge=1, le=300)
     cos_region: str | None = None
     cos_secret_id: SecretStr = SecretStr("")
     cos_secret_key: SecretStr = SecretStr("")
@@ -100,6 +102,11 @@ class AppSettings(BaseSettings):
             raise ValueError("runtime heartbeat must be shorter than runtime lease")
         if self.runtime_cancel_poll_initial_seconds > self.runtime_cancel_poll_max_seconds:
             raise ValueError("runtime cancel poll initial delay must not exceed maximum")
+        if (
+            self.artifact_storage_operation_heartbeat_seconds
+            >= self.artifact_storage_operation_lease_seconds
+        ):
+            raise ValueError("artifact storage heartbeat must be shorter than operation lease")
         if self.auth_cookie_same_site == "none" and not self.auth_cookie_secure:
             raise ValueError("SameSite=None auth cookies must also be Secure")
         if self.app_environment == "production" and (

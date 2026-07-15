@@ -33,7 +33,12 @@ from agent_platform.infrastructure.database.repositories.tools import (
 )
 from agent_platform.platform.artifacts.entities import Artifact, validate_workspace_path
 from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
-from agent_platform.platform.artifacts.services import ArtifactService, TaskAttachmentService
+from agent_platform.platform.artifacts.services import (
+    DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS,
+    DEFAULT_STORAGE_OPERATION_LEASE,
+    ArtifactService,
+    TaskAttachmentService,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -366,6 +371,10 @@ class ComposedRuntimeResolver:
         runtime_selector: PlatformRuntimeSelector,
         model_resolver: PlatformModelResolver | None = None,
         sandbox_ttl: timedelta = DEFAULT_RUN_SANDBOX_TTL,
+        artifact_operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
+        artifact_operation_heartbeat_interval: float = (
+            DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS
+        ),
         close_callback: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -376,6 +385,8 @@ class ComposedRuntimeResolver:
         self._runtime_selector = runtime_selector
         self._model_resolver = model_resolver or PlatformModelResolver()
         self._sandbox_ttl = sandbox_ttl
+        self._artifact_operation_lease_duration = artifact_operation_lease_duration
+        self._artifact_operation_heartbeat_interval = artifact_operation_heartbeat_interval
         self._close_callback = close_callback
 
     async def resolve(
@@ -546,9 +557,16 @@ class ComposedRuntimeResolver:
                             file_repository=SqlAlchemyFileRepository(artifact_session),
                             artifact_repository=SqlAlchemyArtifactRepository(artifact_session),
                             operation_repository=(
-                                SqlAlchemyArtifactStorageOperationRepository(artifact_session)
+                                SqlAlchemyArtifactStorageOperationRepository(
+                                    artifact_session,
+                                    heartbeat_session_factory=self._session_factory,
+                                )
                             ),
                             storage=artifact_storage,
+                            operation_lease_duration=(self._artifact_operation_lease_duration),
+                            operation_heartbeat_interval=(
+                                self._artifact_operation_heartbeat_interval
+                            ),
                         ).create_artifact(
                             tenant_id=run.tenant_id,
                             run_id=run.id,

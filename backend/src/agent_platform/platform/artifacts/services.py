@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID, uuid4
@@ -17,11 +18,79 @@ from agent_platform.platform.artifacts.ports import (
 
 logger = logging.getLogger(__name__)
 
-STORAGE_OPERATION_LEASE = timedelta(minutes=5)
+DEFAULT_STORAGE_OPERATION_LEASE = timedelta(minutes=5)
+DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS = 30.0
 
 
 class StorageOperationLeaseLost(RuntimeError):
     pass
+
+
+class _StorageOperationHeartbeat:
+    def __init__(
+        self,
+        *,
+        repository: StorageOperationRepository,
+        operation: StorageOperation,
+        lease_duration: timedelta,
+        interval_seconds: float,
+        clock: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]],
+    ) -> None:
+        self._repository = repository
+        self._operation = operation
+        if operation.lease_owner is None:
+            raise ValueError("storage operation heartbeat requires an owner")
+        self._lease_owner = operation.lease_owner
+        self._lease_duration = lease_duration
+        self._interval_seconds = interval_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._phase = operation.phase
+        self._lock = asyncio.Lock()
+        self._failure: BaseException | None = None
+        self._task = asyncio.create_task(self._run())
+
+    @property
+    def phase(self) -> str:
+        return self._phase
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        return self._lock
+
+    def set_phase(self, phase: str) -> None:
+        self._phase = phase
+
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise StorageOperationLeaseLost(
+                "artifact storage operation lease heartbeat failed"
+            ) from self._failure
+
+    async def stop(self) -> None:
+        if not self._task.done():
+            self._task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._task
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                await self._sleep(self._interval_seconds)
+                async with self._lock:
+                    renewed = await self._repository.renew_lease(
+                        operation_id=self._operation.id,
+                        expected_phase=self._phase,
+                        lease_owner=self._lease_owner,
+                        reconcile_after=self._clock() + self._lease_duration,
+                    )
+                    if not renewed:
+                        raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            self._failure = error
 
 
 class ArtifactService:
@@ -32,11 +101,25 @@ class ArtifactService:
         artifact_repository: ArtifactRepository | None = None,
         operation_repository: StorageOperationRepository | None = None,
         storage: ArtifactStorageProvider,
+        operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
+        operation_heartbeat_interval: float = DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS,
+        clock: Callable[[], datetime] | None = None,
+        heartbeat_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        if operation_lease_duration <= timedelta(0):
+            raise ValueError("storage operation lease must be positive")
+        if operation_heartbeat_interval <= 0:
+            raise ValueError("storage operation heartbeat must be positive")
+        if operation_heartbeat_interval >= operation_lease_duration.total_seconds():
+            raise ValueError("storage operation heartbeat must be shorter than lease")
         self._files = file_repository
         self._artifacts = artifact_repository
         self._operations = operation_repository
         self._storage = storage
+        self._operation_lease_duration = operation_lease_duration
+        self._operation_heartbeat_interval = operation_heartbeat_interval
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._heartbeat_sleep = heartbeat_sleep
 
     async def upload_file(
         self,
@@ -64,9 +147,12 @@ class ArtifactService:
                 entity_id=file.id,
                 storage_key=file.storage_key,
                 lease_owner=lease_owner,
+                now=self._clock(),
+                lease_duration=self._operation_lease_duration,
             )
             await self._operations.add(operation)
             await commit()
+            heartbeat = self._start_heartbeat(operation)
             try:
                 await self._await_storage(
                     self._storage.put(
@@ -75,35 +161,39 @@ class ArtifactService:
                         media_type=file.media_type,
                     )
                 )
+                heartbeat.raise_if_failed()
+                await self._advance_foreground_phase(
+                    operation=operation,
+                    expected_phase="intent",
+                    phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    commit=commit,
+                )
+
+                async def add_file_metadata() -> None:
+                    await self._files.add(file)
+
+                await self._complete_foreground_operation(
+                    operation=operation,
+                    expected_phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    apply_metadata=add_file_metadata,
+                    commit=commit,
+                )
             except BaseException:
+                await asyncio.shield(heartbeat.stop())
                 await asyncio.shield(
                     self._release_for_reconciliation(
                         operation=operation,
-                        expected_phase="intent",
+                        expected_phase=heartbeat.phase,
                         lease_owner=lease_owner,
                         commit=commit,
                     )
                 )
                 raise
-            await self._advance_foreground_phase(
-                operation=operation,
-                expected_phase="intent",
-                phase="storage_applied",
-                lease_owner=lease_owner,
-                commit=commit,
-            )
-            await self._lock_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await self._files.add(file)
-            await self._complete_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await commit()
+            await heartbeat.stop()
             return file
         await self._storage.put(
             key=file.storage_key,
@@ -159,9 +249,12 @@ class ArtifactService:
                 entity_id=artifact.id,
                 storage_key=artifact.storage_key,
                 lease_owner=lease_owner,
+                now=self._clock(),
+                lease_duration=self._operation_lease_duration,
             )
             await self._operations.add(operation)
             await commit()
+            heartbeat = self._start_heartbeat(operation)
             try:
                 await self._await_storage(
                     self._storage.put(
@@ -170,37 +263,41 @@ class ArtifactService:
                         media_type=artifact.media_type,
                     )
                 )
+                heartbeat.raise_if_failed()
+                await self._advance_foreground_phase(
+                    operation=operation,
+                    expected_phase="intent",
+                    phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    commit=commit,
+                )
+
+                async def add_artifact_metadata() -> None:
+                    await repository.add(artifact)
+                    if before_commit is not None:
+                        await before_commit(artifact)
+
+                await self._complete_foreground_operation(
+                    operation=operation,
+                    expected_phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    apply_metadata=add_artifact_metadata,
+                    commit=commit,
+                )
             except BaseException:
+                await asyncio.shield(heartbeat.stop())
                 await asyncio.shield(
                     self._release_for_reconciliation(
                         operation=operation,
-                        expected_phase="intent",
+                        expected_phase=heartbeat.phase,
                         lease_owner=lease_owner,
                         commit=commit,
                     )
                 )
                 raise
-            await self._advance_foreground_phase(
-                operation=operation,
-                expected_phase="intent",
-                phase="storage_applied",
-                lease_owner=lease_owner,
-                commit=commit,
-            )
-            await self._lock_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await repository.add(artifact)
-            if before_commit is not None:
-                await before_commit(artifact)
-            await self._complete_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await commit()
+            await heartbeat.stop()
             return artifact
         await self._storage.put(
             key=artifact.storage_key,
@@ -247,6 +344,8 @@ class ArtifactService:
                 storage_key=artifact.storage_key,
                 lease_owner=lease_owner,
                 phase="metadata_applied",
+                now=self._clock(),
+                lease_duration=self._operation_lease_duration,
             )
             await self._operations.add(operation)
             deleted = await repository.delete(
@@ -256,36 +355,42 @@ class ArtifactService:
             if not deleted:
                 raise RuntimeError("artifact metadata disappeared during delete")
             await commit()
+            heartbeat = self._start_heartbeat(operation)
             try:
                 await self._await_storage(self._storage.delete(key=artifact.storage_key))
+                heartbeat.raise_if_failed()
+                await self._advance_foreground_phase(
+                    operation=operation,
+                    expected_phase="metadata_applied",
+                    phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    commit=commit,
+                )
+
+                async def metadata_already_deleted() -> None:
+                    return None
+
+                await self._complete_foreground_operation(
+                    operation=operation,
+                    expected_phase="storage_applied",
+                    lease_owner=lease_owner,
+                    heartbeat=heartbeat,
+                    apply_metadata=metadata_already_deleted,
+                    commit=commit,
+                )
             except BaseException:
+                await asyncio.shield(heartbeat.stop())
                 await asyncio.shield(
                     self._release_for_reconciliation(
                         operation=operation,
-                        expected_phase="metadata_applied",
+                        expected_phase=heartbeat.phase,
                         lease_owner=lease_owner,
                         commit=commit,
                     )
                 )
                 raise
-            await self._advance_foreground_phase(
-                operation=operation,
-                expected_phase="metadata_applied",
-                phase="storage_applied",
-                lease_owner=lease_owner,
-                commit=commit,
-            )
-            await self._lock_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await self._complete_foreground_operation(
-                operation=operation,
-                expected_phase="storage_applied",
-                lease_owner=lease_owner,
-            )
-            await commit()
+            await heartbeat.stop()
             return
         content = await self.read_artifact(artifact)
         await self._storage.delete(key=artifact.storage_key)
@@ -323,11 +428,11 @@ class ArtifactService:
         if self._operations is None:
             return 0
         lease_owner = uuid4()
-        claimed_at = datetime.now(UTC)
+        claimed_at = self._clock()
         operations = await self._operations.claim_pending(
             lease_owner=lease_owner,
             claimed_at=claimed_at,
-            lease_expires_at=claimed_at + STORAGE_OPERATION_LEASE,
+            lease_expires_at=claimed_at + self._operation_lease_duration,
             limit=limit,
         )
         if not operations:
@@ -336,6 +441,7 @@ class ArtifactService:
         await commit()
         reconciled = 0
         for operation in operations:
+            heartbeat = self._start_heartbeat(operation)
             try:
                 if operation.action == "put":
                     exists = await self._entity_exists(operation)
@@ -351,7 +457,24 @@ class ArtifactService:
                         self._storage.delete(key=operation.storage_key)
                     )
                     status = "completed"
+                heartbeat.raise_if_failed()
+                async with heartbeat.lock:
+                    heartbeat.raise_if_failed()
+                    updated = await self._operations.mark_status(
+                        operation_id=operation.id,
+                        expected_phase=operation.phase,
+                        lease_owner=lease_owner,
+                        status=status,
+                        reconcile_after=(
+                            self._clock() + self._operation_lease_duration
+                            if status == "compensated"
+                            else None
+                        ),
+                    )
+                    if updated:
+                        await commit()
             except BaseException:
+                await asyncio.shield(heartbeat.stop())
                 await asyncio.shield(
                     self._release_for_reconciliation(
                         operation=operation,
@@ -361,16 +484,10 @@ class ArtifactService:
                     )
                 )
                 raise
-            updated = await self._operations.mark_status(
-                operation_id=operation.id,
-                expected_phase=operation.phase,
-                lease_owner=lease_owner,
-                status=status,
-            )
+            await heartbeat.stop()
             if not updated:
                 # 所有权已被别的进程接管时，禁止陈旧协调器覆盖新状态。
                 continue
-            await commit()
             reconciled += 1
         return reconciled
 
@@ -381,19 +498,23 @@ class ArtifactService:
         expected_phase: str,
         phase: str,
         lease_owner: UUID,
+        heartbeat: _StorageOperationHeartbeat,
         commit: Callable[[], Awaitable[None]],
     ) -> None:
         operations = self._required_operation_repository()
-        updated = await operations.advance_phase(
-            operation_id=operation.id,
-            expected_phase=expected_phase,
-            lease_owner=lease_owner,
-            phase=phase,
-            reconcile_after=datetime.now(UTC) + STORAGE_OPERATION_LEASE,
-        )
-        if not updated:
-            raise StorageOperationLeaseLost("artifact storage operation lease was lost")
-        await commit()
+        async with heartbeat.lock:
+            heartbeat.raise_if_failed()
+            updated = await operations.advance_phase(
+                operation_id=operation.id,
+                expected_phase=expected_phase,
+                lease_owner=lease_owner,
+                phase=phase,
+                reconcile_after=self._clock() + self._operation_lease_duration,
+            )
+            if not updated:
+                raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+            await commit()
+            heartbeat.set_phase(phase)
 
     async def _lock_foreground_operation(
         self,
@@ -406,7 +527,7 @@ class ArtifactService:
             operation_id=operation.id,
             expected_phase=expected_phase,
             lease_owner=lease_owner,
-            now=datetime.now(UTC),
+            now=self._clock(),
         )
         if not locked:
             raise StorageOperationLeaseLost("artifact storage operation lease was lost")
@@ -417,15 +538,27 @@ class ArtifactService:
         operation: StorageOperation,
         expected_phase: str,
         lease_owner: UUID,
+        heartbeat: _StorageOperationHeartbeat,
+        apply_metadata: Callable[[], Awaitable[None]],
+        commit: Callable[[], Awaitable[None]],
     ) -> None:
-        updated = await self._required_operation_repository().mark_status(
-            operation_id=operation.id,
-            expected_phase=expected_phase,
-            lease_owner=lease_owner,
-            status="completed",
-        )
-        if not updated:
-            raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+        async with heartbeat.lock:
+            heartbeat.raise_if_failed()
+            await self._lock_foreground_operation(
+                operation=operation,
+                expected_phase=expected_phase,
+                lease_owner=lease_owner,
+            )
+            await apply_metadata()
+            updated = await self._required_operation_repository().mark_status(
+                operation_id=operation.id,
+                expected_phase=expected_phase,
+                lease_owner=lease_owner,
+                status="completed",
+            )
+            if not updated:
+                raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+            await commit()
 
     async def _release_for_reconciliation(
         self,
@@ -439,10 +572,20 @@ class ArtifactService:
             operation_id=operation.id,
             expected_phase=expected_phase,
             lease_owner=lease_owner,
-            reconcile_after=datetime.now(UTC),
+            reconcile_after=self._clock(),
         )
         if released:
             await commit()
+
+    def _start_heartbeat(self, operation: StorageOperation) -> _StorageOperationHeartbeat:
+        return _StorageOperationHeartbeat(
+            repository=self._required_operation_repository(),
+            operation=operation,
+            lease_duration=self._operation_lease_duration,
+            interval_seconds=self._operation_heartbeat_interval,
+            clock=self._clock,
+            sleep=self._heartbeat_sleep,
+        )
 
     async def _entity_exists(self, operation: StorageOperation) -> bool:
         if operation.entity_kind == "file":

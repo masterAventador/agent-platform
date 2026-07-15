@@ -11,12 +11,14 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    and_,
     delete,
+    or_,
     select,
     update,
 )
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agent_platform.infrastructure.database.base import Base
@@ -264,8 +266,14 @@ class SqlAlchemyArtifactRepository:
 
 
 class SqlAlchemyArtifactStorageOperationRepository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        heartbeat_session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
         self._session = session
+        self._heartbeat_session_factory = heartbeat_session_factory
 
     async def add(self, operation: StorageOperation) -> None:
         self._session.add(ArtifactStorageOperationRecord(**asdict(operation)))
@@ -319,6 +327,40 @@ class SqlAlchemyArtifactStorageOperationRepository:
         )
         return isinstance(result, CursorResult) and result.rowcount == 1
 
+    async def renew_lease(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        reconcile_after: datetime,
+    ) -> bool:
+        if self._heartbeat_session_factory is not None:
+            async with self._heartbeat_session_factory() as session:
+                renewed = await SqlAlchemyArtifactStorageOperationRepository(session).renew_lease(
+                    operation_id=operation_id,
+                    expected_phase=expected_phase,
+                    lease_owner=lease_owner,
+                    reconcile_after=reconcile_after,
+                )
+                if renewed:
+                    await session.commit()
+                return renewed
+        result = await self._session.execute(
+            update(ArtifactStorageOperationRecord)
+            .where(
+                ArtifactStorageOperationRecord.id == operation_id,
+                ArtifactStorageOperationRecord.status.in_(("pending", "compensated")),
+                ArtifactStorageOperationRecord.phase == expected_phase,
+                ArtifactStorageOperationRecord.lease_owner == lease_owner,
+            )
+            .values(
+                reconcile_after=reconcile_after,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        return isinstance(result, CursorResult) and result.rowcount == 1
+
     async def mark_status(
         self,
         *,
@@ -326,20 +368,25 @@ class SqlAlchemyArtifactStorageOperationRepository:
         expected_phase: str,
         lease_owner: UUID,
         status: str,
+        reconcile_after: datetime | None = None,
     ) -> bool:
+        expected_statuses = ("pending", "compensated") if status == "compensated" else ("pending",)
+        values: dict[str, object] = {
+            "status": status,
+            "lease_owner": None,
+            "updated_at": datetime.now(UTC),
+        }
+        if reconcile_after is not None:
+            values["reconcile_after"] = reconcile_after
         result = await self._session.execute(
             update(ArtifactStorageOperationRecord)
             .where(
                 ArtifactStorageOperationRecord.id == operation_id,
-                ArtifactStorageOperationRecord.status == "pending",
+                ArtifactStorageOperationRecord.status.in_(expected_statuses),
                 ArtifactStorageOperationRecord.phase == expected_phase,
                 ArtifactStorageOperationRecord.lease_owner == lease_owner,
             )
-            .values(
-                status=status,
-                lease_owner=None,
-                updated_at=datetime.now(UTC),
-            )
+            .values(**values)
         )
         return isinstance(result, CursorResult) and result.rowcount == 1
 
@@ -355,7 +402,7 @@ class SqlAlchemyArtifactStorageOperationRepository:
             update(ArtifactStorageOperationRecord)
             .where(
                 ArtifactStorageOperationRecord.id == operation_id,
-                ArtifactStorageOperationRecord.status == "pending",
+                ArtifactStorageOperationRecord.status.in_(("pending", "compensated")),
                 ArtifactStorageOperationRecord.phase == expected_phase,
                 ArtifactStorageOperationRecord.lease_owner == lease_owner,
             )
@@ -379,7 +426,13 @@ class SqlAlchemyArtifactStorageOperationRepository:
             await self._session.execute(
                 select(ArtifactStorageOperationRecord)
                 .where(
-                    ArtifactStorageOperationRecord.status == "pending",
+                    or_(
+                        ArtifactStorageOperationRecord.status == "pending",
+                        and_(
+                            ArtifactStorageOperationRecord.status == "compensated",
+                            ArtifactStorageOperationRecord.action == "put",
+                        ),
+                    ),
                     ArtifactStorageOperationRecord.reconcile_after <= claimed_at,
                 )
                 .order_by(

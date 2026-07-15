@@ -52,3 +52,11 @@ def test_production_auth_transport_accepts_secure_cross_site_cookie() -> None:
 def test_tencent_cos_requires_region_and_credentials() -> None:
     with pytest.raises(ValidationError):
         AppSettings(artifact_storage_provider="tencent-cos")
+
+
+def test_artifact_storage_heartbeat_must_be_shorter_than_lease() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(
+            artifact_storage_operation_lease_seconds=5,
+            artifact_storage_operation_heartbeat_seconds=5,
+        )

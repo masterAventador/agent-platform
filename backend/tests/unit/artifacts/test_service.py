@@ -37,6 +37,9 @@ class FailableStorage(MemoryStorage):
         self.put_started = asyncio.Event()
         self.release_put = asyncio.Event()
         self.block_put = False
+        self.delete_started = asyncio.Event()
+        self.release_delete = asyncio.Event()
+        self.block_delete = False
 
     async def put(self, *, key: str, content: bytes, media_type: str) -> None:
         self.put_started.set()
@@ -47,6 +50,9 @@ class FailableStorage(MemoryStorage):
         await super().put(key=key, content=content, media_type=media_type)
 
     async def delete(self, *, key: str) -> None:
+        self.delete_started.set()
+        if self.block_delete:
+            await self.release_delete.wait()
         if self.fail_delete:
             raise RuntimeError("object delete failed")
         await super().delete(key=key)
@@ -55,6 +61,7 @@ class FailableStorage(MemoryStorage):
 class MemoryOperationRepository:
     def __init__(self) -> None:
         self.operations: dict[UUID, StorageOperation] = {}
+        self.renewed = asyncio.Event()
 
     async def add(self, operation: StorageOperation) -> None:
         self.operations[operation.id] = operation
@@ -99,13 +106,13 @@ class MemoryOperationRepository:
         )
         return True
 
-    async def mark_status(
+    async def renew_lease(
         self,
         *,
         operation_id: UUID,
         expected_phase: str,
         lease_owner: UUID,
-        status: str,
+        reconcile_after: datetime,
     ) -> bool:
         operation = self.operations[operation_id]
         if not (
@@ -116,8 +123,34 @@ class MemoryOperationRepository:
             return False
         self.operations[operation_id] = replace(
             operation,
+            reconcile_after=reconcile_after,
+            updated_at=datetime.now(UTC),
+        )
+        self.renewed.set()
+        return True
+
+    async def mark_status(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        status: str,
+        reconcile_after: datetime | None = None,
+    ) -> bool:
+        operation = self.operations[operation_id]
+        if not (
+            operation.status
+            in ({"pending", "compensated"} if status == "compensated" else {"pending"})
+            and operation.phase == expected_phase
+            and operation.lease_owner == lease_owner
+        ):
+            return False
+        self.operations[operation_id] = replace(
+            operation,
             status=status,
             lease_owner=None,
+            reconcile_after=reconcile_after or operation.reconcile_after,
             updated_at=datetime.now(UTC),
         )
         return True
@@ -155,7 +188,10 @@ class MemoryOperationRepository:
     ) -> list[StorageOperation]:
         claimed: list[StorageOperation] = []
         for operation_id, operation in self.operations.items():
-            if operation.status != "pending" or operation.reconcile_after > claimed_at:
+            is_reconcilable = operation.status == "pending" or (
+                operation.status == "compensated" and operation.action == "put"
+            )
+            if not is_reconcilable or operation.reconcile_after > claimed_at:
                 continue
             claimed_operation = replace(
                 operation,
@@ -299,6 +335,25 @@ class MemoryWorkspace:
 
     async def read_file(self, *, path: str) -> bytes:
         return self.files[path]
+
+
+class MutableClock:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class ControlledHeartbeat:
+    def __init__(self) -> None:
+        self._ticks: asyncio.Queue[None] = asyncio.Queue()
+
+    async def sleep(self, _: float) -> None:
+        await self._ticks.get()
+
+    def tick(self) -> None:
+        self._ticks.put_nowait(None)
 
 
 @pytest.mark.asyncio
@@ -732,3 +787,167 @@ async def test_fresh_put_is_not_compensated_while_foreground_metadata_commit_is_
     assert operation.status == "completed"
     assert state.artifacts == {artifact.id: artifact}
     assert storage.objects == {artifact.storage_key: b"done"}
+
+
+@pytest.mark.asyncio
+async def test_active_put_renews_persistent_lease_before_reconciler_can_claim() -> None:
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    clock = MutableClock(now)
+    heartbeat = ControlledHeartbeat()
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    storage.block_put = True
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=5),
+        operation_heartbeat_interval=1,
+        clock=clock,
+        heartbeat_sleep=heartbeat.sleep,
+    )
+
+    async def commit() -> None:
+        return None
+
+    create_task = asyncio.create_task(
+        service.create_artifact(
+            tenant_id=uuid4(),
+            run_id=uuid4(),
+            created_by=uuid4(),
+            name="result.txt",
+            media_type="text/plain",
+            content=b"done",
+            commit=commit,
+        )
+    )
+    await storage.put_started.wait()
+    original_expiry = next(iter(operations.operations.values())).reconcile_after
+    clock.now = original_expiry + timedelta(seconds=1)
+    heartbeat.tick()
+    await operations.renewed.wait()
+
+    reconciled = await service.reconcile_pending(commit=commit)
+    storage.release_put.set()
+    artifact = await create_task
+
+    operation = next(iter(operations.operations.values()))
+    assert reconciled == 0
+    assert operation.status == "completed"
+    assert repository.artifacts == {artifact.id: artifact}
+    assert storage.objects == {artifact.storage_key: b"done"}
+
+
+@pytest.mark.asyncio
+async def test_stopped_heartbeat_tombstone_cleans_late_put_after_process_resumes() -> None:
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    clock = MutableClock(now)
+    heartbeat = ControlledHeartbeat()
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    storage.block_put = True
+    foreground = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=5),
+        operation_heartbeat_interval=1,
+        clock=clock,
+        heartbeat_sleep=heartbeat.sleep,
+    )
+
+    async def commit() -> None:
+        return None
+
+    create_task = asyncio.create_task(
+        foreground.create_artifact(
+            tenant_id=uuid4(),
+            run_id=uuid4(),
+            created_by=uuid4(),
+            name="result.txt",
+            media_type="text/plain",
+            content=b"done",
+            commit=commit,
+        )
+    )
+    await storage.put_started.wait()
+    operation = next(iter(operations.operations.values()))
+    clock.now = operation.reconcile_after + timedelta(seconds=1)
+
+    reconciler = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=5),
+        operation_heartbeat_interval=1,
+        clock=clock,
+        heartbeat_sleep=heartbeat.sleep,
+    )
+    assert await reconciler.reconcile_pending(commit=commit) == 1
+    assert operations.operations[operation.id].status == "compensated"
+
+    storage.release_put.set()
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        await create_task
+    assert storage.objects == {operation.storage_key: b"done"}
+
+    clock.now = operations.operations[operation.id].reconcile_after + timedelta(seconds=1)
+    assert await reconciler.reconcile_pending(commit=commit) == 1
+    assert operations.operations[operation.id].status == "compensated"
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_active_delete_renews_lease_until_object_and_metadata_are_consistent() -> None:
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    clock = MutableClock(now)
+    heartbeat = ControlledHeartbeat()
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=5),
+        operation_heartbeat_interval=1,
+        clock=clock,
+        heartbeat_sleep=heartbeat.sleep,
+    )
+
+    async def commit() -> None:
+        return None
+
+    artifact = await service.create_artifact(
+        tenant_id=uuid4(),
+        run_id=uuid4(),
+        created_by=uuid4(),
+        name="result.txt",
+        media_type="text/plain",
+        content=b"done",
+        commit=commit,
+    )
+    operations.renewed.clear()
+    storage.block_delete = True
+    delete_task = asyncio.create_task(service.delete_artifact(artifact, commit=commit))
+    await storage.delete_started.wait()
+    delete_operation = next(
+        operation for operation in operations.operations.values() if operation.action == "delete"
+    )
+    clock.now = delete_operation.reconcile_after + timedelta(seconds=1)
+    heartbeat.tick()
+    await operations.renewed.wait()
+
+    assert await service.reconcile_pending(commit=commit) == 0
+    storage.release_delete.set()
+    await delete_task
+
+    assert operations.operations[delete_operation.id].status == "completed"
+    assert repository.artifacts == {}
+    assert storage.objects == {}

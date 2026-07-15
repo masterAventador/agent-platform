@@ -354,7 +354,9 @@ class PlatformContainerContractTest(unittest.TestCase):
         for label in ("demo@example.com", "发布员工", "发起任务", "已完成", "工作台"):
             self.assertIn(label, desktop_spec)
 
-    def test_mvp_web_acceptance_reuses_demo_account_and_exercises_real_attachment_input(self) -> None:
+    def test_mvp_web_acceptance_reuses_demo_account_and_exercises_real_attachment_input(
+        self,
+    ) -> None:
         spec = self.read("frontend/e2e/mvp-profile.spec.ts")
         auth_helper = self.read("frontend/e2e/helpers/auth.ts")
         acceptance = self.read("infra/platform/test-mvp-profile.sh")

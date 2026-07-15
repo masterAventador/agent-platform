@@ -443,7 +443,7 @@ TEST_DATABASE_URL="postgresql+asyncpg://agent_platform:${POSTGRES_PASSWORD}@127.
   "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_artifact_repositories_enforce_composite_tenant_boundaries" \
   "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protected"
 unset POSTGRES_PASSWORD
-printf 'MVP artifact tenant boundary and Saga claim/CAS passed under real PostgreSQL concurrency\n'
+printf 'MVP artifact tenant boundary and Saga claim/CAS/renewal passed under real PostgreSQL concurrency\n'
 
 docker compose -p "${PROFILE_NAME}-litellm" \
   --env-file "${RUNTIME_DIR}/litellm.env" \

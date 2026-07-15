@@ -379,6 +379,12 @@ def _build_runtime_resolver(
             checkpointer=checkpointer,
         ),
         sandbox_ttl=timedelta(seconds=settings.sandbox_ttl_seconds),
+        artifact_operation_lease_duration=timedelta(
+            seconds=settings.artifact_storage_operation_lease_seconds
+        ),
+        artifact_operation_heartbeat_interval=(
+            settings.artifact_storage_operation_heartbeat_seconds
+        ),
         close_callback=adapters.aclose,
         model_resolver=model_resolver,
     )

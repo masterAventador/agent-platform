@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 from typing import cast
 
 from fastapi import FastAPI, Request, status
@@ -119,9 +120,18 @@ def create_app(
                         file_repository=SqlAlchemyFileRepository(session),
                         artifact_repository=SqlAlchemyArtifactRepository(session),
                         operation_repository=(
-                            SqlAlchemyArtifactStorageOperationRepository(session)
+                            SqlAlchemyArtifactStorageOperationRepository(
+                                session,
+                                heartbeat_session_factory=configured_session_factory,
+                            )
                         ),
                         storage=configured_artifact_storage,
+                        operation_lease_duration=timedelta(
+                            seconds=app_settings.artifact_storage_operation_lease_seconds
+                        ),
+                        operation_heartbeat_interval=(
+                            app_settings.artifact_storage_operation_heartbeat_seconds
+                        ),
                     ).reconcile_pending(commit=session.commit)
             except asyncio.CancelledError:
                 raise

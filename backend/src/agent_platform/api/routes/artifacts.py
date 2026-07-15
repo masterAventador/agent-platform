@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Annotated
 from unicodedata import normalize
@@ -130,8 +131,17 @@ async def upload_file(
         content = await file.read(MAX_FILE_SIZE_BYTES + 1)
         service = ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
-            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(
+                session,
+                heartbeat_session_factory=request.app.state.session_factory,
+            ),
             storage=request.app.state.artifact_storage,
+            operation_lease_duration=timedelta(
+                seconds=request.app.state.settings.artifact_storage_operation_lease_seconds
+            ),
+            operation_heartbeat_interval=(
+                request.app.state.settings.artifact_storage_operation_heartbeat_seconds
+            ),
         )
         try:
             entity = await service.upload_file(
@@ -287,7 +297,16 @@ async def delete_artifact(
         await ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
             artifact_repository=repository,
-            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(
+                session,
+                heartbeat_session_factory=request.app.state.session_factory,
+            ),
             storage=request.app.state.artifact_storage,
+            operation_lease_duration=timedelta(
+                seconds=request.app.state.settings.artifact_storage_operation_lease_seconds
+            ),
+            operation_heartbeat_interval=(
+                request.app.state.settings.artifact_storage_operation_heartbeat_seconds
+            ),
         ).delete_artifact(artifact, commit=session.commit)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

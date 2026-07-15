@@ -64,6 +64,15 @@ class StorageOperationRepository(Protocol):
         reconcile_after: datetime,
     ) -> bool: ...
 
+    async def renew_lease(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        reconcile_after: datetime,
+    ) -> bool: ...
+
     async def mark_status(
         self,
         *,
@@ -71,6 +80,7 @@ class StorageOperationRepository(Protocol):
         expected_phase: str,
         lease_owner: UUID,
         status: str,
+        reconcile_after: datetime | None = None,
     ) -> bool: ...
 
     async def release_claim(

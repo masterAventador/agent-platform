@@ -308,6 +308,7 @@ async def test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protec
 
         async with sessions() as cas_session:
             repository = SqlAlchemyArtifactStorageOperationRepository(cas_session)
+            rescan_at = datetime.now(UTC) + timedelta(seconds=5)
             assert not await repository.mark_status(
                 operation_id=operation.id,
                 expected_phase="intent",
@@ -319,7 +320,46 @@ async def test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protec
                 expected_phase="intent",
                 lease_owner=first_reconciler,
                 status="compensated",
+                reconcile_after=rescan_at,
             )
             await cas_session.commit()
+
+        async with sessions() as rescan_session:
+            repository = SqlAlchemyArtifactStorageOperationRepository(rescan_session)
+            tombstone_owner = uuid4()
+            rescanned = await repository.claim_pending(
+                lease_owner=tombstone_owner,
+                claimed_at=rescan_at + timedelta(seconds=1),
+                lease_expires_at=rescan_at + timedelta(seconds=6),
+                limit=10,
+            )
+            assert [item.id for item in rescanned] == [operation.id]
+            renewed_until = rescan_at + timedelta(minutes=1)
+            assert await repository.renew_lease(
+                operation_id=operation.id,
+                expected_phase="intent",
+                lease_owner=tombstone_owner,
+                reconcile_after=renewed_until,
+            )
+            assert not await repository.renew_lease(
+                operation_id=operation.id,
+                expected_phase="intent",
+                lease_owner=uuid4(),
+                reconcile_after=renewed_until,
+            )
+            await rescan_session.commit()
+
+        async with sessions() as renewed_session:
+            repository = SqlAlchemyArtifactStorageOperationRepository(renewed_session)
+            assert (
+                await repository.claim_pending(
+                    lease_owner=uuid4(),
+                    claimed_at=rescan_at + timedelta(seconds=10),
+                    lease_expires_at=rescan_at + timedelta(minutes=2),
+                    limit=10,
+                )
+                == []
+            )
+            await renewed_session.rollback()
     finally:
         await engine.dispose()
