@@ -18,7 +18,7 @@ export interface WorkspaceFixture {
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const backendRoot = resolve(frontendRoot, '../backend')
 const databaseUrl =
-  'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_e2e'
+  `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${process.env.POSTGRES_PORT ?? '5432'}/agent_platform_e2e`
 
 export function prepareWorkspaceFixture(email: string): WorkspaceFixture {
   const output = execFileSync(

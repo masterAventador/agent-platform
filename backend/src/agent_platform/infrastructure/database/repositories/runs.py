@@ -58,8 +58,18 @@ class RunRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    idempotency_key: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
-    __table_args__ = (UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "created_by",
+            "employee_id",
+            "idempotency_key",
+            name="uq_runs_creation_idempotency",
+        ),
+    )
 
 
 class RunEventRecord(Base):
@@ -129,6 +139,7 @@ class SqlAlchemyRunRepository:
                 finished_at=run.finished_at,
                 error_code=run.error_code,
                 error_message=run.error_message,
+                idempotency_key=run.idempotency_key,
             )
         )
         await self._session.flush()
@@ -138,6 +149,26 @@ class SqlAlchemyRunRepository:
 
     async def get_for_update(self, *, tenant_id: UUID, run_id: UUID) -> Run | None:
         return await self._get(tenant_id=tenant_id, run_id=run_id, for_update=True)
+
+    async def get_by_idempotency_key(
+        self,
+        *,
+        tenant_id: UUID,
+        created_by: UUID,
+        employee_id: UUID,
+        idempotency_key: UUID,
+    ) -> Run | None:
+        record = (
+            await self._session.execute(
+                select(RunRecord).where(
+                    RunRecord.tenant_id == tenant_id,
+                    RunRecord.created_by == created_by,
+                    RunRecord.employee_id == employee_id,
+                    RunRecord.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        return self._to_entity(record) if record is not None else None
 
     async def _get(
         self,
@@ -232,6 +263,7 @@ class SqlAlchemyRunRepository:
             finished_at=cls._as_utc(record.finished_at) if record.finished_at else None,
             error_code=record.error_code,
             error_message=record.error_message,
+            idempotency_key=record.idempotency_key,
         )
 
     @staticmethod

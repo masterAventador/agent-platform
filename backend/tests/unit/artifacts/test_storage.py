@@ -6,7 +6,9 @@ from agent_platform.config import AppSettings
 from agent_platform.infrastructure.object_storage.artifacts import (
     MinioArtifactStorageProvider,
     TencentCosArtifactProvider,
+    _create_tencent_cos_client,
     create_artifact_storage_provider,
+    create_bounded_minio_client,
 )
 
 
@@ -127,4 +129,35 @@ def test_storage_factory_builds_tencent_cos_from_production_settings() -> None:
         "secret_key": "secret-key",
         "token": None,
         "scheme": "https",
+        "request_timeout": 30.0,
     }
+
+
+def test_minio_sdk_requests_fit_inside_the_service_operation_timeout() -> None:
+    client = create_bounded_minio_client(AppSettings(artifact_storage_request_timeout_seconds=30))
+    timeout = client._http.connection_pool_kw["timeout"]
+
+    assert timeout.total == 10
+    assert client._http.connection_pool_kw["retries"].total is False
+
+
+def test_tencent_cos_sdk_disables_retries_that_outlive_the_service_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_client(config: object, retry: int = 3) -> FakeCos:
+        captured.update(config=config, retry=retry)
+        return FakeCos()
+
+    monkeypatch.setattr("qcloud_cos.CosS3Client", fake_client)
+    _create_tencent_cos_client(
+        region="ap-beijing",
+        secret_id="secret-id",
+        secret_key="secret-key",
+        token=None,
+        scheme="https",
+        request_timeout=30,
+    )
+
+    assert captured["retry"] == 0

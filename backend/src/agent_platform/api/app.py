@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from fastapi import FastAPI, Request, status
@@ -12,6 +12,9 @@ from minio import Minio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.api.middleware.request_body_limit import (
+    FileUploadRequestBodyLimitMiddleware,
+)
 from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
@@ -32,6 +35,7 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
 )
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
+    create_bounded_minio_client,
 )
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
@@ -94,12 +98,7 @@ def create_app(
 
     minio_client: Minio | None = None
     if skill_storage is None or artifact_storage is None:
-        minio_client = Minio(
-            app_settings.minio_endpoint,
-            access_key=app_settings.minio_access_key,
-            secret_key=app_settings.minio_secret_key,
-            secure=app_settings.minio_secure,
-        )
+        minio_client = create_bounded_minio_client(app_settings)
     if skill_storage is None:
         skill_storage = MinioSkillStorage(
             client=cast(MinioClient, minio_client), bucket=app_settings.skill_storage_bucket
@@ -113,10 +112,11 @@ def create_app(
     configured_artifact_storage = artifact_storage
 
     async def reconcile_artifact_storage() -> None:
+        next_unbound_cleanup_at = 0.0
         while True:
             try:
                 async with configured_session_factory() as session:
-                    await ArtifactService(
+                    service = ArtifactService(
                         file_repository=SqlAlchemyFileRepository(session),
                         artifact_repository=SqlAlchemyArtifactRepository(session),
                         operation_repository=(
@@ -132,7 +132,27 @@ def create_app(
                         operation_heartbeat_interval=(
                             app_settings.artifact_storage_operation_heartbeat_seconds
                         ),
-                    ).reconcile_pending(commit=session.commit)
+                        storage_request_timeout=(
+                            app_settings.artifact_storage_request_timeout_seconds
+                        ),
+                        tombstone_observation_duration=timedelta(
+                            seconds=(app_settings.artifact_storage_tombstone_observation_seconds)
+                        ),
+                        tombstone_rescan_interval=timedelta(
+                            seconds=app_settings.artifact_storage_tombstone_rescan_seconds
+                        ),
+                    )
+                    await service.reconcile_pending(commit=session.commit)
+                    loop_time = asyncio.get_running_loop().time()
+                    if loop_time >= next_unbound_cleanup_at:
+                        next_unbound_cleanup_at = loop_time + (
+                            app_settings.artifact_unbound_file_cleanup_interval_seconds
+                        )
+                        await service.cleanup_unbound_files(
+                            older_than=datetime.now(UTC)
+                            - timedelta(seconds=app_settings.artifact_unbound_file_ttl_seconds),
+                            commit=session.commit,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -159,12 +179,19 @@ def create_app(
                 app_telemetry.shutdown()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(FileUploadRequestBodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(app_settings.cors_allowed_origins),
         allow_credentials=True,
         allow_methods=["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
-        allow_headers=["Accept", "Authorization", "Content-Type"],
+        allow_headers=[
+            "Accept",
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Tenant-ID",
+        ],
     )
     app.state.settings = app_settings
     app.state.telemetry = app_telemetry

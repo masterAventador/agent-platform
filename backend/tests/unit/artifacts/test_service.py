@@ -58,6 +58,12 @@ class FailableStorage(MemoryStorage):
         await super().delete(key=key)
 
 
+class SlowStorage(MemoryStorage):
+    async def put(self, *, key: str, content: bytes, media_type: str) -> None:
+        await asyncio.sleep(1)
+        await super().put(key=key, content=content, media_type=media_type)
+
+
 class MemoryOperationRepository:
     def __init__(self) -> None:
         self.operations: dict[UUID, StorageOperation] = {}
@@ -137,11 +143,11 @@ class MemoryOperationRepository:
         lease_owner: UUID,
         status: str,
         reconcile_after: datetime | None = None,
+        retire_after: datetime | None = None,
     ) -> bool:
         operation = self.operations[operation_id]
         if not (
-            operation.status
-            in ({"pending", "compensated"} if status == "compensated" else {"pending"})
+            operation.status in {"pending", "compensated"}
             and operation.phase == expected_phase
             and operation.lease_owner == lease_owner
         ):
@@ -151,6 +157,7 @@ class MemoryOperationRepository:
             status=status,
             lease_owner=None,
             reconcile_after=reconcile_after or operation.reconcile_after,
+            retire_after=retire_after,
             updated_at=datetime.now(UTC),
         )
         return True
@@ -165,7 +172,7 @@ class MemoryOperationRepository:
     ) -> bool:
         operation = self.operations[operation_id]
         if not (
-            operation.status == "pending"
+            operation.status in {"pending", "compensated"}
             and operation.phase == expected_phase
             and operation.lease_owner == lease_owner
         ):
@@ -900,6 +907,138 @@ async def test_stopped_heartbeat_tombstone_cleans_late_put_after_process_resumes
     assert await reconciler.reconcile_pending(commit=commit) == 1
     assert operations.operations[operation.id].status == "compensated"
     assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_storage_provider_call_has_a_hard_timeout() -> None:
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        operation_repository=MemoryOperationRepository(),
+        storage=SlowStorage(),
+        storage_request_timeout=0.01,
+    )
+
+    async def commit() -> None:
+        return None
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            service.upload_file(
+                tenant_id=uuid4(),
+                owner_id=uuid4(),
+                name="slow.txt",
+                media_type="text/plain",
+                content=b"slow",
+                commit=commit,
+            ),
+            timeout=0.2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_put_tombstone_rescans_through_observation_window_then_retires() -> None:
+    now = datetime(2026, 7, 16, tzinfo=UTC)
+    clock = MutableClock(now)
+    operations = MemoryOperationRepository()
+    storage = MemoryStorage()
+    operation = StorageOperation.pending(
+        tenant_id=uuid4(),
+        action="put",
+        entity_kind="file",
+        entity_id=uuid4(),
+        storage_key="late/file",
+        lease_owner=uuid4(),
+        now=now - timedelta(seconds=10),
+        lease_duration=timedelta(seconds=1),
+    )
+    await operations.add(operation)
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=2),
+        operation_heartbeat_interval=1,
+        storage_request_timeout=2,
+        tombstone_observation_duration=timedelta(seconds=8),
+        tombstone_rescan_interval=timedelta(seconds=2),
+        clock=clock,
+    )
+
+    async def commit() -> None:
+        return None
+
+    assert await service.reconcile_pending(commit=commit) == 1
+    compensated = operations.operations[operation.id]
+    assert compensated.status == "compensated"
+    assert compensated.retire_after == now + timedelta(seconds=8)
+
+    storage.objects[operation.storage_key] = b"late"
+    clock.now = now + timedelta(seconds=3)
+    restarted = ArtifactService(
+        file_repository=FailingFileRepository(),
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=2),
+        operation_heartbeat_interval=1,
+        storage_request_timeout=2,
+        tombstone_observation_duration=timedelta(seconds=8),
+        tombstone_rescan_interval=timedelta(seconds=2),
+        clock=clock,
+    )
+    assert await restarted.reconcile_pending(commit=commit) == 1
+    assert storage.objects == {}
+    assert operations.operations[operation.id].status == "compensated"
+
+    clock.now = now + timedelta(seconds=9)
+    assert await restarted.reconcile_pending(commit=commit) == 1
+    assert operations.operations[operation.id].status == "retired"
+    clock.now = now + timedelta(minutes=10)
+    assert await restarted.reconcile_pending(commit=commit) == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_put_tombstone_retires_even_if_final_delete_fails() -> None:
+    now = datetime(2026, 7, 16, tzinfo=UTC)
+    clock = MutableClock(now)
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    operation = replace(
+        StorageOperation.pending(
+            tenant_id=uuid4(),
+            action="put",
+            entity_kind="file",
+            entity_id=uuid4(),
+            storage_key="late/file",
+            lease_owner=uuid4(),
+            now=now - timedelta(seconds=20),
+            lease_duration=timedelta(seconds=1),
+        ),
+        status="compensated",
+        lease_owner=None,
+        retire_after=now - timedelta(seconds=1),
+        reconcile_after=now - timedelta(seconds=1),
+    )
+    await operations.add(operation)
+    storage.fail_delete = True
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        operation_repository=operations,
+        storage=storage,
+        operation_lease_duration=timedelta(seconds=2),
+        operation_heartbeat_interval=1,
+        storage_request_timeout=2,
+        tombstone_observation_duration=timedelta(seconds=8),
+        tombstone_rescan_interval=timedelta(seconds=2),
+        clock=clock,
+    )
+
+    async def commit() -> None:
+        return None
+
+    assert await service.reconcile_pending(commit=commit) == 1
+    assert operations.operations[operation.id].status == "retired"
+    clock.now = now + timedelta(days=1)
+    assert await service.reconcile_pending(commit=commit) == 0
 
 
 @pytest.mark.asyncio

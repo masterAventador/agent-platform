@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -166,9 +167,7 @@ def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> N
         )
     )
 
-    assert capabilities.model == PublishedModel(
-        kind="gateway_alias", alias="general-purpose"
-    )
+    assert capabilities.model == PublishedModel(kind="gateway_alias", alias="general-purpose")
     assert capabilities.skill_ids == (skill_id,)
     assert capabilities.tool_ids == (tool_id,)
 
@@ -209,9 +208,7 @@ def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
     resolver = PlatformModelResolver(injected_models={"general-purpose": fake_model})
 
     assert (
-        resolver.resolve(
-            PublishedModel(kind="gateway_alias", alias="general-purpose")
-        )
+        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
         is fake_model
     )
 
@@ -220,9 +217,7 @@ def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
     resolver = PlatformModelResolver()
 
     with pytest.raises(ModelGatewayUnavailable, match="gateway"):
-        resolver.resolve(
-            PublishedModel(kind="gateway_alias", alias="general-purpose")
-        )
+        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
 
 
 def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
@@ -333,9 +328,7 @@ async def test_composed_resolver_materializes_attachments_and_installs_artifact_
 
     assert materialized == [(run.tenant_id, run.id, manager.workspace)]
     assert selector.selection is not None
-    assert "create_artifact" in {
-        tool.name for tool in selector.selection["tools"]
-    }
+    assert "create_artifact" in {tool.name for tool in selector.selection["tools"]}
 
 
 @pytest.mark.asyncio
@@ -375,7 +368,7 @@ async def test_composed_resolver_recovers_the_existing_sandbox_without_acquiring
 
 
 @pytest.mark.asyncio
-async def test_initial_transient_preparation_detaches_without_deleting_environment(
+async def test_initial_transient_preparation_deletes_new_environment(
     session_factory,
 ) -> None:
     run = Run.create(
@@ -399,8 +392,8 @@ async def test_initial_transient_preparation_detaches_without_deleting_environme
     with pytest.raises(RuntimeError, match="selection failed"):
         await resolver.resolve(run, autonomous_definition())
 
-    assert manager.deleted == []
-    assert manager.backend.detach_calls == 1
+    assert len(manager.deleted) == 1
+    assert manager.backend.detach_calls == 0
 
 
 @pytest.mark.asyncio
@@ -421,9 +414,7 @@ async def test_initial_permanent_preparation_defers_delete_until_failure_is_pers
         skill_storage=EmptyStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
-        runtime_selector=RecordingSelector(
-            error=UntrustedRuntimeDefinition("permanent")
-        ),
+        runtime_selector=RecordingSelector(error=UntrustedRuntimeDefinition("permanent")),
         model_resolver=model_resolver,
     )
 
@@ -470,8 +461,9 @@ async def test_transient_recovery_composition_detaches_without_deleting_and_can_
 
 
 @pytest.mark.asyncio
-async def test_transient_preparation_error_detaches_without_deleting_sandbox(
+async def test_attachment_materialization_error_deletes_new_sandbox(
     session_factory,
+    monkeypatch,
 ) -> None:
     run = Run.create(
         tenant_id=uuid4(),
@@ -482,20 +474,70 @@ async def test_transient_preparation_error_detaches_without_deleting_sandbox(
     )
     manager = RecordingSandboxManager()
     model_resolver, _ = injected_model_resolver()
+
+    async def fail_materialization(self, *, tenant_id, run_id, workspace):
+        del self, tenant_id, run_id, workspace
+        raise RuntimeError("materialization failed")
+
+    monkeypatch.setattr(
+        "agent_platform.platform.artifacts.services.TaskAttachmentService.materialize",
+        fail_materialization,
+    )
     resolver = ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=EmptyStorage(),
+        artifact_storage=EmptyArtifactStorage(),
         sandbox_manager=manager,
         gateway=UnusedGateway(),
-        runtime_selector=RecordingSelector(fail=True),
+        runtime_selector=RecordingSelector(),
         model_resolver=model_resolver,
     )
 
-    with pytest.raises(RuntimeError, match="selection failed"):
+    with pytest.raises(RuntimeError, match="materialization failed"):
         await resolver.resolve(run, autonomous_definition())
 
-    assert manager.deleted == []
-    assert manager.backend.detach_calls == 1
+    assert len(manager.deleted) == 1
+    assert manager.backend.detach_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_attachment_materialization_cancellation_deletes_new_sandbox(
+    session_factory,
+    monkeypatch,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+
+    async def cancel_materialization(self, *, tenant_id, run_id, workspace):
+        del self, tenant_id, run_id, workspace
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "agent_platform.platform.artifacts.services.TaskAttachmentService.materialize",
+        cancel_materialization,
+    )
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        artifact_storage=EmptyArtifactStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(),
+        model_resolver=model_resolver,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await resolver.resolve(run, autonomous_definition())
+
+    assert len(manager.deleted) == 1
+    assert manager.backend.detach_calls == 0
 
 
 @pytest.mark.asyncio
@@ -557,9 +599,7 @@ def test_selector_routes_only_published_workflow_references() -> None:
     )
     model = GenericFakeChatModel(messages=iter(["ok"]))
 
-    selector.select(
-        capabilities=autonomous, tools=[], environment=environment, model=model
-    )
+    selector.select(capabilities=autonomous, tools=[], environment=environment, model=model)
     selector.select(capabilities=workflow, tools=[], environment=environment, model=model)
 
     assert calls == [

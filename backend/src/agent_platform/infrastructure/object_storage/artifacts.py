@@ -6,6 +6,7 @@ from typing import Protocol, cast
 from anyio import to_thread
 from minio import Minio
 from minio.error import S3Error
+from urllib3 import PoolManager, Timeout
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.object_storage.minio import (
@@ -62,9 +63,7 @@ class CosBody(Protocol):
 
 
 class TencentCosClient(Protocol):
-    def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes, ContentType: str
-    ) -> object: ...
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]: ...
 
@@ -96,9 +95,7 @@ class TencentCosArtifactProvider:
         return await to_thread.run_sync(self._read_body, cast(CosBody, response["Body"]))
 
     async def delete(self, *, key: str) -> None:
-        await to_thread.run_sync(
-            partial(self._client.delete_object, Bucket=self._bucket, Key=key)
-        )
+        await to_thread.run_sync(partial(self._client.delete_object, Bucket=self._bucket, Key=key))
 
     @staticmethod
     def _read_body(body: CosBody) -> bytes:
@@ -111,6 +108,23 @@ class TencentCosArtifactProvider:
 CosClientFactory = Callable[..., TencentCosClient]
 
 
+def create_bounded_minio_client(settings: AppSettings) -> Minio:
+    return Minio(
+        settings.minio_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_secure,
+        http_client=PoolManager(
+            # A lazy first put can issue bucket_exists, make_bucket and put_object.
+            # Bound each HTTP request to one third of the service operation deadline.
+            timeout=Timeout(
+                total=settings.artifact_storage_request_timeout_seconds / 3,
+            ),
+            retries=False,
+        ),
+    )
+
+
 def _create_tencent_cos_client(
     *,
     region: str,
@@ -118,6 +132,7 @@ def _create_tencent_cos_client(
     secret_key: str,
     token: str | None,
     scheme: str,
+    request_timeout: float,
 ) -> TencentCosClient:
     from qcloud_cos import CosConfig, CosS3Client  # type: ignore[import-untyped]
 
@@ -127,8 +142,9 @@ def _create_tencent_cos_client(
         SecretKey=secret_key,
         Token=token,
         Scheme=scheme,
+        Timeout=request_timeout,
     )
-    return cast(TencentCosClient, CosS3Client(config))
+    return cast(TencentCosClient, CosS3Client(config, retry=0))
 
 
 def create_artifact_storage_provider(
@@ -140,12 +156,7 @@ def create_artifact_storage_provider(
     if settings.artifact_storage_provider == "minio":
         minio_storage_client = minio_client or cast(
             MinioClient,
-            Minio(
-                settings.minio_endpoint,
-                access_key=settings.minio_access_key,
-                secret_key=settings.minio_secret_key,
-                secure=settings.minio_secure,
-            ),
+            create_bounded_minio_client(settings),
         )
         return MinioArtifactStorageProvider(
             client=minio_storage_client,
@@ -159,6 +170,7 @@ def create_artifact_storage_provider(
         secret_key=settings.cos_secret_key.get_secret_value(),
         token=settings.cos_token.get_secret_value() or None,
         scheme=settings.cos_scheme,
+        request_timeout=settings.artifact_storage_request_timeout_seconds,
     )
     return TencentCosArtifactProvider(
         client=cos_client,

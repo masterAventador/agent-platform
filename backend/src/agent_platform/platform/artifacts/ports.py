@@ -25,6 +25,10 @@ class FileRepository(Protocol):
 
     async def delete(self, *, tenant_id: UUID, file_id: UUID) -> bool: ...
 
+    async def delete_if_unbound(self, *, tenant_id: UUID, file_id: UUID) -> bool: ...
+
+    async def list_unbound_before(self, *, older_than: datetime, limit: int) -> list[File]: ...
+
 
 class TaskAttachmentRepository(Protocol):
     async def add(self, attachment: TaskAttachment) -> None: ...
@@ -81,6 +85,7 @@ class StorageOperationRepository(Protocol):
         lease_owner: UUID,
         status: str,
         reconcile_after: datetime | None = None,
+        retire_after: datetime | None = None,
     ) -> bool: ...
 
     async def release_claim(

@@ -26,12 +26,8 @@ MEDIA_TYPE_EXTENSIONS: dict[str, frozenset[str]] = {
     "application/json": frozenset({".json"}),
     "application/pdf": frozenset({".pdf"}),
     "application/vnd.ms-excel": frozenset({".xls"}),
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": frozenset(
-        {".xlsx"}
-    ),
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": frozenset(
-        {".docx"}
-    ),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": frozenset({".xlsx"}),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": frozenset({".docx"}),
     "application/zip": frozenset({".zip"}),
     "image/jpeg": frozenset({".jpeg", ".jpg"}),
     "image/png": frozenset({".png"}),
@@ -57,6 +53,7 @@ class StorageOperation:
     phase: str
     lease_owner: UUID | None
     reconcile_after: datetime
+    retire_after: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -92,6 +89,7 @@ class StorageOperation:
             phase=phase,
             lease_owner=lease_owner,
             reconcile_after=current_time + lease_duration,
+            retire_after=None,
             created_at=current_time,
             updated_at=current_time,
         )
@@ -261,8 +259,6 @@ class Artifact:
             media_type=media_type,
             size_bytes=len(content),
             sha256=sha256(content).hexdigest(),
-            storage_key=(
-                f"tenants/{tenant_id}/runs/{run_id}/artifacts/{artifact_id}"
-            ),
+            storage_key=(f"tenants/{tenant_id}/runs/{run_id}/artifacts/{artifact_id}"),
             created_at=datetime.now(UTC),
         )

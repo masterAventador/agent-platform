@@ -62,6 +62,10 @@ class FileResponse(BaseModel):
         return cls(**{field: getattr(file, field) for field in cls.model_fields})
 
 
+class FileDeletionResponse(BaseModel):
+    deleted: bool
+
+
 class AttachmentResponse(BaseModel):
     id: UUID
     workspace_path: str
@@ -142,6 +146,9 @@ async def upload_file(
             operation_heartbeat_interval=(
                 request.app.state.settings.artifact_storage_operation_heartbeat_seconds
             ),
+            storage_request_timeout=(
+                request.app.state.settings.artifact_storage_request_timeout_seconds
+            ),
         )
         try:
             entity = await service.upload_file(
@@ -185,12 +192,54 @@ async def download_file(
             file_repository=SqlAlchemyFileRepository(session),
             operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
+            storage_request_timeout=(
+                request.app.state.settings.artifact_storage_request_timeout_seconds
+            ),
         ).read_file(file)
     return Response(
         content=content,
         media_type=file.media_type,
         headers={"Content-Disposition": content_disposition("inline", file.name)},
     )
+
+
+@router.delete("/files/{file_id}", response_model=FileDeletionResponse)
+async def delete_unbound_file(
+    file_id: UUID,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> FileDeletionResponse:
+    async with request.app.state.session_factory() as session:
+        user, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.RUNS_EXECUTE,
+        )
+        repository = SqlAlchemyFileRepository(session)
+        file = await repository.get(tenant_id=access.tenant.id, file_id=file_id)
+        if file is None:
+            return FileDeletionResponse(deleted=True)
+        if file.owner_id != user.id:
+            raise _not_found()
+        deleted = await ArtifactService(
+            file_repository=repository,
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(
+                session,
+                heartbeat_session_factory=request.app.state.session_factory,
+            ),
+            storage=request.app.state.artifact_storage,
+            operation_lease_duration=timedelta(
+                seconds=request.app.state.settings.artifact_storage_operation_lease_seconds
+            ),
+            operation_heartbeat_interval=(
+                request.app.state.settings.artifact_storage_operation_heartbeat_seconds
+            ),
+            storage_request_timeout=(
+                request.app.state.settings.artifact_storage_request_timeout_seconds
+            ),
+        ).delete_file_if_unbound(file, commit=session.commit)
+    return FileDeletionResponse(deleted=deleted)
 
 
 @router.get("/runs/{run_id}/attachments", response_model=list[AttachmentResponse])
@@ -263,6 +312,9 @@ async def download_artifact(
             artifact_repository=SqlAlchemyArtifactRepository(session),
             operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
+            storage_request_timeout=(
+                request.app.state.settings.artifact_storage_request_timeout_seconds
+            ),
         ).read_artifact(artifact)
     return Response(
         content=content,
@@ -307,6 +359,9 @@ async def delete_artifact(
             ),
             operation_heartbeat_interval=(
                 request.app.state.settings.artifact_storage_operation_heartbeat_seconds
+            ),
+            storage_request_timeout=(
+                request.app.state.settings.artifact_storage_request_timeout_seconds
             ),
         ).delete_artifact(artifact, commit=session.commit)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

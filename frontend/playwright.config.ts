@@ -1,6 +1,9 @@
 import { defineConfig } from '@playwright/test'
 
 const apiPort = process.env.PLAYWRIGHT_API_PORT ?? '18000'
+const postgresPort = process.env.POSTGRES_PORT ?? '5432'
+const redisPort = process.env.REDIS_PORT ?? '6379'
+const minioPort = process.env.MINIO_API_PORT ?? '9000'
 
 export default defineConfig({
   testDir: './e2e',
@@ -33,9 +36,10 @@ export default defineConfig({
       cwd: '../backend',
       env: {
         AGENT_PLATFORM_DATABASE_URL:
-          'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_e2e',
+          `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${postgresPort}/agent_platform_e2e`,
         AGENT_PLATFORM_REDIS_URL:
-          'redis://:agent-platform-local-redis@127.0.0.1:6379/2',
+          `redis://:agent-platform-local-redis@127.0.0.1:${redisPort}/2`,
+        AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioPort}`,
         AGENT_PLATFORM_RAGFLOW_URL: 'http://127.0.0.1:29380',
         AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-e2e-key',
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',

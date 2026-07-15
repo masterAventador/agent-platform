@@ -139,6 +139,25 @@ test('用户上传附件后真实 Agent 读取内容并发布派生产物完成�
   if (!artifactResultFile) throw new Error('PLAYWRIGHT_MVP_ARTIFACT_RESULT_FILE is required')
 
   await loginWithDemoAccount(page)
+  let uploadRequestCount = 0
+  let runRequestCount = 0
+  let releaseUpload: (() => void) | undefined
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve
+  })
+  await page.route('**/api/v1/files', async (route) => {
+    if (route.request().method() === 'POST') {
+      uploadRequestCount += 1
+      await uploadGate
+    }
+    await route.continue()
+  })
+  await page.route('**/api/v1/employees/*/runs', async (route) => {
+    if (route.request().method() === 'POST') {
+      runRequestCount += 1
+    }
+    await route.continue()
+  })
   await openOrCreatePublishedEmployee(page, {
     name: 'MVP 产物附件闭环验收专员',
     roleDescription: '读取用户附件内容，在真实沙箱生成并发布任务产物',
@@ -160,10 +179,17 @@ test('用户上传附件后真实 Agent 读取内容并发布派生产物完成�
   const uploadResponsePromise = page.waitForResponse((response) => (
     response.request().method() === 'POST' && response.url().endsWith('/api/v1/files')
   ))
-  await page.getByRole('button', { name: '确认发起' }).click()
+  await page.getByRole('button', { name: '确认发起' }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
+  await expect.poll(() => uploadRequestCount).toBe(1)
+  releaseUpload?.()
   expect((await uploadResponsePromise).status()).toBe(201)
 
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  expect(uploadRequestCount).toBe(1)
+  expect(runRequestCount).toBe(1)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   await expect(page.getByText('result.txt').first()).toBeVisible()
   await expect(page.getByText('生成任务产物')).toBeVisible()

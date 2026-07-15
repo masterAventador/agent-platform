@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STORAGE_OPERATION_LEASE = timedelta(minutes=5)
 DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS = 30.0
+DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS = 30.0
+DEFAULT_TOMBSTONE_OBSERVATION = timedelta(seconds=45)
+DEFAULT_TOMBSTONE_RESCAN = timedelta(seconds=5)
 
 
 class StorageOperationLeaseLost(RuntimeError):
@@ -103,6 +106,9 @@ class ArtifactService:
         storage: ArtifactStorageProvider,
         operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
         operation_heartbeat_interval: float = DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS,
+        storage_request_timeout: float = DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
+        tombstone_observation_duration: timedelta = DEFAULT_TOMBSTONE_OBSERVATION,
+        tombstone_rescan_interval: timedelta = DEFAULT_TOMBSTONE_RESCAN,
         clock: Callable[[], datetime] | None = None,
         heartbeat_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -112,12 +118,23 @@ class ArtifactService:
             raise ValueError("storage operation heartbeat must be positive")
         if operation_heartbeat_interval >= operation_lease_duration.total_seconds():
             raise ValueError("storage operation heartbeat must be shorter than lease")
+        if storage_request_timeout <= 0:
+            raise ValueError("storage request timeout must be positive")
+        if tombstone_rescan_interval <= timedelta(0):
+            raise ValueError("tombstone rescan interval must be positive")
+        if tombstone_observation_duration < (
+            timedelta(seconds=storage_request_timeout) + tombstone_rescan_interval
+        ):
+            raise ValueError("tombstone observation must cover the storage request bound")
         self._files = file_repository
         self._artifacts = artifact_repository
         self._operations = operation_repository
         self._storage = storage
         self._operation_lease_duration = operation_lease_duration
         self._operation_heartbeat_interval = operation_heartbeat_interval
+        self._storage_request_timeout = storage_request_timeout
+        self._tombstone_observation_duration = tombstone_observation_duration
+        self._tombstone_rescan_interval = tombstone_rescan_interval
         self._clock = clock or (lambda: datetime.now(UTC))
         self._heartbeat_sleep = heartbeat_sleep
 
@@ -218,6 +235,85 @@ class ArtifactService:
             content=content, size_bytes=file.size_bytes, expected_sha256=file.sha256
         )
         return content
+
+    async def delete_file_if_unbound(
+        self,
+        file: File,
+        *,
+        commit: Callable[[], Awaitable[None]],
+    ) -> bool:
+        operations = self._required_operation_repository()
+        deleted = await self._files.delete_if_unbound(
+            tenant_id=file.tenant_id,
+            file_id=file.id,
+        )
+        if not deleted:
+            return False
+        lease_owner = uuid4()
+        operation = StorageOperation.pending(
+            tenant_id=file.tenant_id,
+            action="delete",
+            entity_kind="file",
+            entity_id=file.id,
+            storage_key=file.storage_key,
+            lease_owner=lease_owner,
+            phase="metadata_applied",
+            now=self._clock(),
+            lease_duration=self._operation_lease_duration,
+        )
+        await operations.add(operation)
+        await commit()
+        heartbeat = self._start_heartbeat(operation)
+        try:
+            await self._await_storage(self._storage.delete(key=file.storage_key))
+            heartbeat.raise_if_failed()
+            await self._advance_foreground_phase(
+                operation=operation,
+                expected_phase="metadata_applied",
+                phase="storage_applied",
+                lease_owner=lease_owner,
+                heartbeat=heartbeat,
+                commit=commit,
+            )
+
+            async def metadata_already_deleted() -> None:
+                return None
+
+            await self._complete_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
+                heartbeat=heartbeat,
+                apply_metadata=metadata_already_deleted,
+                commit=commit,
+            )
+        except BaseException:
+            await asyncio.shield(heartbeat.stop())
+            await asyncio.shield(
+                self._release_for_reconciliation(
+                    operation=operation,
+                    expected_phase=heartbeat.phase,
+                    lease_owner=lease_owner,
+                    commit=commit,
+                )
+            )
+            raise
+        await heartbeat.stop()
+        return True
+
+    async def cleanup_unbound_files(
+        self,
+        *,
+        older_than: datetime,
+        commit: Callable[[], Awaitable[None]],
+        limit: int = 100,
+    ) -> int:
+        files = await self._files.list_unbound_before(older_than=older_than, limit=limit)
+        cleaned = 0
+        for file in files:
+            if await self.delete_file_if_unbound(file, commit=commit):
+                cleaned += 1
+        return cleaned
 
     async def create_artifact(
         self,
@@ -447,16 +543,37 @@ class ArtifactService:
                     exists = await self._entity_exists(operation)
                     if exists:
                         status = "completed"
+                        retire_after = None
+                        reconcile_after = None
                     else:
-                        await self._await_storage(
-                            self._storage.delete(key=operation.storage_key)
+                        retire_after = operation.retire_after or (
+                            self._clock() + self._tombstone_observation_duration
                         )
-                        status = "compensated"
+                        is_expired_tombstone = (
+                            operation.status == "compensated" and self._clock() >= retire_after
+                        )
+                        try:
+                            await self._await_storage(
+                                self._storage.delete(key=operation.storage_key)
+                            )
+                        except Exception:
+                            if not is_expired_tombstone:
+                                raise
+                            logger.exception(
+                                "artifact_storage_tombstone_final_delete_failed",
+                                extra={"operation_id": str(operation.id)},
+                            )
+                        if is_expired_tombstone:
+                            status = "retired"
+                            reconcile_after = None
+                        else:
+                            status = "compensated"
+                            reconcile_after = self._clock() + self._tombstone_rescan_interval
                 else:
-                    await self._await_storage(
-                        self._storage.delete(key=operation.storage_key)
-                    )
+                    await self._await_storage(self._storage.delete(key=operation.storage_key))
                     status = "completed"
+                    retire_after = None
+                    reconcile_after = None
                 heartbeat.raise_if_failed()
                 async with heartbeat.lock:
                     heartbeat.raise_if_failed()
@@ -465,11 +582,8 @@ class ArtifactService:
                         expected_phase=operation.phase,
                         lease_owner=lease_owner,
                         status=status,
-                        reconcile_after=(
-                            self._clock() + self._operation_lease_duration
-                            if status == "compensated"
-                            else None
-                        ),
+                        reconcile_after=reconcile_after,
+                        retire_after=retire_after,
                     )
                     if updated:
                         await commit()
@@ -605,17 +719,33 @@ class ArtifactService:
             is not None
         )
 
-    @staticmethod
-    async def _await_storage(operation: Awaitable[None]) -> None:
+    async def _await_storage(self, operation: Awaitable[None]) -> None:
         task: asyncio.Future[None] = asyncio.ensure_future(operation)
+        deadline = asyncio.get_running_loop().time() + self._storage_request_timeout
+
+        async def wait_for_bound() -> bool:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+            return bool(done)
+
         try:
-            await asyncio.shield(task)
+            completed = await wait_for_bound()
         except asyncio.CancelledError:
-            try:
-                await asyncio.shield(task)
-            except Exception:
-                logger.exception("artifact_storage_operation_failed_after_cancellation")
+            completed = await asyncio.shield(wait_for_bound())
+            if not completed:
+                task.cancel()
+                task.add_done_callback(self._consume_late_storage_result)
             raise
+        if not completed:
+            task.cancel()
+            task.add_done_callback(self._consume_late_storage_result)
+            raise TimeoutError("artifact storage provider request timed out")
+        await task
+
+    @staticmethod
+    def _consume_late_storage_result(task: asyncio.Future[None]) -> None:
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
 
     async def _cleanup_object(self, key: str) -> None:
         try:
@@ -634,9 +764,7 @@ class ArtifactService:
         return self._operations
 
     @staticmethod
-    def _assert_integrity(
-        *, content: bytes, size_bytes: int, expected_sha256: str
-    ) -> None:
+    def _assert_integrity(*, content: bytes, size_bytes: int, expected_sha256: str) -> None:
         if len(content) != size_bytes or sha256(content).hexdigest() != expected_sha256:
             raise RuntimeError("artifact content integrity mismatch")
 
@@ -648,10 +776,12 @@ class TaskAttachmentService:
         file_repository: FileRepository,
         attachment_repository: TaskAttachmentRepository,
         storage: ArtifactStorageProvider,
+        storage_request_timeout: float = DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._files = file_repository
         self._attachments = attachment_repository
         self._storage = storage
+        self._storage_request_timeout = storage_request_timeout
 
     async def materialize(
         self,
@@ -664,7 +794,11 @@ class TaskAttachmentService:
             tenant_id=tenant_id,
             run_id=run_id,
         )
-        file_service = ArtifactService(file_repository=self._files, storage=self._storage)
+        file_service = ArtifactService(
+            file_repository=self._files,
+            storage=self._storage,
+            storage_request_timeout=self._storage_request_timeout,
+        )
         for attachment in attachments:
             file = await self._files.get(tenant_id=tenant_id, file_id=attachment.file_id)
             if file is None:

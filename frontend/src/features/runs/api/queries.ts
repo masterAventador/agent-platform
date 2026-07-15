@@ -76,10 +76,12 @@ export function useCreateRun(employeeId: string) {
     mutationFn: ({
       input,
       attachmentIds = [],
+      idempotencyKey,
     }: {
       input: Record<string, unknown>
       attachmentIds?: string[]
-    }) => createRun(tenantId!, employeeId, input, attachmentIds),
+      idempotencyKey?: string
+    }) => createRun(tenantId!, employeeId, input, attachmentIds, idempotencyKey),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: runKeys.all(tenantId!) }),
   })
 }

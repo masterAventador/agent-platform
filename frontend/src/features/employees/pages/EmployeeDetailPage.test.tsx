@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,7 +8,7 @@ import { useEmployee, usePublishEmployee } from '../api/queries'
 import { useCreateRun } from '../../runs/api/queries'
 import { EmployeeDetailPage } from './EmployeeDetailPage'
 import { getPlatformAdapter } from '../../../platform'
-import { uploadFile } from '../../runs/api/runs'
+import { deleteUnboundFile, uploadFile } from '../../runs/api/runs'
 
 
 vi.mock('../api/queries', () => ({
@@ -21,7 +21,7 @@ vi.mock('../../runs/api/queries', () => ({
 }))
 
 vi.mock('../../../platform', () => ({ getPlatformAdapter: vi.fn() }))
-vi.mock('../../runs/api/runs', () => ({ uploadFile: vi.fn() }))
+vi.mock('../../runs/api/runs', () => ({ deleteUnboundFile: vi.fn(), uploadFile: vi.fn() }))
 
 const employee: Employee = {
   id: 'employee-1',
@@ -90,6 +90,7 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     vi.mocked(uploadFile).mockResolvedValue({
       id: 'file-1', name: 'brief.txt', media_type: 'text/plain', size_bytes: 2, sha256: 'abc',
     })
+    vi.mocked(deleteUnboundFile).mockResolvedValue({ deleted: true })
   })
 
   it('does not silently publish a legacy configuration', () => {
@@ -201,6 +202,7 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     await waitFor(() => expect(uploadFile).toHaveBeenCalled())
     expect(mutateAsync).toHaveBeenCalledWith({
       input: { message: '总结附件' }, attachmentIds: ['file-1'],
+      idempotencyKey: expect.any(String),
     })
   })
 
@@ -260,6 +262,102 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
+  it('compensates an uploaded file when run creation fails', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockRejectedValue(new Error('create failed'))
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: true, error: new Error('create failed'), mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择文件' }))
+    await user.type(screen.getByRole('textbox', { name: '任务内容' }), '总结附件')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(deleteUnboundFile).toHaveBeenCalledWith('tenant-1', 'file-1'))
+  })
+
+  it('locks synchronously before a delayed upload so double click submits only once', async () => {
+    const user = userEvent.setup()
+    let releaseUpload!: () => void
+    vi.mocked(uploadFile).mockImplementation(() => new Promise((resolve) => {
+      releaseUpload = () => resolve({
+        id: 'file-1', name: 'brief.txt', media_type: 'text/plain', size_bytes: 2, sha256: 'abc',
+      })
+    }))
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'run-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择文件' }))
+    await user.type(screen.getByRole('textbox', { name: '任务内容' }), '总结附件')
+    const submit = screen.getByRole('button', { name: '确认发起' })
+    fireEvent.click(submit)
+    fireEvent.click(submit)
+
+    expect(uploadFile).toHaveBeenCalledTimes(1)
+    releaseUpload()
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1))
+  })
+
+  it('uses a new idempotency key after the task intent changes', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockRejectedValue(new Error('create failed'))
+    vi.mocked(useEmployee).mockReturnValue({
+      data: { ...employee, status: 'published', published_version: 1 },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: true, error: new Error('create failed'), mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    const taskInput = screen.getByRole('textbox', { name: '任务内容' })
+    await user.type(taskInput, '第一次任务')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1))
+    const firstKey = mutateAsync.mock.calls[0][0].idempotencyKey
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: /确认发起/ }),
+    ).toBeEnabled())
+
+    await user.clear(taskInput)
+    await user.type(taskInput, '第二次任务')
+    await user.click(screen.getByRole('button', { name: /确认发起/ }))
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(2))
+
+    expect(mutateAsync.mock.calls[1][0].idempotencyKey).not.toBe(firstKey)
+  })
+
   it('catches createRun 409 and renders an actionable error in the modal', async () => {
     const user = userEvent.setup()
     const mutateAsync = vi.fn().mockRejectedValue({
@@ -289,6 +387,7 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
 
     await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
       input: { message: '执行任务' }, attachmentIds: [],
+      idempotencyKey: expect.any(String),
     }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })

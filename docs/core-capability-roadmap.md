@@ -171,6 +171,8 @@
 
 **完成日期：2026-07-15**
 
+**质量收口日期：2026-07-16**
+
 完成定义：
 
 - 建立文件、任务附件和 Artifact 领域模型、迁移、仓储与 API；
@@ -180,6 +182,8 @@
 - 客户端支持选择、上传、预览、下载、定位和删除；
 - 跨数据库与对象存储变更通过持久操作日志、协调器重放和取消归并形成可恢复 Saga；
 - 覆盖租户隔离、大小/类型/内容限制、并发事件序号、失败恢复、恶意路径和权限 E2E。
+
+2026-07-16 完成最终质量收口：上传请求体在 multipart 解析和认证前即受控限流，重复/伪造长度头失败关闭；API、Controller 与真实 Sandbox 统一为 25 MiB；未绑定文件具备客户端补偿和服务端 TTL 两级回收，清扫成功或失败都受固定间隔节流；任务提交同时具备同步互斥和服务端幂等键，任务意图改变会生成新键；对象存储 SDK 的单次调用与重试受操作期限约束，迟到 put tombstone 在持久观察窗口内重扫，最终删除失败也会记录并退休；首次附件物化异常或取消都会删除新建 Sandbox/lease。所有 schema 变更仅通过新增 `20260716_0020` 前向迁移交付。
 
 ### C05 多轮会话与追加输入
 
@@ -412,20 +416,20 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 ## 6. 当前验证基线
 
-基线日期：2026-07-15。
+基线日期：2026-07-16。
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 默认环境收集 936 项：897 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
-| 后端 Unit + Contract | 759 项通过；包含 Core API route manifest、文件/产物契约、Saga phase/lease/CAS/heartbeat 确定性交错、迟到 put tombstone 清理、delete 续租、连接池复用健康探测与工作台严格响应契约 |
-| C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；无头 Playwright 复用固定 Demo 账号，从真实 UI 上传并绑定 `brief.txt`，真实 Agent 在实际沙箱读取附件原文、写入派生文件并调用 `create_artifact`，随后经分阶段持久操作日志、对象存储、数据库事件和 API 完成预览、下载、刷新恢复、定位与删除。验收通过 MinIO 官方 S3 API 确认附件对象存在且删除后的产物对象不存在；真实 PostgreSQL 两会话验证 `SKIP LOCKED` 独占 claim、owner/phase CAS、持久续租和补偿 tombstone 重领，2 项测试均真实执行、无 skip；随机容器、网络、Volume 已销毁。COS 工厂/官方 SDK 契约 3 项通过，真实 COS 桶测试因未提供显式 `TEST_COS_*` 凭据跳过，不冒充线上桶验收通过 |
+| 后端 Pytest | 默认环境收集 958 项：919 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
+| 后端 Unit + Contract | 771 项通过；新增覆盖前置请求体限流、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL、Run 幂等、硬超时/有界 tombstone、Worker 首次物化失败回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
+| C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
-| Mypy | 169 个源码文件通过 |
-| 前端 Vitest | 27 个测试文件、115 项测试通过；含附件选择/上传失败反馈、产物查询/页面、PlatformAdapter、工作台与架构边界测试 |
+| Mypy | 170 个源码文件通过 |
+| 前端 Vitest | 28 个测试文件、119 项测试通过；新增同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
-| Playwright Web 业务回归 | 15 项完整回归通过；C04 正式纵切完成真实文件上传和任务附件绑定，产物目录以受控运行时边界覆盖预览、下载、事件定位和删除；并发页面取消后的 asyncpg 连接复用已通过连接池健康探测根治，本机 Chrome 149 下使用隔离 API 端口，测试服务与容器自动清理 |
+| Playwright Web 业务回归 | 15 项完整回归通过；PostgreSQL、Redis、MinIO 与 API 均支持测试进程传入的随机隔离端口，C04 附件场景以延迟上传同步双击验证 1 upload/1 Run；另有正式随机 MVP Profile 3 项真实 Worker/Sandbox 纵切通过，测试容器、网络和卷已销毁 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
@@ -444,7 +448,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
-| C04 | 已完成 | 2026-07-15 | 2026-07-15 | 本任务提交 | 文件、附件、产物领域/迁移/仓储/API、MinIO/COS Provider、同沙箱物化、`create_artifact`、持久 `get_artifacts()` 与 `artifact.created` 已闭环；`artifact_storage_operations` 复用 0019 的 owner、phase 与 `reconcile_after`，以独立数据库会话执行可配置 heartbeat 的 owner+phase CAS 续租，覆盖前台 put/delete 的外部调用与元数据提交以及协调器重放，活跃操作不会因原始固定租约到期被接管。heartbeat 停止、owner 丢失、取消或 SDK 异常后仍释放为可接管状态；缺少元数据的 put 在首次补偿后保留可重试 tombstone，持续重扫删除迟到对象，避免 `compensated` 后形成永久孤儿，delete 则保持幂等接管。未修改历史 0018/0019 迁移；大小、扩展名、MIME 与内容魔数共同校验，下载头安全编码；租户 owner/member/admin/cross-tenant 权限矩阵和幂等 Seed 均通过。后端全量 897 通过、39 个有条件 skip，Unit + Contract 759 项、Ruff、Mypy（169 个源码文件），平台契约 44 项、Stub 协议 5 项，前端既有 C04 验收保持通过；`bash infra/platform/test-c04-artifacts.sh` 的正式无头 Playwright 3 项复用固定 Demo 账号，以真实 UI 上传/绑定附件，真实 Worker/Agent 在实际 Sandbox 读取原文并发布派生产物，再通过 MinIO 官方 S3 API、数据库/API/UI 验证预览、下载、刷新恢复、定位、删除和对象清理；真实 PostgreSQL 两会话 claim/CAS/renewal/tombstone 专项 2 项无 skip，隔离资源全部自动销毁。COS 官方 SDK 契约通过；真实 COS 桶烟测保留为显式 `TEST_COS_*` 外部门禁，本轮无凭据故跳过 |
+| C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。仅新增 0020 迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
 | C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

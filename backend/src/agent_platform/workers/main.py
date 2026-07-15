@@ -12,7 +12,6 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from minio import Minio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -36,6 +35,7 @@ from agent_platform.infrastructure.mcp.executor import MCPToolExecutor
 from agent_platform.infrastructure.mcp.resolver import DatabaseMCPClientResolver
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
+    create_bounded_minio_client,
 )
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
@@ -356,12 +356,7 @@ def _build_runtime_resolver(
         credential_resolver=adapters.credential_resolver,
         audit_sink=adapters.audit_sink,
     )
-    minio = Minio(
-        settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-    )
+    minio = create_bounded_minio_client(settings)
     return ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=MinioSkillStorage(
@@ -385,6 +380,7 @@ def _build_runtime_resolver(
         artifact_operation_heartbeat_interval=(
             settings.artifact_storage_operation_heartbeat_seconds
         ),
+        artifact_storage_request_timeout=(settings.artifact_storage_request_timeout_seconds),
         close_callback=adapters.aclose,
         model_resolver=model_resolver,
     )

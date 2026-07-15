@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
@@ -15,11 +16,17 @@ from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
+    SqlAlchemyFileRepository,
+    SqlAlchemyTaskAttachmentRepository,
+    TaskAttachmentRecord,
 )
+from agent_platform.infrastructure.database.repositories.runs import RunCommandRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
 )
-from agent_platform.platform.artifacts.entities import Artifact
+from agent_platform.platform.artifacts.entities import MAX_FILE_SIZE_BYTES, Artifact
+from agent_platform.platform.artifacts.services import ArtifactService, TaskAttachmentService
 
 
 class AllowAllRateLimiter:
@@ -80,8 +87,100 @@ async def register(client: AsyncClient, email: str) -> dict[str, Any]:
     return (await client.get("/api/v1/auth/me")).json()
 
 
+async def invoke_raw_upload(
+    app: FastAPI,
+    *,
+    body_chunks: list[bytes],
+    content_length: bytes | list[bytes] | None,
+) -> tuple[int, bytes]:
+    headers = [(b"content-type", b"multipart/form-data; boundary=upload-boundary")]
+    if content_length is not None:
+        values = content_length if isinstance(content_length, list) else [content_length]
+        headers.extend((b"content-length", value) for value in values)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/files",
+        "raw_path": b"/api/v1/files",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    messages = [
+        {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(body_chunks) - 1,
+        }
+        for index, chunk in enumerate(body_chunks)
+    ]
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        if messages:
+            return messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    response_body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    return int(start["status"]), response_body
+
+
+async def invoke_upload_that_must_not_consume_body(
+    app: FastAPI,
+    *,
+    content_length: bytes | None,
+) -> tuple[int, bytes]:
+    headers = [(b"content-type", b"multipart/form-data; boundary=upload-boundary")]
+    if content_length is not None:
+        headers.append((b"content-length", content_length))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/files",
+        "raw_path": b"/api/v1/files",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        raise AssertionError("upload body must not be consumed")
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    response_body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    return int(start["status"]), response_body
+
+
 async def create_file_run(
-    client: AsyncClient, tenant_id: str
+    client: AsyncClient,
+    tenant_id: str,
+    *,
+    content: bytes = b"brief",
+    name: str = "brief.txt",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     headers = {"X-Tenant-ID": tenant_id}
     employee = (
@@ -110,7 +209,7 @@ async def create_file_run(
     uploaded = await client.post(
         "/api/v1/files",
         headers=headers,
-        files={"file": ("brief.txt", b"brief", "text/plain")},
+        files={"file": (name, content, "text/plain")},
     )
     assert uploaded.status_code == 201
     stored_file = uploaded.json()
@@ -122,6 +221,17 @@ async def create_file_run(
     )
     assert run_response.status_code == 201
     return stored_file, run_response.json()
+
+
+class MemoryWorkspace:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+
+    async def write_file(self, *, path: str, content: bytes) -> None:
+        self.files[path] = content
+
+    async def read_file(self, *, path: str) -> bytes:
+        return self.files[path]
 
 
 @pytest.mark.asyncio
@@ -207,6 +317,318 @@ async def test_upload_rejects_type_and_size_before_object_storage(
     assert executable.status_code == 422
     assert executable.json()["detail"]["code"] == "invalid_artifact_input"
     assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_length", [None, b"1"])
+async def test_upload_rejects_chunked_or_forged_length_before_multipart_parsing(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+    content_length: bytes | None,
+) -> None:
+    app, _, _, _, storage = artifact_api
+    status_code, body = await invoke_raw_upload(
+        app,
+        body_chunks=[
+            b"x" * (MAX_FILE_SIZE_BYTES // 2),
+            b"y" * (MAX_FILE_SIZE_BYTES // 2 + 65 * 1024),
+        ],
+        content_length=content_length,
+    )
+
+    assert status_code == 413
+    assert b"request_body_too_large" in body
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_unauthenticated_declared_oversize_without_reading_body(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, _, _, _, storage = artifact_api
+    status_code, body = await invoke_upload_that_must_not_consume_body(
+        app,
+        content_length=str(MAX_FILE_SIZE_BYTES + 65 * 1024).encode(),
+    )
+
+    assert status_code == 413
+    assert b"request_body_too_large" in body
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_upload_without_content_length_is_rejected_without_reading_body(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, _, _, _, storage = artifact_api
+    status_code, body = await invoke_upload_that_must_not_consume_body(
+        app,
+        content_length=None,
+    )
+
+    assert status_code == 413
+    assert b"request_body_too_large" in body
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_impossible_multipart_content_length_without_reading_body(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, _, _, _, storage = artifact_api
+    status_code, body = await invoke_upload_that_must_not_consume_body(
+        app,
+        content_length=b"1",
+    )
+
+    assert status_code == 413
+    assert b"request_body_too_large" in body
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_duplicate_content_length_headers(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, _, _, _, storage = artifact_api
+    status_code, body = await invoke_raw_upload(
+        app,
+        body_chunks=[b"not parsed"],
+        content_length=[b"10", b"10"],
+    )
+
+    assert status_code == 400
+    assert b"invalid_content_length" in body
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size_bytes", [9 * 1024 * 1024, MAX_FILE_SIZE_BYTES])
+async def test_api_accepted_attachment_materializes_at_nine_mib_and_public_boundary(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+    size_bytes: int,
+) -> None:
+    _, sessions, owner, _, storage = artifact_api
+    user = await register(owner, f"artifact-boundary-{size_bytes}@example.com")
+    tenant_id = user["workspaces"][0]["id"]
+    content = b"a" * size_bytes
+    _, run = await create_file_run(owner, tenant_id, content=content, name="boundary.txt")
+    workspace = MemoryWorkspace()
+
+    async with sessions() as session:
+        await TaskAttachmentService(
+            file_repository=SqlAlchemyFileRepository(session),
+            attachment_repository=SqlAlchemyTaskAttachmentRepository(session),
+            storage=storage,
+        ).materialize(
+            tenant_id=UUID(tenant_id),
+            run_id=UUID(run["id"]),
+            workspace=workspace,
+        )
+
+    assert list(workspace.files.values()) == [content]
+
+
+@pytest.mark.asyncio
+async def test_unbound_file_delete_is_idempotent_but_never_deletes_a_bound_attachment(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    _, _, owner, _, storage = artifact_api
+    user = await register(owner, "artifact-compensation@example.com")
+    tenant_id = user["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    orphan = (
+        await owner.post(
+            "/api/v1/files",
+            headers=headers,
+            files={"file": ("orphan.txt", b"orphan", "text/plain")},
+        )
+    ).json()
+
+    deleted = await owner.delete(f"/api/v1/files/{orphan['id']}", headers=headers)
+    repeated = await owner.delete(f"/api/v1/files/{orphan['id']}", headers=headers)
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True}
+    assert repeated.status_code == 200
+    assert repeated.json() == {"deleted": True}
+    assert storage.objects == {}
+
+    bound_file, _ = await create_file_run(owner, tenant_id)
+    bound_storage_keys = set(storage.objects)
+    protected = await owner.delete(f"/api/v1/files/{bound_file['id']}", headers=headers)
+
+    assert protected.status_code == 200
+    assert protected.json() == {"deleted": False}
+    assert set(storage.objects) == bound_storage_keys
+
+
+@pytest.mark.asyncio
+async def test_unbound_file_ttl_reaper_deletes_real_metadata_and_object_but_keeps_bound_files(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    _, sessions, owner, _, storage = artifact_api
+    user = await register(owner, "artifact-ttl@example.com")
+    tenant_id = user["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    orphan = (
+        await owner.post(
+            "/api/v1/files",
+            headers=headers,
+            files={"file": ("ttl-orphan.txt", b"orphan", "text/plain")},
+        )
+    ).json()
+    bound_file, _ = await create_file_run(owner, tenant_id)
+
+    async with sessions() as session:
+        service = ArtifactService(
+            file_repository=SqlAlchemyFileRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(
+                session,
+                heartbeat_session_factory=sessions,
+            ),
+            storage=storage,
+        )
+        cleaned = await service.cleanup_unbound_files(
+            older_than=datetime.now(UTC) + timedelta(days=1),
+            commit=session.commit,
+        )
+
+    assert cleaned == 1
+    async with sessions() as session:
+        files = SqlAlchemyFileRepository(session)
+        assert await files.get(tenant_id=UUID(tenant_id), file_id=UUID(orphan["id"])) is None
+        assert (
+            await files.get(tenant_id=UUID(tenant_id), file_id=UUID(bound_file["id"])) is not None
+        )
+    assert len(storage.objects) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_run_idempotency_key_replays_one_run_and_rejects_payload_drift(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    _, sessions, owner, _, _ = artifact_api
+    user = await register(owner, "run-idempotency@example.com")
+    tenant_id = user["workspaces"][0]["id"]
+    stored_file, seed_run = await create_file_run(owner, tenant_id)
+    key = str(uuid4())
+    headers = {"X-Tenant-ID": tenant_id, "Idempotency-Key": key}
+    url = f"/api/v1/employees/{seed_run['employee_id']}/runs"
+    payload = {"input": {"task": "idempotent"}, "attachment_ids": [stored_file["id"]]}
+
+    first = await owner.post(url, headers=headers, json=payload)
+    replay = await owner.post(url, headers=headers, json=payload)
+    conflict = await owner.post(
+        url,
+        headers=headers,
+        json={"input": {"task": "changed"}, "attachment_ids": [stored_file["id"]]},
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "idempotency_key_reused"
+    async with sessions() as session:
+        run_count = await session.scalar(
+            select(func.count())
+            .select_from(RunRecord)
+            .where(RunRecord.id == UUID(first.json()["id"]))
+        )
+        command_count = await session.scalar(
+            select(func.count())
+            .select_from(RunCommandRecord)
+            .where(RunCommandRecord.run_id == UUID(first.json()["id"]))
+        )
+        attachment_count = await session.scalar(
+            select(func.count())
+            .select_from(TaskAttachmentRecord)
+            .where(TaskAttachmentRecord.run_id == UUID(first.json()["id"]))
+        )
+    assert (run_count, command_count, attachment_count) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_run_idempotency_and_tenant_headers_are_allowed_by_cors(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, _, _, _, _ = artifact_api
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        response = await client.options(
+            "/api/v1/employees/00000000-0000-4000-8000-000000000404/runs",
+            headers={
+                "Origin": "tauri://localhost",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Idempotency-Key,X-Tenant-ID",
+            },
+        )
+
+    assert response.status_code == 200
+    allowed_headers = response.headers["access-control-allow-headers"].lower()
+    assert "idempotency-key" in allowed_headers
+    assert "x-tenant-id" in allowed_headers
 
 
 @pytest.mark.asyncio

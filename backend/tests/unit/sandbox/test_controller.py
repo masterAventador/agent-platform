@@ -11,6 +11,7 @@ import pytest
 from docker.errors import NotFound
 from fastapi.testclient import TestClient
 
+from agent_platform.platform.artifacts.entities import MAX_FILE_SIZE_BYTES
 from agent_platform.sandbox.controller.api import create_controller_app
 from agent_platform.sandbox.controller.config import ControllerSettings
 from agent_platform.sandbox.controller.service import (
@@ -76,6 +77,16 @@ def test_controller_fails_fast_without_secret_or_pinned_image() -> None:
         ControllerSettings(bearer_secret="", sandbox_image=PINNED_IMAGE)
     with pytest.raises(ValueError, match="digest"):
         ControllerSettings(bearer_secret="test-secret-long-enough", sandbox_image="python:3.12")
+
+
+def test_controller_default_accepts_the_public_attachment_size_contract() -> None:
+    configured = ControllerSettings(
+        bearer_secret="test-secret-long-enough",
+        sandbox_image=PINNED_IMAGE,
+    )
+
+    assert configured.max_file_bytes == MAX_FILE_SIZE_BYTES
+    assert configured.max_batch_bytes >= MAX_FILE_SIZE_BYTES
 
 
 def test_api_requires_bearer_auth_and_never_echoes_secret() -> None:
@@ -504,8 +515,8 @@ def test_execute_calls_for_one_sandbox_are_serialized() -> None:
             target=controller.execute,
             kwargs={
                 "sandbox_id": SANDBOX_ID,
-                    "lease_id": expected_lease,
-                    "sandbox_epoch": 1,
+                "lease_id": expected_lease,
+                "sandbox_epoch": 1,
                 "command": "true",
                 "timeout": 1,
             },

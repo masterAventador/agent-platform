@@ -150,7 +150,14 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert membership_columns == {"id", "tenant_id", "user_id", "role", "created_at"}
     assert {"id", "tenant_id", "name", "runtime_type", "status"} <= employee_columns
     assert {"id", "employee_id", "tenant_id", "version", "definition"} <= version_columns
-    assert {"id", "tenant_id", "employee_id", "thread_id", "status"} <= run_columns
+    assert {
+        "id",
+        "tenant_id",
+        "employee_id",
+        "thread_id",
+        "status",
+        "idempotency_key",
+    } <= run_columns
     assert {"event_id", "run_id", "sequence", "event_type", "payload"} <= event_columns
     assert {"id", "run_id", "action", "dispatched_at", "processed_at"} <= command_columns
     assert {"id", "tenant_id", "name", "provider", "provider_id"} <= knowledge_columns
@@ -268,6 +275,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "phase",
         "lease_owner",
         "reconcile_after",
+        "retire_after",
         "created_at",
         "updated_at",
     } == storage_operation_columns
@@ -375,6 +383,113 @@ def test_artifact_storage_lease_migration_backfills_existing_operations(
     assert remaining == 3
 
 
+def test_artifact_workflow_hardening_migration_round_trips_existing_data(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "artifact-workflow-hardening.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "20260715_0019")
+
+    tenant_id = uuid4().hex
+    operation_id = uuid4().hex
+    timestamp = "2026-07-16 12:00:00+00:00"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+            (tenant_id, "存量租户", f"existing-{tenant_id}", timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO artifact_storage_operations (
+                id, tenant_id, action, entity_kind, entity_id, storage_key,
+                status, phase, reconcile_after, created_at, updated_at
+            ) VALUES (?, ?, 'put', 'file', ?, ?, 'compensated',
+                      'metadata_applied', ?, ?, ?)
+            """,
+            (
+                operation_id,
+                tenant_id,
+                uuid4().hex,
+                f"migration/{operation_id}",
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, "20260716_0020")
+    with sqlite3.connect(database_path) as connection:
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        operation_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(artifact_storage_operations)"
+            ).fetchall()
+        }
+        unique_indexes = [
+            row[1]
+            for row in connection.execute("PRAGMA index_list(runs)").fetchall()
+            if row[2] == 1
+        ]
+        unique_column_sets = {
+            tuple(
+                column[2]
+                for column in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall()
+            )
+            for index_name in unique_indexes
+        }
+        migrated = connection.execute(
+            "SELECT status, retire_after FROM artifact_storage_operations WHERE id = ?",
+            (operation_id,),
+        ).fetchone()
+        connection.execute(
+            "UPDATE artifact_storage_operations "
+            "SET status = 'retired', retire_after = ? WHERE id = ?",
+            (timestamp, operation_id),
+        )
+        connection.commit()
+
+    assert "idempotency_key" in run_columns
+    assert "retire_after" in operation_columns
+    assert (
+        "tenant_id",
+        "created_by",
+        "employee_id",
+        "idempotency_key",
+    ) in unique_column_sets
+    assert migrated == ("compensated", None)
+
+    command.downgrade(config, "20260715_0019")
+    with sqlite3.connect(database_path) as connection:
+        downgraded_run_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        downgraded_operation_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(artifact_storage_operations)"
+            ).fetchall()
+        }
+        downgraded = connection.execute(
+            "SELECT status FROM artifact_storage_operations WHERE id = ?",
+            (operation_id,),
+        ).fetchone()
+
+    assert "idempotency_key" not in downgraded_run_columns
+    assert "retire_after" not in downgraded_operation_columns
+    assert downgraded == ("completed",)
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        reupgraded = connection.execute(
+            "SELECT status, retire_after FROM artifact_storage_operations WHERE id = ?",
+            (operation_id,),
+        ).fetchone()
+    assert reupgraded == ("completed", None)
+
+
 def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> None:
     database_path = tmp_path / "sandbox-epoch.db"
     config = Config(BACKEND_ROOT / "alembic.ini")
@@ -419,7 +534,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260715_0019"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0020"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

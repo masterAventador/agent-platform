@@ -1,9 +1,9 @@
 import { Alert, Button, Card, Descriptions, Flex, Input, Modal, Space, Spin, Tag, Typography } from 'antd'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { useCreateRun } from '../../runs/api/queries'
-import { uploadFile } from '../../runs/api/runs'
+import { deleteUnboundFile, uploadFile } from '../../runs/api/runs'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import { getPlatformAdapter, type PlatformFile } from '../../../platform'
 import { isEmployeeConfigurationAvailable } from '../api/employees'
@@ -35,6 +35,10 @@ export function EmployeeDetailPage({
   const [selectedFile, setSelectedFile] = useState<PlatformFile | null>(null)
   const [selectingFile, setSelectingFile] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+  const submissionKeyRef = useRef<string | null>(null)
+  const retainedFileIdRef = useRef<string | null>(null)
 
   if (employee.isPending) {
     return <Flex className="employee-loading" justify="center"><Spin /></Flex>
@@ -61,6 +65,8 @@ export function EmployeeDetailPage({
           {canExecuteRuns && published && configurationAvailable && (
             <Button onClick={() => {
               setAttachmentError(null)
+              submissionKeyRef.current = null
+              retainedFileIdRef.current = null
               setRunModalOpen(true)
             }}>发起任务</Button>
           )}
@@ -128,36 +134,57 @@ export function EmployeeDetailPage({
         open={runModalOpen}
         okText="确认发起"
         cancelText="取消"
-        okButtonProps={{ disabled: !task.trim(), loading: createRun.isPending }}
+        okButtonProps={{ disabled: !task.trim(), loading: submitting || createRun.isPending }}
         onCancel={() => {
           setRunModalOpen(false)
           setTask('')
           setSelectedFile(null)
           setAttachmentError(null)
+          submissionKeyRef.current = null
+          retainedFileIdRef.current = null
           createRun.reset()
         }}
         onOk={async () => {
+          if (submittingRef.current) return
+          submittingRef.current = true
+          setSubmitting(true)
           let attachmentIds: string[] = []
-          if (selectedFile) {
-            try {
-              setAttachmentError(null)
-              attachmentIds = [(await uploadFile(data.tenant_id, selectedFile)).id]
-            } catch {
-              setAttachmentError('附件上传失败，请检查文件类型、大小或网络后重试')
-              return
-            }
-          }
+          let uploadedFileId: string | null = null
+          const idempotencyKey = submissionKeyRef.current ?? crypto.randomUUID()
+          submissionKeyRef.current = idempotencyKey
           try {
+            if (selectedFile) {
+              setAttachmentError(null)
+              uploadedFileId = retainedFileIdRef.current
+                ?? (await uploadFile(data.tenant_id, selectedFile)).id
+              attachmentIds = [uploadedFileId]
+            }
             const run = await createRun.mutateAsync({
               input: { message: task.trim() },
               attachmentIds,
+              idempotencyKey,
             })
             setRunModalOpen(false)
             setTask('')
             setSelectedFile(null)
+            submissionKeyRef.current = null
+            retainedFileIdRef.current = null
             navigate(`/runs/${run.id}`)
           } catch {
-            // Mutation 错误在弹窗内统一渲染，避免 Modal onOk 泄漏 rejection。
+            if (uploadedFileId) {
+              try {
+                const compensation = await deleteUnboundFile(data.tenant_id, uploadedFileId)
+                retainedFileIdRef.current = compensation.deleted ? null : uploadedFileId
+              } catch {
+                // 服务端 TTL 回收会处理暂时无法补偿的未绑定文件。
+                retainedFileIdRef.current = uploadedFileId
+              }
+            } else if (selectedFile) {
+              setAttachmentError('附件上传失败，请检查文件类型、大小或网络后重试')
+            }
+          } finally {
+            submittingRef.current = false
+            setSubmitting(false)
           }
         }}
       >
@@ -185,7 +212,10 @@ export function EmployeeDetailPage({
           value={task}
           rows={5}
           placeholder="例如：整理本周项目进展并输出摘要"
-          onChange={(event) => setTask(event.target.value)}
+          onChange={(event) => {
+            submissionKeyRef.current = null
+            setTask(event.target.value)
+          }}
         />
         {data.definition.capabilities.file_upload && (
           <Space className="employee-run-attachment" orientation="vertical" size={4}>
@@ -198,7 +228,11 @@ export function EmployeeDetailPage({
                   const file = await getPlatformAdapter().selectFile({
                     extensions: ['txt', 'md', 'json', 'csv', 'pdf', 'png', 'jpg', 'jpeg', 'docx'],
                   })
-                  if (file) setSelectedFile(file)
+                  if (file) {
+                    submissionKeyRef.current = null
+                    retainedFileIdRef.current = null
+                    setSelectedFile(file)
+                  }
                 } catch {
                   setAttachmentError('无法读取所选文件，请重新选择或检查文件访问权限')
                 } finally {

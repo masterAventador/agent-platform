@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 from agent_platform.platform.artifacts.services import (
     DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS,
     DEFAULT_STORAGE_OPERATION_LEASE,
+    DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
     ArtifactService,
     TaskAttachmentService,
 )
@@ -375,6 +377,7 @@ class ComposedRuntimeResolver:
         artifact_operation_heartbeat_interval: float = (
             DEFAULT_STORAGE_OPERATION_HEARTBEAT_SECONDS
         ),
+        artifact_storage_request_timeout: float = DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
         close_callback: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -387,6 +390,7 @@ class ComposedRuntimeResolver:
         self._sandbox_ttl = sandbox_ttl
         self._artifact_operation_lease_duration = artifact_operation_lease_duration
         self._artifact_operation_heartbeat_interval = artifact_operation_heartbeat_interval
+        self._artifact_storage_request_timeout = artifact_storage_request_timeout
         self._close_callback = close_callback
 
     async def resolve(
@@ -465,6 +469,7 @@ class ComposedRuntimeResolver:
                         file_repository=SqlAlchemyFileRepository(session),
                         attachment_repository=SqlAlchemyTaskAttachmentRepository(session),
                         storage=self._artifact_storage,
+                        storage_request_timeout=self._artifact_storage_request_timeout,
                     ).materialize(
                         tenant_id=run.tenant_id,
                         run_id=run.id,
@@ -567,6 +572,7 @@ class ComposedRuntimeResolver:
                             operation_heartbeat_interval=(
                                 self._artifact_operation_heartbeat_interval
                             ),
+                            storage_request_timeout=self._artifact_storage_request_timeout,
                         ).create_artifact(
                             tenant_id=run.tenant_id,
                             run_id=run.id,
@@ -629,6 +635,31 @@ class ComposedRuntimeResolver:
                     artifact_catalog=artifact_catalog,
                     event_history=event_history,
                 )
+        except asyncio.CancelledError:
+            if delete_on_error:
+                try:
+                    await asyncio.shield(
+                        self._sandbox_manager.delete(
+                            lease_id=environment.lease.id,
+                            scope=scope,
+                        )
+                    )
+                except Exception:
+                    logger.error(
+                        "runtime_cancelled_sandbox_delete_failed",
+                        extra={"run_id": str(run.id)},
+                    )
+            else:
+                close = getattr(environment.backend, "aclose", None)
+                if callable(close):
+                    try:
+                        await asyncio.shield(close())
+                    except Exception:
+                        logger.error(
+                            "runtime_cancelled_recovery_detach_failed",
+                            extra={"run_id": str(run.id)},
+                        )
+            raise
         except PermanentRuntimePreparationError as error:
 
             async def cleanup() -> None:
@@ -642,6 +673,27 @@ class ComposedRuntimeResolver:
             error.defer_cleanup(cleanup)
             raise
         except Exception:
+            if delete_on_error:
+                try:
+                    await self._sandbox_manager.delete(
+                        lease_id=environment.lease.id,
+                        scope=scope,
+                    )
+                except Exception:
+                    logger.error(
+                        "runtime_initial_sandbox_delete_failed",
+                        extra={"run_id": str(run.id)},
+                    )
+                    close = getattr(environment.backend, "aclose", None)
+                    if callable(close):
+                        try:
+                            await close()
+                        except Exception:
+                            logger.error(
+                                "runtime_initial_sandbox_detach_failed",
+                                extra={"run_id": str(run.id)},
+                            )
+                raise
             close = getattr(environment.backend, "aclose", None)
             if callable(close):
                 try:
@@ -651,9 +703,7 @@ class ComposedRuntimeResolver:
                         "runtime_recovery_detach_failed",
                         extra={"run_id": str(run.id)},
                     )
-            if not delete_on_error:
-                raise RuntimeRecoveryTransient from None
-            raise
+            raise RuntimeRecoveryTransient from None
 
         return PreparedRuntimeResult(
             runtime=runtime,

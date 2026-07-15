@@ -82,16 +82,32 @@ export async function uploadFile(tenantId: string, file: PlatformFile): Promise<
   return response.data
 }
 
+export async function deleteUnboundFile(
+  tenantId: string,
+  fileId: string,
+): Promise<{ deleted: boolean }> {
+  return (
+    await apiClient.delete<{ deleted: boolean }>(
+      `/files/${fileId}`,
+      tenantRequestConfig(tenantId),
+    )
+  ).data
+}
+
 export async function createRun(
   tenantId: string,
   employeeId: string,
   input: Record<string, unknown>,
   attachmentIds: string[] = [],
+  idempotencyKey?: string,
 ): Promise<Run> {
+  const config = tenantRequestConfig(tenantId)
   const response = await apiClient.post<Run>(
     `/employees/${employeeId}/runs`,
     { input, attachment_ids: attachmentIds },
-    tenantRequestConfig(tenantId),
+    idempotencyKey
+      ? { ...config, headers: { ...config.headers, 'Idempotency-Key': idempotencyKey } }
+      : config,
   )
   return response.data
 }

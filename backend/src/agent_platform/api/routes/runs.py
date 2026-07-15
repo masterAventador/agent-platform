@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, JsonValue
+from sqlalchemy.exc import IntegrityError
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.artifacts import (
@@ -35,6 +36,7 @@ from agent_platform.platform.tenants.permissions import TenantPermission, role_h
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
+IdempotencyHeader = Annotated[UUID | None, Header(alias="Idempotency-Key")]
 StreamTenantQuery = Annotated[UUID | None, Query(alias="tenant_id")]
 
 
@@ -99,6 +101,7 @@ async def create_run(
     payload: CreateRunRequest,
     request: Request,
     tenant_id: TenantHeader = None,
+    idempotency_key: IdempotencyHeader = None,
 ) -> RunResponse:
     async with request.app.state.session_factory() as database_session:
         user, access = await resolve_workspace(
@@ -142,14 +145,6 @@ async def create_run(
                 },
             )
 
-        run = Run.create(
-            tenant_id=access.tenant.id,
-            employee_id=employee.id,
-            employee_version=employee.published_version,
-            created_by=user.id,
-            input_data=payload.input,
-        )
-        await SqlAlchemyRunRepository(database_session).add(run)
         capabilities = version.definition.get("capabilities")
         if payload.attachment_ids and (
             not isinstance(capabilities, dict) or capabilities.get("file_upload") is not True
@@ -160,8 +155,9 @@ async def create_run(
             )
         file_repository = SqlAlchemyFileRepository(database_session)
         attachment_repository = SqlAlchemyTaskAttachmentRepository(database_session)
+        attachment_files = []
         for file_id in dict.fromkeys(payload.attachment_ids):
-            file = await file_repository.get(tenant_id=run.tenant_id, file_id=file_id)
+            file = await file_repository.get(tenant_id=access.tenant.id, file_id=file_id)
             if file is None or (
                 file.owner_id != user.id
                 and not role_has_permission(
@@ -169,6 +165,43 @@ async def create_run(
                 )
             ):
                 raise _not_found()
+            attachment_files.append(file)
+
+        runs = SqlAlchemyRunRepository(database_session)
+        if idempotency_key is not None:
+            existing = await runs.get_by_idempotency_key(
+                tenant_id=access.tenant.id,
+                created_by=user.id,
+                employee_id=employee.id,
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                existing_attachments = await attachment_repository.list_for_run(
+                    tenant_id=existing.tenant_id,
+                    run_id=existing.id,
+                )
+                if existing.input_data != payload.input or [
+                    item.file_id for item in existing_attachments
+                ] != [file.id for file in attachment_files]:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "idempotency_key_reused",
+                            "message": "幂等键已用于不同的任务请求",
+                        },
+                    )
+                return RunResponse.from_entity(existing)
+
+        run = Run.create(
+            tenant_id=access.tenant.id,
+            employee_id=employee.id,
+            employee_version=employee.published_version,
+            created_by=user.id,
+            input_data=payload.input,
+            idempotency_key=idempotency_key,
+        )
+        await runs.add(run)
+        for file in attachment_files:
             await attachment_repository.add(
                 TaskAttachment.create(
                     tenant_id=run.tenant_id,
@@ -184,7 +217,35 @@ async def create_run(
                 action=RunCommandAction.START,
             )
         )
-        await database_session.commit()
+        try:
+            await database_session.commit()
+        except IntegrityError:
+            await database_session.rollback()
+            if idempotency_key is None:
+                raise
+            existing = await runs.get_by_idempotency_key(
+                tenant_id=access.tenant.id,
+                created_by=user.id,
+                employee_id=employee.id,
+                idempotency_key=idempotency_key,
+            )
+            if existing is None:
+                raise
+            existing_attachments = await attachment_repository.list_for_run(
+                tenant_id=existing.tenant_id,
+                run_id=existing.id,
+            )
+            if existing.input_data != payload.input or [
+                item.file_id for item in existing_attachments
+            ] != [file.id for file in attachment_files]:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "idempotency_key_reused",
+                        "message": "幂等键已用于不同的任务请求",
+                    },
+                ) from None
+            run = existing
     return RunResponse.from_entity(run)
 
 
@@ -207,9 +268,10 @@ async def get_run(
         )
         if run is None:
             raise _not_found()
-        if not role_has_permission(
-            role=access.role, permission=TenantPermission.RUNS_MANAGE
-        ) and run.created_by != user.id:
+        if (
+            not role_has_permission(role=access.role, permission=TenantPermission.RUNS_MANAGE)
+            and run.created_by != user.id
+        ):
             raise _not_found()
     return RunResponse.from_entity(run)
 
@@ -232,9 +294,7 @@ async def list_runs(
             limit=limit,
             created_by=(
                 None
-                if role_has_permission(
-                    role=access.role, permission=TenantPermission.RUNS_MANAGE
-                )
+                if role_has_permission(role=access.role, permission=TenantPermission.RUNS_MANAGE)
                 else user.id
             ),
         )
@@ -261,9 +321,10 @@ async def list_run_events(
         )
         if run is None:
             raise _not_found()
-        if not role_has_permission(
-            role=access.role, permission=TenantPermission.RUNS_MANAGE
-        ) and run.created_by != user.id:
+        if (
+            not role_has_permission(role=access.role, permission=TenantPermission.RUNS_MANAGE)
+            and run.created_by != user.id
+        ):
             raise _not_found()
         return await SqlAlchemyRunEventRepository(database_session).list(
             run_id=run_id,
@@ -414,9 +475,10 @@ async def stream_run_events(
         )
         if run is None:
             raise _not_found()
-        if not role_has_permission(
-            role=access.role, permission=TenantPermission.RUNS_MANAGE
-        ) and run.created_by != user.id:
+        if (
+            not role_has_permission(role=access.role, permission=TenantPermission.RUNS_MANAGE)
+            and run.created_by != user.id
+        ):
             raise _not_found()
 
     async def generate() -> AsyncIterator[str]:

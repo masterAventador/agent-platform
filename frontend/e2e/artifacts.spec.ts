@@ -26,6 +26,26 @@ test('用户可以上传任务附件并查看、下载、定位和删除产物',
   const tenantId = currentUser.workspaces[0]?.id
   expect(tenantId).toBeTruthy()
 
+  let uploadRequestCount = 0
+  let runRequestCount = 0
+  let releaseUpload: (() => void) | undefined
+  const uploadGate = new Promise<void>((resolve) => {
+    releaseUpload = resolve
+  })
+  await page.route('**/api/v1/files', async (route) => {
+    if (route.request().method() === 'POST') {
+      uploadRequestCount += 1
+      await uploadGate
+    }
+    await route.continue()
+  })
+  await page.route('**/api/v1/employees/*/runs', async (route) => {
+    if (route.request().method() === 'POST') {
+      runRequestCount += 1
+    }
+    await route.continue()
+  })
+
   let artifactDeleted = false
   await page.route('**/api/v1/runs/*/artifacts', async (route) => {
     await route.fulfill({
@@ -94,11 +114,18 @@ test('用户可以上传任务附件并查看、下载、定位和删除产物',
     response.request().method() === 'POST'
       && response.url().endsWith('/api/v1/files')
   ))
-  await page.getByRole('button', { name: '确认发起' }).click()
+  await page.getByRole('button', { name: '确认发起' }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
+  await expect.poll(() => uploadRequestCount).toBe(1)
+  releaseUpload?.()
   const uploadResponse = await uploadResponsePromise
   expect(uploadResponse.status()).toBe(201)
 
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  expect(uploadRequestCount).toBe(1)
+  expect(runRequestCount).toBe(1)
   const runId = page.url().split('/').at(-1)
   expect(runId).toBeTruthy()
   const attachmentsResponse = await page.request.get(

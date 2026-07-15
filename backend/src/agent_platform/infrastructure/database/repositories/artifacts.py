@@ -13,6 +13,7 @@ from sqlalchemy import (
     Uuid,
     and_,
     delete,
+    exists,
     or_,
     select,
     update,
@@ -45,9 +46,7 @@ class FileRecord(Base):
     storage_key: Mapped[str] = mapped_column(String(500), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "id", name="uq_files_tenant_id_id"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "id", name="uq_files_tenant_id_id"),)
 
 
 class TaskAttachmentRecord(Base):
@@ -113,6 +112,7 @@ class ArtifactStorageOperationRecord(Base):
     phase: Mapped[str] = mapped_column(String(32))
     lease_owner: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     reconcile_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    retire_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -123,7 +123,7 @@ class ArtifactStorageOperationRecord(Base):
             name="ck_artifact_storage_entity_kind",
         ),
         CheckConstraint(
-            "status IN ('pending', 'completed', 'compensated')",
+            "status IN ('pending', 'completed', 'compensated', 'retired')",
             name="ck_artifact_storage_status",
         ),
         CheckConstraint(
@@ -169,11 +169,56 @@ class SqlAlchemyFileRepository:
 
     async def delete(self, *, tenant_id: UUID, file_id: UUID) -> bool:
         result = await self._session.execute(
+            delete(FileRecord).where(FileRecord.tenant_id == tenant_id, FileRecord.id == file_id)
+        )
+        return isinstance(result, CursorResult) and bool(result.rowcount)
+
+    async def delete_if_unbound(self, *, tenant_id: UUID, file_id: UUID) -> bool:
+        attached = exists(
+            select(TaskAttachmentRecord.id).where(
+                TaskAttachmentRecord.tenant_id == tenant_id,
+                TaskAttachmentRecord.file_id == file_id,
+            )
+        )
+        result = await self._session.execute(
             delete(FileRecord).where(
-                FileRecord.tenant_id == tenant_id, FileRecord.id == file_id
+                FileRecord.tenant_id == tenant_id,
+                FileRecord.id == file_id,
+                ~attached,
             )
         )
         return isinstance(result, CursorResult) and bool(result.rowcount)
+
+    async def list_unbound_before(self, *, older_than: datetime, limit: int) -> list[File]:
+        attached = exists(
+            select(TaskAttachmentRecord.id).where(
+                TaskAttachmentRecord.tenant_id == FileRecord.tenant_id,
+                TaskAttachmentRecord.file_id == FileRecord.id,
+            )
+        )
+        records = (
+            await self._session.execute(
+                select(FileRecord)
+                .where(FileRecord.created_at < older_than, ~attached)
+                .order_by(FileRecord.created_at, FileRecord.id)
+                .limit(limit)
+            )
+        ).scalars()
+        return [self._to_entity(record) for record in records]
+
+    @staticmethod
+    def _to_entity(record: FileRecord) -> File:
+        return File(
+            id=record.id,
+            tenant_id=record.tenant_id,
+            owner_id=record.owner_id,
+            name=record.name,
+            media_type=record.media_type,
+            size_bytes=record.size_bytes,
+            sha256=record.sha256,
+            storage_key=record.storage_key,
+            created_at=_utc(record.created_at),
+        )
 
 
 class SqlAlchemyTaskAttachmentRepository:
@@ -369,8 +414,9 @@ class SqlAlchemyArtifactStorageOperationRepository:
         lease_owner: UUID,
         status: str,
         reconcile_after: datetime | None = None,
+        retire_after: datetime | None = None,
     ) -> bool:
-        expected_statuses = ("pending", "compensated") if status == "compensated" else ("pending",)
+        expected_statuses = ("pending", "compensated")
         values: dict[str, object] = {
             "status": status,
             "lease_owner": None,
@@ -378,6 +424,7 @@ class SqlAlchemyArtifactStorageOperationRepository:
         }
         if reconcile_after is not None:
             values["reconcile_after"] = reconcile_after
+        values["retire_after"] = retire_after
         result = await self._session.execute(
             update(ArtifactStorageOperationRecord)
             .where(
@@ -464,6 +511,7 @@ class SqlAlchemyArtifactStorageOperationRepository:
             phase=record.phase,
             lease_owner=record.lease_owner,
             reconcile_after=_utc(record.reconcile_after),
+            retire_after=_utc(record.retire_after) if record.retire_after is not None else None,
             created_at=_utc(record.created_at),
             updated_at=_utc(record.updated_at),
         )

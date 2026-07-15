@@ -68,7 +68,7 @@ def test_real_arm64_sandbox_lifecycle_is_hardened_and_leaves_no_container() -> N
         boundary_files = {
             "/workspace/empty.bin": b"",
             "/workspace/binary.bin": bytes(range(256)),
-            "/workspace/max.bin": b"\xa5" * (8 * 1024 * 1024),
+            "/workspace/max.bin": b"\xa5" * (25 * 1024 * 1024),
         }
         boundary_upload = client.put(
             f"/v1/sandboxes/{sandbox_id}/files",
