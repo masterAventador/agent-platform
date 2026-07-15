@@ -1,7 +1,9 @@
 import { apiClient } from '../../../api/client'
 import { tenantRequestConfig } from '../../../api/tenant'
 
-export type SkillStatus = 'draft' | 'published'
+export type SkillStatus = 'draft' | 'published' | 'archived' | 'deleted'
+export type SkillReviewStatus = 'approved' | 'blocked'
+export type SkillFindingSeverity = 'info' | 'warning' | 'blocker'
 
 export interface Skill {
   id: string
@@ -11,6 +13,15 @@ export interface Skill {
   status: SkillStatus
   latest_version: number
   published_version: number | null
+  source: string
+}
+
+export interface SkillSecurityFinding {
+  severity: SkillFindingSeverity
+  category: string
+  code: string
+  message: string
+  path: string | null
 }
 
 export interface SkillVersion {
@@ -18,8 +29,30 @@ export interface SkillVersion {
   description: string
   digest: string
   files: string[]
+  review_status: SkillReviewStatus
+  security_findings: SkillSecurityFinding[]
   created_at: string
+  reviewed_at: string
   published_at: string | null
+}
+
+export interface SkillVersionDiff {
+  from_version: number
+  to_version: number
+  added: string[]
+  removed: string[]
+  changed: string[]
+}
+
+export interface SkillUsageItem {
+  employee_id: string
+  employee_name: string
+  relation: 'employee_draft' | 'employee_version'
+  version: number | null
+}
+
+export interface SkillUsage {
+  items: SkillUsageItem[]
 }
 
 function bundleBody(file: File): FormData {
@@ -66,6 +99,37 @@ export async function publishSkillVersion(
   return (await apiClient.post<Skill>(
     `/skills/${skillId}/versions/${version}/publish`,
     undefined,
+    tenantRequestConfig(tenantId),
+  )).data
+}
+
+export async function offlineSkill(tenantId: string, skillId: string): Promise<Skill> {
+  return (await apiClient.post<Skill>(
+    `/skills/${skillId}/offline`,
+    undefined,
+    tenantRequestConfig(tenantId),
+  )).data
+}
+
+export async function deleteSkill(tenantId: string, skillId: string): Promise<void> {
+  await apiClient.delete(`/skills/${skillId}`, tenantRequestConfig(tenantId))
+}
+
+export async function getSkillVersionDiff(
+  tenantId: string,
+  skillId: string,
+  fromVersion: number,
+  toVersion: number,
+): Promise<SkillVersionDiff> {
+  return (await apiClient.get<SkillVersionDiff>(
+    `/skills/${skillId}/versions/${fromVersion}/diff/${toVersion}`,
+    tenantRequestConfig(tenantId),
+  )).data
+}
+
+export async function getSkillUsage(tenantId: string, skillId: string): Promise<SkillUsage> {
+  return (await apiClient.get<SkillUsage>(
+    `/skills/${skillId}/usage`,
     tenantRequestConfig(tenantId),
   )).data
 }

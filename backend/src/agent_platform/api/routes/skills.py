@@ -1,5 +1,6 @@
 from datetime import datetime
 from mimetypes import guess_type
+from pathlib import Path
 from typing import Annotated, cast
 from uuid import UUID
 
@@ -9,12 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
+from agent_platform.platform.skills.builtin import BuiltinSkillInstaller
 from agent_platform.platform.skills.bundle import MAX_ARCHIVE_BYTES, SkillBundleError
-from agent_platform.platform.skills.entities import Skill, SkillVersion
+from agent_platform.platform.skills.entities import Skill, SkillUsage, SkillVersion
 from agent_platform.platform.skills.errors import (
+    SkillAlreadyDeleted,
+    SkillInUse,
     SkillNameAlreadyExists,
     SkillNameMismatch,
     SkillNotFound,
+    SkillReviewBlocked,
     SkillVersionNotFound,
 )
 from agent_platform.platform.skills.ports import SkillStorage
@@ -34,6 +39,7 @@ class SkillResponse(BaseModel):
     status: str
     latest_version: int
     published_version: int | None
+    source: str
 
     @classmethod
     def from_entity(cls, skill: Skill) -> "SkillResponse":
@@ -42,9 +48,10 @@ class SkillResponse(BaseModel):
             tenant_id=skill.tenant_id,
             name=skill.name,
             description=skill.description,
-            status="published" if skill.published_version is not None else "draft",
+            status=skill.lifecycle_status.value,
             latest_version=skill.latest_version,
             published_version=skill.published_version,
+            source=skill.source,
         )
 
     @classmethod
@@ -59,7 +66,16 @@ class SkillResponse(BaseModel):
             status="published",
             latest_version=published.version,
             published_version=published.version,
+            source=skill.source,
         )
+
+
+class SkillSecurityFindingResponse(BaseModel):
+    severity: str
+    category: str
+    code: str
+    message: str
+    path: str | None
 
 
 class SkillVersionResponse(BaseModel):
@@ -67,7 +83,10 @@ class SkillVersionResponse(BaseModel):
     description: str
     digest: str
     files: list[str]
+    review_status: str
+    security_findings: list[SkillSecurityFindingResponse]
     created_at: datetime
+    reviewed_at: datetime
     published_at: datetime | None
 
     @classmethod
@@ -77,9 +96,49 @@ class SkillVersionResponse(BaseModel):
             description=version.description,
             digest=version.digest,
             files=version.files,
+            review_status=version.review_status.value,
+            security_findings=[
+                SkillSecurityFindingResponse(
+                    severity=finding.severity.value,
+                    category=finding.category,
+                    code=finding.code,
+                    message=finding.message,
+                    path=finding.path,
+                )
+                for finding in version.security_findings
+            ],
             created_at=version.created_at,
+            reviewed_at=version.reviewed_at,
             published_at=version.published_at,
         )
+
+
+class SkillVersionDiffResponse(BaseModel):
+    from_version: int
+    to_version: int
+    added: list[str]
+    removed: list[str]
+    changed: list[str]
+
+
+class SkillUsageItemResponse(BaseModel):
+    employee_id: UUID
+    employee_name: str
+    relation: str
+    version: int | None = None
+
+    @classmethod
+    def from_entity(cls, usage: SkillUsage) -> "SkillUsageItemResponse":
+        return cls(
+            employee_id=usage.employee_id,
+            employee_name=usage.employee_name,
+            relation=usage.relation,
+            version=usage.version,
+        )
+
+
+class SkillUsageResponse(BaseModel):
+    items: list[SkillUsageItemResponse]
 
 
 def _service(request: Request, session: AsyncSession) -> SkillService:
@@ -116,12 +175,31 @@ def _raise_skill_error(error: Exception) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "skill_name_mismatch", "message": "新版本的 Skill 名称不一致"},
         ) from error
+    if isinstance(error, SkillReviewBlocked):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "skill_review_blocked", "message": "Skill 安全审核未通过"},
+        ) from error
+    if isinstance(error, SkillInUse):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "skill_in_use", "message": "Skill 仍被员工引用，不能删除"},
+        ) from error
+    if isinstance(error, SkillAlreadyDeleted):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"code": "skill_deleted", "message": "Skill 已删除"},
+        ) from error
     if isinstance(error, SkillBundleError):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "invalid_skill_bundle", "message": str(error)},
         ) from error
     raise error
+
+
+def _builtin_root() -> Path:
+    return Path(__file__).resolve().parents[5] / "skills" / "builtin"
 
 
 @router.post("", response_model=SkillResponse, status_code=status.HTTP_201_CREATED)
@@ -177,6 +255,30 @@ async def list_skills(
                 )
                 responses.append(SkillResponse.from_published_version(skill, published))
     return responses
+
+
+@router.post("/builtin/install", response_model=list[SkillResponse])
+async def install_builtin_skills(
+    request: Request, tenant_id: TenantHeader = None
+) -> list[SkillResponse]:
+    async with request.app.state.session_factory() as session:
+        user, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
+        )
+        try:
+            skills = await BuiltinSkillInstaller(
+                repository=SqlAlchemySkillRepository(session),
+                storage=cast(SkillStorage, request.app.state.skill_storage),
+                root=_builtin_root(),
+            ).install_all(tenant_id=access.tenant.id, created_by=user.id)
+            await session.commit()
+        except SkillReviewBlocked as error:
+            _raise_skill_error(error)
+            raise AssertionError("unreachable") from error
+    return [SkillResponse.from_entity(skill) for skill in skills]
 
 
 @router.get("/{skill_id}", response_model=SkillResponse)
@@ -297,10 +399,119 @@ async def publish_skill_version(
                 version_number=version,
             )
             await session.commit()
-        except (SkillNotFound, SkillVersionNotFound) as error:
+        except (SkillNotFound, SkillVersionNotFound, SkillReviewBlocked) as error:
             _raise_skill_error(error)
             raise AssertionError("unreachable") from error
     return SkillResponse.from_entity(skill)
+
+
+@router.post("/{skill_id}/offline", response_model=SkillResponse)
+async def offline_skill(
+    skill_id: UUID,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> SkillResponse:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
+        )
+        try:
+            skill = await _service(request, session).offline(
+                tenant_id=access.tenant.id,
+                skill_id=skill_id,
+            )
+            await session.commit()
+        except (SkillNotFound, SkillAlreadyDeleted) as error:
+            _raise_skill_error(error)
+            raise AssertionError("unreachable") from error
+    return SkillResponse.from_entity(skill)
+
+
+@router.delete("/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_skill(
+    skill_id: UUID,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> Response:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
+        )
+        try:
+            await _service(request, session).delete(
+                tenant_id=access.tenant.id,
+                skill_id=skill_id,
+            )
+            await session.commit()
+        except (SkillNotFound, SkillInUse) as error:
+            _raise_skill_error(error)
+            raise AssertionError("unreachable") from error
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{skill_id}/usage", response_model=SkillUsageResponse)
+async def get_skill_usage(
+    skill_id: UUID, request: Request, tenant_id: TenantHeader = None
+) -> SkillUsageResponse:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
+        )
+        try:
+            items = await _service(request, session).usage(
+                tenant_id=access.tenant.id,
+                skill_id=skill_id,
+            )
+        except SkillNotFound as error:
+            _raise_skill_error(error)
+            raise AssertionError("unreachable") from error
+    return SkillUsageResponse(
+        items=[SkillUsageItemResponse.from_entity(item) for item in items]
+    )
+
+
+@router.get(
+    "/{skill_id}/versions/{from_version}/diff/{to_version}",
+    response_model=SkillVersionDiffResponse,
+)
+async def diff_skill_versions(
+    skill_id: UUID,
+    from_version: int,
+    to_version: int,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> SkillVersionDiffResponse:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.SKILLS_MANAGE,
+        )
+        try:
+            diff = await _service(request, session).diff(
+                tenant_id=access.tenant.id,
+                skill_id=skill_id,
+                from_version=from_version,
+                to_version=to_version,
+            )
+        except (SkillNotFound, SkillVersionNotFound, SkillBundleError) as error:
+            _raise_skill_error(error)
+            raise AssertionError("unreachable") from error
+    return SkillVersionDiffResponse(
+        from_version=from_version,
+        to_version=to_version,
+        **diff,
+    )
 
 
 @router.get("/{skill_id}/versions/{version}/files/{path:path}")

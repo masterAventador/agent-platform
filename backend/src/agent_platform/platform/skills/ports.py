@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from agent_platform.platform.skills.entities import Skill, SkillVersion
+from agent_platform.platform.skills.entities import Skill, SkillUsage, SkillVersion
 
 
 class SkillRepository(Protocol):
@@ -17,6 +17,8 @@ class SkillRepository(Protocol):
 
     async def get(self, *, tenant_id: UUID, skill_id: UUID) -> Skill | None: ...
 
+    async def get_by_name(self, *, tenant_id: UUID, name: str) -> Skill | None: ...
+
     async def list_all(self, *, tenant_id: UUID) -> list[Skill]: ...
 
     async def get_version(
@@ -24,6 +26,17 @@ class SkillRepository(Protocol):
     ) -> SkillVersion | None: ...
 
     async def list_versions(self, *, tenant_id: UUID, skill_id: UUID) -> list[SkillVersion]: ...
+
+    async def are_bindable(self, *, tenant_id: UUID, skill_ids: list[UUID]) -> bool: ...
+
+    async def published_versions(
+        self,
+        *,
+        tenant_id: UUID,
+        skill_ids: list[UUID],
+    ) -> dict[UUID, int]: ...
+
+    async def list_usage(self, *, tenant_id: UUID, skill_id: UUID) -> list[SkillUsage]: ...
 
 
 class SkillStorage(Protocol):

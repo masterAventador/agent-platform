@@ -3,10 +3,18 @@ from __future__ import annotations
 from uuid import UUID
 
 from agent_platform.platform.skills.bundle import SkillBundle, SkillBundleError, parse_skill_bundle
-from agent_platform.platform.skills.entities import Skill, SkillVersion
+from agent_platform.platform.skills.entities import (
+    Skill,
+    SkillLifecycleStatus,
+    SkillUsage,
+    SkillVersion,
+)
 from agent_platform.platform.skills.errors import (
+    SkillAlreadyDeleted,
+    SkillInUse,
     SkillNameMismatch,
     SkillNotFound,
+    SkillReviewBlocked,
     SkillVersionNotFound,
 )
 from agent_platform.platform.skills.ports import SkillRepository, SkillStorage
@@ -49,6 +57,8 @@ class SkillService:
         content: bytes,
     ) -> tuple[Skill, SkillVersion]:
         skill = await self.required_skill(tenant_id=tenant_id, skill_id=skill_id)
+        if skill.lifecycle_status is SkillLifecycleStatus.DELETED:
+            raise SkillAlreadyDeleted
         bundle = parse_skill_bundle(content)
         if bundle.name != skill.name:
             raise SkillNameMismatch
@@ -83,14 +93,67 @@ class SkillService:
         )
         if version is None:
             raise SkillVersionNotFound
+        if version.review_status.value != "approved":
+            raise SkillReviewBlocked
         published = skill.publish(version_number)
         await self._repository.update(published)
         await self._repository.update_version(version.publish())
         return published
 
+    async def offline(self, *, tenant_id: UUID, skill_id: UUID) -> Skill:
+        skill = await self.required_skill(tenant_id=tenant_id, skill_id=skill_id)
+        if skill.lifecycle_status is SkillLifecycleStatus.DELETED:
+            raise SkillAlreadyDeleted
+        archived = skill.offline()
+        await self._repository.update(archived)
+        return archived
+
+    async def delete(self, *, tenant_id: UUID, skill_id: UUID) -> None:
+        skill = await self.required_skill(tenant_id=tenant_id, skill_id=skill_id)
+        if await self._repository.list_usage(tenant_id=tenant_id, skill_id=skill_id):
+            raise SkillInUse
+        await self._repository.update(skill.mark_deleted())
+
+    async def usage(self, *, tenant_id: UUID, skill_id: UUID) -> list[SkillUsage]:
+        await self.required_skill(tenant_id=tenant_id, skill_id=skill_id)
+        return await self._repository.list_usage(tenant_id=tenant_id, skill_id=skill_id)
+
+    async def diff(
+        self,
+        *,
+        tenant_id: UUID,
+        skill_id: UUID,
+        from_version: int,
+        to_version: int,
+    ) -> dict[str, list[str]]:
+        source = await self.required_version(
+            tenant_id=tenant_id,
+            skill_id=skill_id,
+            version=from_version,
+        )
+        target = await self.required_version(
+            tenant_id=tenant_id,
+            skill_id=skill_id,
+            version=to_version,
+        )
+        source_bundle = parse_skill_bundle(await self._storage.get(key=source.storage_key))
+        target_bundle = parse_skill_bundle(await self._storage.get(key=target.storage_key))
+        source_files = set(source_bundle.files)
+        target_files = set(target_bundle.files)
+        changed = sorted(
+            path
+            for path in source_files & target_files
+            if source_bundle.read_bytes(path) != target_bundle.read_bytes(path)
+        )
+        return {
+            "added": sorted(target_files - source_files),
+            "removed": sorted(source_files - target_files),
+            "changed": changed,
+        }
+
     async def required_skill(self, *, tenant_id: UUID, skill_id: UUID) -> Skill:
         skill = await self._repository.get(tenant_id=tenant_id, skill_id=skill_id)
-        if skill is None:
+        if skill is None or skill.lifecycle_status is SkillLifecycleStatus.DELETED:
             raise SkillNotFound
         return skill
 

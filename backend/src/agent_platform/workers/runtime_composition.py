@@ -52,6 +52,7 @@ from agent_platform.platform.skills.materializer import (
     SkillBundleDigestMismatch,
     SkillMaterializer,
     SkillNotPublished,
+    SkillVersionReference,
 )
 from agent_platform.platform.skills.ports import SkillStorage
 from agent_platform.platform.tool_gateway import PolicyContext
@@ -150,12 +151,40 @@ class PublishedModel(GatewayModelReference):
 
 
 @dataclass(frozen=True, slots=True)
+class PublishedSkillVersion:
+    skill_id: UUID
+    version: int
+
+
+def _parse_skill_versions(
+    value: object,
+    fallback_skill_ids: tuple[UUID, ...],
+) -> tuple[PublishedSkillVersion, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise UntrustedRuntimeDefinition("skill_versions must be a list")
+    parsed: list[PublishedSkillVersion] = []
+    expected_ids = set(fallback_skill_ids)
+    for item in value:
+        if not isinstance(item, dict):
+            raise UntrustedRuntimeDefinition("invalid skill_versions entry")
+        skill_id = TypeAdapter(UUID).validate_python(item.get("skill_id"))
+        version = TypeAdapter(int).validate_python(item.get("version"))
+        if version <= 0 or (expected_ids and skill_id not in expected_ids):
+            raise UntrustedRuntimeDefinition("invalid skill version reference")
+        parsed.append(PublishedSkillVersion(skill_id=skill_id, version=version))
+    return tuple(parsed)
+
+
+@dataclass(frozen=True, slots=True)
 class PublishedRuntimeCapabilities:
     """从不可变员工版本读取的可信运行能力，不读取用户 input。"""
 
     work_mode: RuntimeWorkMode
     model: PublishedModel
     skill_ids: tuple[UUID, ...]
+    skill_versions: tuple[PublishedSkillVersion, ...]
     tool_ids: tuple[UUID, ...]
     workflow_id: UUID | None
     workflow_version: int | None
@@ -185,12 +214,14 @@ class PublishedRuntimeCapabilities:
                 raise UntrustedRuntimeDefinition(
                     "workflow and hybrid definitions require workflow_id and workflow_version"
                 )
+            skill_ids = tuple(
+                TypeAdapter(list[UUID]).validate_python(definition.get("skill_ids", []))
+            )
             return cls(
                 work_mode=work_mode,
                 model=PublishedModel.model_validate(definition["model"]),
-                skill_ids=tuple(
-                    TypeAdapter(list[UUID]).validate_python(definition.get("skill_ids", []))
-                ),
+                skill_ids=skill_ids,
+                skill_versions=_parse_skill_versions(definition.get("skill_versions"), skill_ids),
                 tool_ids=tuple(
                     TypeAdapter(list[UUID]).validate_python(definition.get("tool_ids", []))
                 ),
@@ -482,6 +513,14 @@ class ComposedRuntimeResolver:
                     ).materialize(
                         tenant_id=run.tenant_id,
                         skill_ids=capabilities.skill_ids,
+                        skill_versions=[
+                            SkillVersionReference(
+                                skill_id=reference.skill_id,
+                                version=reference.version,
+                            )
+                            for reference in capabilities.skill_versions
+                        ]
+                        or None,
                         workspace=environment.workspace,
                     )
                 except (

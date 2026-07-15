@@ -65,7 +65,7 @@
 | 多轮会话 | 部分完成 | 主要是一次性任务，没有完整消息、追加输入和恢复体验 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
 | 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
-| Skill 生命周期 | 部分完成 | 缺安全审核、下线/删除、内置安装和完整运维能力 | C08 |
+| Skill 生命周期 | 已完成 | 草稿、版本、安全审核、发布、下线、删除、回滚、内置安装、引用保护、差异和使用关系界面已闭环 | C08 |
 | Tool/MCP 生命周期 | 部分完成 | 缺自动发现同步、连接测试、编辑删除和凭据产品化 | C09 |
 | 长期记忆 | 未实现 | 无 Memory 领域、数据库、API、运行时和用户管理能力 | C10 |
 | 工作流/混合员工 | 未开放 | 前端强制禁用，生产 Workflow Registry 没有可用流程 | C11 |
@@ -226,7 +226,11 @@
 
 ### C08 Skill 完整生命周期与安全审核
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-16**
+
+**完成日期：2026-07-16**
 
 完成定义：
 
@@ -236,6 +240,8 @@
 - 已发布版本被员工引用时具备稳定兼容和删除保护；
 - 提供安全审核结果、版本差异和使用关系界面；
 - 生命周期、物化、沙箱执行和租户隔离测试通过。
+
+2026-07-16 完成 C08：Skill 增加显式生命周期状态和版本级安全审核结果，上传后自动记录压缩包、路径、大小、脚本、依赖和危险内容审核，危险脚本、非可信依赖来源和提示注入/疑似密钥会阻断发布；发布旧版本作为回滚入口，下线后不再作为新绑定候选，删除前扫描员工草稿与已发布员工版本并进行引用保护；员工发布版本会固化 `skill_versions`，Worker 运行时优先按固定 Skill 版本物化，因此后续 Skill 回滚不会改变旧员工版本的运行语义。根目录 `skills/builtin/` 已具备内置 Skill 源文件，平台提供幂等安装器和管理端接口；客户端 Skill 详情页展示安全审核结果、版本差异和使用关系，并提供发布、下线和删除操作。新增 `20260716_0023` 迁移补齐持久化字段，`down_revision` 指向 `20260716_0020`，后续多分支合并由主线统一线性化。
 
 ### C09 Tool/MCP 完整生命周期与凭据产品化
 
@@ -420,16 +426,17 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 默认环境收集 958 项：919 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
+| 后端 Pytest | 默认环境收集 995 项：956 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
 | 后端 Unit + Contract | 780 项通过；新增覆盖前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
-| Mypy | 170 个源码文件通过 |
-| 前端 Vitest | 28 个测试文件、119 项测试通过；新增同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
+| Mypy | 176 个源码文件通过 |
+| 前端 Vitest | 37 个测试文件、157 项测试通过；新增 Skill 安全审核结果、版本差异、使用关系和生命周期操作组件回归，并保留既有同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
-| 前端 Build | 通过，存在单个 500KB 以上分包警告 |
+| 前端 Build | 通过 |
 | Playwright Web 业务回归 | 15 项完整回归通过；PostgreSQL、Redis、MinIO 与 API 均支持测试进程传入的随机隔离端口，C04 附件场景以延迟上传同步双击验证 1 upload/1 Run；另有正式随机 MVP Profile 3 项真实 Worker/Sandbox 纵切通过，测试容器、网络和卷已销毁 |
+| C08 Skill 生命周期专项 | RED 阶段后端新增测试先失败于缺少 `skills.security`、`skills.builtin` 和固定版本物化类型，前端新增组件测试先失败于缺少“安全审核结果”面板；GREEN 阶段 `uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py -q` 26 项通过，`uv run --directory backend pytest tests/unit/workers/test_runtime_composition.py -q` 21 项通过，正式 Skill Playwright E2E 1 项通过并清理独立 Docker Compose 项目、网络和卷 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
@@ -449,6 +456,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
 | C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
-| C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C08 | 已完成 | 2026-07-16 | 2026-07-16 | 本任务提交 | RED：`uv run --directory backend pytest tests/unit/skills/test_security_review.py tests/unit/skills/test_builtin_installer.py tests/unit/skills/test_materializer.py tests/contract/skills/test_skills.py -q` 先失败于缺少安全审核、内置安装和固定版本物化接口；`pnpm --dir frontend test src/features/skills/pages/SkillDetailPage.test.tsx` 先失败于缺少“安全审核结果”面板。GREEN：`uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py -q` 26 项通过；`uv run --directory backend pytest tests/unit/workers/test_runtime_composition.py -q` 21 项通过；`uv run --directory backend pytest -q` 956 通过、39 跳过；`uv run --directory backend ruff check .` 通过；`uv run --directory backend mypy` 176 个源码文件通过；`pnpm --dir frontend test` 37 个文件、157 项通过；`pnpm --dir frontend lint`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend build` 通过；独立端口和独立 Compose 项目的 `pnpm --dir frontend exec playwright test skills.spec.ts --trace=off` 1 项通过并执行 `docker compose ... down -v` 清理容器、网络和卷 |
+| C05-C07、C09-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。
