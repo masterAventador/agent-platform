@@ -62,7 +62,7 @@
 | Tauri 桌面客户端 | 已完成 | 共享 React、`PlatformAdapter`、macOS/Windows 构建和真实桌面 E2E 已落地 | C02 |
 | 全栈真实验收与工作台 | 已完成 | 本地 Stub 成功/受控失败整栈闭环、工作台真实数据、Tauri 内核心流程及百炼真实请求均已通过 | C03 |
 | 文件与产物 | 已完成 | 租户隔离的附件、沙箱物化、持久产物目录与客户端闭环已落地 | C04 |
-| 多轮会话 | 部分完成 | 主要是一次性任务，没有完整消息、追加输入和恢复体验 | C05 |
+| 多轮会话 | 待集成 | 已具备会话/消息/任务关系、追加输入、错误重试、权限隔离和正式 E2E；活跃任务后的自动排队续跑与会话页直接取消体验仍需主线收口 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
 | 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
 | Skill 生命周期 | 部分完成 | 缺安全审核、下线/删除、内置安装和完整运维能力 | C08 |
@@ -187,7 +187,11 @@
 
 ### C05 多轮会话与追加输入
 
-**状态：`⬜ 未开始`**
+**状态：`🧪 待集成`**
+
+**开始日期：2026-07-16**
+
+**待集成日期：2026-07-16**
 
 完成定义：
 
@@ -197,6 +201,10 @@
 - 上下文裁剪、重启恢复、跨任务续聊和取消语义明确；
 - 非管理员只能访问自己的会话，管理员权限有服务端校验；
 - 多轮对话 API、运行时和 Playwright E2E 通过。
+
+2026-07-16 待集成记录：已新增 `20260716_0021` 会话迁移，建立 `conversations`、`conversation_messages` 与 `runs.conversation_id`，真实 PostgreSQL 升级已由 Playwright global setup 验证；后端契约覆盖新建/列表/详情/追加消息、`waiting_for_input` 真实 `MESSAGE` command、失败重试、上下文裁剪和 Owner/Admin/Member 访问隔离；Worker 会把 `message.output` 和失败事件落回会话时间线；前端提供会话中心、详情消息时间线、员工详情“开始会话”、追加输入、附件 ID 展示和失败重试；正式 Playwright 覆盖“发布员工 → 开始会话 → 追加两轮输入 → 回到会话中心持久列表”。
+
+待主线收口风险：活跃 `queued/running/waiting_approval` 任务期间追加消息当前持久化为 `queued_after_current`，尚未自动在当前任务终结后派生下一轮 Run；会话页展示关联任务和失败重试，但取消仍依赖既有任务详情控制入口，后续应补会话内直接取消/跳转体验后再转为 `✅ 已完成`。
 
 ### C06 动态输入 Schema 与结构化输出
 
@@ -449,6 +457,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
 | C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
-| C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C05 | 待集成 | 2026-07-16 | — | 本任务提交 | RED：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py -q` 首次 404；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q` 首次会话消息为空；`cd frontend && pnpm test -- src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx` 首次缺模块；员工详情“开始会话”用例首次找不到按钮。GREEN：`cd backend && uv run ruff check . && uv run mypy && uv run pytest tests/integration/database/test_migrations.py tests/contract/conversations/test_conversations.py -q`（11 passed）；`cd backend && uv run pytest tests/contract/conversations/test_conversations.py tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q`（12 passed）；`cd frontend && pnpm exec vitest run src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx src/features/employees/pages/EmployeeDetailPage.test.tsx src/app/App.test.tsx src/features/runs/pages/RunDetailPage.test.tsx --reporter=dot`（47 passed）；`cd frontend && pnpm lint && pnpm typecheck`；`PLAYWRIGHT_*` 隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，真实 PostgreSQL/Redis/MinIO/API/Web） |
+| C06-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

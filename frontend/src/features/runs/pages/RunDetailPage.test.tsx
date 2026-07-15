@@ -59,6 +59,7 @@ const runningRun = {
   status: 'running',
   error_code: null,
   error_message: null,
+  conversation_id: null,
 }
 
 function renderPage(canExecuteRuns = true, canManageRuns = true) {

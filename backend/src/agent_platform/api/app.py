@@ -17,6 +17,7 @@ from agent_platform.api.middleware.request_body_limit import (
 )
 from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.auth import router as auth_router
+from agent_platform.api.routes.conversations import router as conversations_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
@@ -205,6 +206,7 @@ def create_app(
     app.state.artifact_storage = artifact_storage
     app.include_router(auth_router)
     app.include_router(employees_router)
+    app.include_router(conversations_router)
     app.include_router(runs_router)
     app.include_router(artifacts_router)
     app.include_router(dead_letters_router)
