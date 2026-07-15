@@ -1,6 +1,6 @@
 # Social Operations 本地执行器协议 v1
 
-此协议定义平台后端与未来 Tauri 受认证 Sidecar 之间的供应商无关消息格式。本切片只锁定协议，不实现 IPC、Sidecar、设备任务、浏览器自动化或 UI。
+此协议定义平台后端与 Tauri 受认证 Sidecar 之间的供应商无关消息格式。B01 已实现无固定端口的 Tauri stdio Sidecar 传输、随机会话认证和生命周期桥接；它只返回无业务副作用的版本化接收确认。设备注册、任务领取与持久化、浏览器自动化、平台账号和生产执行仍属于 B02 及后续任务。
 
 ## 单一来源与边界
 
@@ -8,13 +8,14 @@
 - 可供 Rust、TypeScript 或其他客户端生成类型的快照：`local-executor-v1.schema.json`；
 - 10 个有效与 25 个无效回放样例：`contracts/fixtures/capabilities/social-operations/local-executor-v1/`；
 - `task_id`、`tenant_id`、`approval_id`、`audit_correlation_id` 和 `artifact_id` 都是 Core 资源的稳定引用，本协议不复制 Core Run、Approval、Audit 或 Artifact 领域模型；
-- 传输认证、授权、Entitlement、设备注册、任务持久化与审计仍由后续 Core/业务任务实现，Schema 校验不能替代这些安全检查。
+- B01 传输层由 Tauri 父进程通过匿名管道启动同源 Sidecar，256 位随机会话令牌只经 stdin bootstrap 传递，不进入参数、环境变量、日志或响应；每个后续 envelope 都必须携带该令牌，且不开放 TCP 监听；
+- 租户/设备授权、Entitlement、设备注册、任务持久化、完整 Schema/语义回放与审计接入仍由后续 Core/业务任务实现，B01 的传输认证和 Schema 校验都不能替代这些安全检查。
 
 跨语言消费者必须按以下顺序校验，禁止只生成类型后直接执行任务：
 
 1. 使用 Schema 声明的 JSON Schema Draft 2020-12 方言，并启用 `date-time` 等格式检查器，完成结构和格式校验；
 2. 执行 Schema 中 `x-semantic-validation-required` 声明的语义校验；v1 当前必须验证 `deadline_at` 严格晚于 `sent_at`，拒绝在 `extensions` 键名中表达 Cookie、Token、API Key、Private Key、密码、本机路径、签名 URL 等敏感数据，拒绝 `safe_message` 中出现凭据头、赋值式敏感参数或私有本机路径标记，并对控制事件的字符串扩展值执行相同级别的凭据与路径标记检查；
-3. 再执行传输认证、租户/设备/能力授权、Entitlement、审批和审计等运行时门禁。
+3. 再执行传输认证、租户/设备/能力授权、Entitlement、审批和审计等运行时门禁。B01 Sidecar 只在认证后确认协议版本与有界 `message_type`，不执行外部副作用；生产执行器必须先补齐前两步和其余运行时门禁。
 
 当前共有 5 个语义层无效样例：`deadline-before-send.json`、`diagnostic-sensitive-field.json`、`diagnostic-unsafe-message.json`、`control-event-cookie-assignment.json` 和 `control-event-inline-data.json`。它们有意由 Draft 2020-12 + FormatChecker 结构层接受，再由 Pydantic 或跨语言等价语义层拒绝。其余 20 个无效样例必须在标准 Schema 结构/格式层直接拒绝。未来 Rust 实现除生成 wire 类型外，还必须按这份明确清单回放两类 fixture，并实现相同语义校验；新增或重分类 fixture 时必须同步本文档和契约测试。
 

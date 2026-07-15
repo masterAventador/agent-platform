@@ -1,7 +1,17 @@
 import { CanceledError, type AxiosResponse, type GenericAbortSignal } from 'axios'
 import { describe, expect, it } from 'vitest'
 
-import { apiClient, cancelSessionRequests } from './client'
+import { apiClient, cancelSessionRequests, configureApiBaseUrl } from './client'
+
+describe('runtime API base URL', () => {
+  it('accepts the validated desktop runtime URL and keeps the web default otherwise', () => {
+    configureApiBaseUrl('http://127.0.0.1:18000/api/v1')
+    expect(apiClient.defaults.baseURL).toBe('http://127.0.0.1:18000/api/v1')
+
+    configureApiBaseUrl(null)
+    expect(apiClient.defaults.baseURL).toBe('/api/v1')
+  })
+})
 
 
 describe('session request cancellation', () => {

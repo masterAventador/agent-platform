@@ -20,12 +20,20 @@ export LITELLM_NETWORK_NAME
 MIN_DOCKER_COMPOSE_VERSION="2.20.0"
 
 usage() {
-  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix}" >&2
+  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix|real-provider}" >&2
 }
 
 if [[ $# -ne 1 ]]; then
   usage
   exit 2
+fi
+
+if [[ "$1" == "real-provider" ]]; then
+  COMPOSE_ENV="${ROOT_DIR}/infra/compose/.env.litellm"
+  if [[ ! -f "${COMPOSE_ENV}" ]]; then
+    echo "Real provider smoke requires ${COMPOSE_ENV}" >&2
+    exit 2
+  fi
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -243,6 +251,63 @@ content = payload["choices"][0]["message"]["content"]
 if content != "local stub completion":
     raise SystemExit(f"unexpected LiteLLM completion content: {content!r}")
 print(f"LiteLLM local stub completion passed through alias general-purpose: {url}")
+PY
+    ;;
+  real-provider)
+    install_cleanup_trap
+    prepare_runtime
+    compose up -d --wait --wait-timeout 180 litellm
+    compose run --rm --no-deps worker-key-bootstrap
+    python3 - "${LITELLM_PORT}" <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+url = f"http://127.0.0.1:{sys.argv[1]}/v1/chat/completions"
+request = urllib.request.Request(
+    url,
+    data=json.dumps(
+        {
+            "model": "general-purpose",
+            "messages": [
+                {"role": "user", "content": "Reply with exactly: bailian-smoke-ok"}
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        }
+    ).encode("utf-8"),
+    headers={
+        "Authorization": f"Bearer {os.environ['LITELLM_WORKER_API_KEY']}",
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=90) as response:
+        if response.status != 200:
+            raise SystemExit(f"LiteLLM returned HTTP {response.status}")
+        payload = json.load(response)
+except urllib.error.HTTPError as error:
+    raise SystemExit(f"LiteLLM returned HTTP {error.code}") from None
+except urllib.error.URLError as error:
+    raise SystemExit(f"LiteLLM request failed: {error.reason}") from None
+
+try:
+    content = payload["choices"][0]["message"]["content"]
+except (KeyError, IndexError, TypeError):
+    raise SystemExit("LiteLLM completion response has an invalid shape") from None
+if not isinstance(content, str) or not content.strip():
+    raise SystemExit("LiteLLM completion returned empty content")
+usage = payload.get("usage")
+if not isinstance(usage, dict) or not isinstance(usage.get("total_tokens"), int):
+    raise SystemExit("LiteLLM completion response has no integer token usage")
+print(
+    "Real Bailian smoke passed through LiteLLM alias general-purpose "
+    f"({usage['total_tokens']} tokens)"
+)
 PY
     ;;
   worker-readiness|worker-chat|stub-matrix)

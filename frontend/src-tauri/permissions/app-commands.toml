@@ -1,0 +1,33 @@
+[[permission]]
+identifier = "allow-platform-capabilities"
+description = "允许主窗口读取桌面平台能力"
+commands.allow = ["platform_capabilities"]
+
+[[permission]]
+identifier = "allow-platform-runtime-config"
+description = "允许主窗口读取经过校验的桌面运行时端点"
+commands.allow = ["platform_runtime_config"]
+
+[[permission]]
+identifier = "allow-secure-credentials"
+description = "允许主窗口通过系统凭据存储读写应用凭据"
+commands.allow = ["credential_get", "credential_set", "credential_delete"]
+
+[[permission]]
+identifier = "allow-remembered-login-storage"
+description = "允许主窗口在 App 私有数据目录读写 Demo 登录信息"
+commands.allow = [
+  "remembered_login_get",
+  "remembered_login_set",
+  "remembered_login_delete",
+]
+
+[[permission]]
+identifier = "allow-local-executor"
+description = "允许主窗口管理受认证的本地执行器 Sidecar"
+commands.allow = [
+  "local_executor_start",
+  "local_executor_invoke",
+  "local_executor_status",
+  "local_executor_stop",
+]

@@ -13,6 +13,8 @@ x-backend-environment: &backend-environment
   AGENT_PLATFORM_MINIO_SECURE: "false"
   AGENT_PLATFORM_RAGFLOW_URL: ${RAGFLOW_URL:-http://host.docker.internal:19380}
   AGENT_PLATFORM_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+  AGENT_PLATFORM_AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+  AGENT_PLATFORM_AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-lax}
   AGENT_PLATFORM_OTEL_ENABLED: ${OTEL_ENABLED:-false}
   AGENT_PLATFORM_OTEL_OTLP_ENDPOINT: ${OTEL_OTLP_ENDPOINT:-http://host.docker.internal:4317}
 
@@ -178,6 +180,8 @@ services:
     build:
       context: ../../frontend
       dockerfile: Dockerfile
+      args:
+        FRONTEND_BUILD_MODE: ${PLATFORM_FRONTEND_BUILD_MODE:-production}
     image: ${PLATFORM_FRONTEND_IMAGE:-agent-platform-frontend:local}
     depends_on:
       api:

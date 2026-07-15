@@ -144,7 +144,7 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
         max_age=settings.auth_session_ttl_seconds,
         httponly=True,
         secure=settings.auth_cookie_secure,
-        samesite="lax",
+        samesite=settings.auth_cookie_same_site,
         path="/",
     )
     return UserResponse.from_entity(issued_session.user, workspaces)
@@ -176,6 +176,6 @@ async def logout(request: Request, response: Response) -> None:
         key=settings.auth_cookie_name,
         httponly=True,
         secure=settings.auth_cookie_secure,
-        samesite="lax",
+        samesite=settings.auth_cookie_same_site,
         path="/",
     )

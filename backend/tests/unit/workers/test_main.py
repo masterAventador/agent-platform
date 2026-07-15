@@ -144,11 +144,11 @@ async def test_serve_reports_ready_and_stops_after_current_dequeue() -> None:
 
 @pytest.mark.asyncio
 async def test_serve_logs_a_sanitized_failure_and_continues_processing(monkeypatch) -> None:
-    logged: list[tuple[str, dict[str, str]]] = []
+    logged: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
     monkeypatch.setattr(
         worker_main_module.logger,
         "error",
-        lambda message, *, extra: logged.append((message, extra)),
+        lambda message, *args, extra: logged.append((message, args, extra)),
     )
     stop_event = asyncio.Event()
     worker = FailingOnceWorker(stop_event)
@@ -164,7 +164,13 @@ async def test_serve_logs_a_sanitized_failure_and_continues_processing(monkeypat
 
     assert worker.calls == 2
     assert worker.close_calls == 1
-    assert logged == [("worker_delivery_processing_failed", {"error_type": "RuntimeError"})]
+    assert logged == [
+        (
+            "worker_delivery_processing_failed error_type=%s",
+            ("RuntimeError",),
+            {"error_type": "RuntimeError"},
+        )
+    ]
     assert "redis-password-must-not-be-logged" not in repr(logged)
     assert health.live is False
     assert health.ready is False

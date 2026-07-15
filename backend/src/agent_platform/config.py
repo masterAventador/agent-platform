@@ -60,8 +60,13 @@ class AppSettings(BaseSettings):
     otel_otlp_endpoint: str = "http://127.0.0.1:4317"
     otel_otlp_insecure: bool = True
     require_email_verification: bool = False
+    cors_allowed_origins: tuple[str, ...] = (
+        "tauri://localhost",
+        "http://tauri.localhost",
+    )
     auth_cookie_name: str = "agent_platform_session"
     auth_cookie_secure: bool = False
+    auth_cookie_same_site: Literal["lax", "strict", "none"] = "lax"
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
@@ -88,4 +93,14 @@ class AppSettings(BaseSettings):
             raise ValueError("runtime heartbeat must be shorter than runtime lease")
         if self.runtime_cancel_poll_initial_seconds > self.runtime_cancel_poll_max_seconds:
             raise ValueError("runtime cancel poll initial delay must not exceed maximum")
+        if self.auth_cookie_same_site == "none" and not self.auth_cookie_secure:
+            raise ValueError("SameSite=None auth cookies must also be Secure")
+        if self.app_environment == "production" and (
+            not self.auth_cookie_secure or self.auth_cookie_same_site != "none"
+        ):
+            raise ValueError(
+                "production auth cookies must be Secure and SameSite=None for Tauri"
+            )
+        if "*" in self.cors_allowed_origins:
+            raise ValueError("credentialed CORS must use exact origins")
         return self

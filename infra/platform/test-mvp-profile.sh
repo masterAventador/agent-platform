@@ -111,6 +111,37 @@ assert_profile_runtime_is_safe_to_remove() {
   esac
 }
 
+print_failure_diagnostics() {
+  printf 'MVP acceptance failed; collecting sanitized service diagnostics\n' >&2
+  if [[ -f "${RUNTIME_DIR}/platform.env" ]]; then
+    docker compose -p "${PROFILE_NAME}-app" \
+      --env-file "${RUNTIME_DIR}/platform.env" \
+      -f "${ROOT_DIR}/infra/compose/platform.yml" \
+      --profile worker ps >&2 || true
+    docker compose -p "${PROFILE_NAME}-app" \
+      --env-file "${RUNTIME_DIR}/platform.env" \
+      -f "${ROOT_DIR}/infra/compose/platform.yml" \
+      --profile worker logs --no-color --tail 200 dispatcher worker api >&2 || true
+    docker compose -p "${PROFILE_NAME}-app" \
+      --env-file "${RUNTIME_DIR}/platform.env" \
+      -f "${ROOT_DIR}/infra/compose/platform.yml" \
+      --profile worker logs --no-color --tail 200 sandbox-controller >&2 || true
+  fi
+  if [[ -f "${RUNTIME_DIR}/litellm.env" ]]; then
+    docker compose -p "${PROFILE_NAME}-litellm" \
+      --env-file "${RUNTIME_DIR}/litellm.env" \
+      -f "${ROOT_DIR}/infra/compose/litellm.yml" \
+      -f "${ROOT_DIR}/infra/litellm/compose.stub.yml" \
+      logs --no-color --tail 100 litellm openai-stub >&2 || true
+  fi
+  if [[ -f "${RUNTIME_DIR}/core.env" ]]; then
+    docker compose -p "${PROFILE_NAME}-core" \
+      --env-file "${RUNTIME_DIR}/core.env" \
+      -f "${ROOT_DIR}/infra/compose/core.yml" \
+      logs --no-color --tail 100 postgres redis >&2 || true
+  fi
+}
+
 export MVP_PROFILE_NAME="${PROFILE_NAME}"
 export MVP_PROFILE_RUNTIME_DIR="${RUNTIME_DIR}"
 export MVP_PROFILE_REMOVE_VOLUMES=false
@@ -118,12 +149,16 @@ read -r POSTGRES_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT \
   LITELLM_PORT PLATFORM_API_PORT PLATFORM_WEB_PORT < <(allocate_ports)
 export POSTGRES_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT
 export LITELLM_PORT PLATFORM_API_PORT PLATFORM_WEB_PORT
+export PLATFORM_FRONTEND_BUILD_MODE=tauri-test
 assert_ports_are_unique
 
 cleanup() {
   local original_exit=$?
   local cleanup_exit=0
   trap - EXIT
+  if [[ "${original_exit}" -ne 0 ]]; then
+    print_failure_diagnostics || true
+  fi
   if docker ps --all --quiet --filter "name=^/${PORT_HOLDER_NAME}$" | rg --quiet '.'; then
     if ! docker rm --force "${PORT_HOLDER_NAME}" >/dev/null; then
       printf 'MVP acceptance cleanup failed to remove port holder: %s\n' "${PORT_HOLDER_NAME}" >&2
@@ -170,6 +205,13 @@ bash "${MVP_SCRIPT}" status
 bash "${MVP_SCRIPT}" start
 bash "${MVP_SCRIPT}" health
 
+POSTGRES_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" POSTGRES_PASSWORD)"
+AGENT_PLATFORM_APP_ENVIRONMENT=development \
+  AGENT_PLATFORM_DATABASE_URL="postgresql+asyncpg://agent_platform:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/agent_platform" \
+  uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
+    python -m agent_platform.bootstrap.demo_seed
+unset POSTGRES_PASSWORD
+
 LITELLM_WORKER_API_KEY="$(read_env_value "${RUNTIME_DIR}/litellm.env" LITELLM_WORKER_API_KEY)"
 AGENT_PLATFORM_LLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
   AGENT_PLATFORM_LLM_GATEWAY_API_KEY="${LITELLM_WORKER_API_KEY}" \
@@ -190,6 +232,12 @@ rm -f "${MVP_WEB_FLOW_RESULT_FILE}" "${MVP_WEB_FLOW_FAILURE_RESULT_FILE}"
     PLAYWRIGHT_MVP_RESULT_FILE="${MVP_WEB_FLOW_RESULT_FILE}" \
     PLAYWRIGHT_MVP_FAILURE_RESULT_FILE="${MVP_WEB_FLOW_FAILURE_RESULT_FILE}" \
     "${PLAYWRIGHT_BIN}" test --config playwright.mvp-profile.config.ts
+)
+
+(
+  cd "${ROOT_DIR}/frontend"
+  TAURI_MVP_WEB_URL="http://127.0.0.1:${PLATFORM_WEB_PORT}" \
+    pnpm test:tauri
 )
 if [[ ! -f "${MVP_WEB_FLOW_RESULT_FILE}" ]]; then
   printf 'MVP Web flow did not record its run ID\n' >&2

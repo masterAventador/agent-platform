@@ -3028,6 +3028,12 @@ async def test_terminal_cleanup_failure_is_sanitized_and_retried_after_persisten
     async with factory() as session:
         assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
 
+    resolver.prepared.renew_error = RuntimeError("deleting lease cannot be renewed")
+    await worker.renew_active_runtimes()
+
+    assert resolver.prepared.renew_calls == 0
+    assert resolver.prepared.close_calls == 1
+
     resolver.prepared.close_error = None
     await worker.run_once(block_ms=1)
 

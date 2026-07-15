@@ -2,6 +2,19 @@ import { join } from 'node:path'
 
 const binaryName = process.platform === 'win32' ? 'agent-platform-desktop.exe' : 'agent-platform-desktop'
 const appBinaryPath = join(process.cwd(), 'src-tauri', 'target', 'debug', binaryName)
+const mvpWebUrl = process.env.TAURI_MVP_WEB_URL
+const desktopApiBaseUrl = mvpWebUrl
+  ? new URL('/api/v1', mvpWebUrl).toString()
+  : 'http://127.0.0.1:18000/api/v1'
+process.env.AGENT_PLATFORM_DESKTOP_API_BASE_URL ??= desktopApiBaseUrl
+if (mvpWebUrl === undefined) {
+  delete process.env.AGENT_PLATFORM_DESKTOP_WEB_URL
+} else {
+  process.env.AGENT_PLATFORM_DESKTOP_WEB_URL ??= mvpWebUrl
+}
+const specs = mvpWebUrl
+  ? ['./e2e-tauri/mvp-profile.spec.ts']
+  : ['./e2e-tauri/app.spec.ts']
 
 function stripManagedContentLength(requestOptions: RequestInit): RequestInit {
   const headers = new Headers(requestOptions.headers)
@@ -11,7 +24,7 @@ function stripManagedContentLength(requestOptions: RequestInit): RequestInit {
 
 export const config = {
   runner: 'local',
-  specs: ['./e2e-tauri/**/*.spec.ts'],
+  specs,
   maxInstances: 1,
   services: [
     [
@@ -43,6 +56,8 @@ export const config = {
   reporters: ['spec'],
   mochaOpts: {
     ui: 'bdd',
-    timeout: 60_000,
+    // The MVP desktop flow includes a worker-backed completion wait of up to
+    // two minutes, so the enclosing test must outlive that inner deadline.
+    timeout: 180_000,
   },
 }

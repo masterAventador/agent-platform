@@ -6,6 +6,10 @@ export const apiClient = axios.create({
   withCredentials: true,
 })
 
+export function configureApiBaseUrl(apiBaseUrl: string | null): void {
+  apiClient.defaults.baseURL = apiBaseUrl ?? '/api/v1'
+}
+
 let sessionRequestController = new AbortController()
 
 apiClient.interceptors.request.use((config) => {

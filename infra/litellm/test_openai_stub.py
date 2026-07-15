@@ -90,6 +90,27 @@ class OpenAiStubProtocolTest(unittest.TestCase):
         self.assertEqual(choice["finish_reason"], "tool_calls")
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "get_status")
 
+    def test_generic_request_never_calls_a_tool_that_was_not_declared(self) -> None:
+        response = self.post_completion(
+            {
+                "model": "primary-test",
+                "messages": [{"role": "user", "content": "ordinary agent task"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "write_todos", "parameters": {}},
+                    }
+                ],
+            }
+        )
+
+        choice = response["choices"][0]
+        self.assertEqual(choice["finish_reason"], "stop")
+        self.assertEqual(
+            choice["message"],
+            {"role": "assistant", "content": "local stub completion"},
+        )
+
     def test_mvp_failure_scenario_returns_a_deterministic_upstream_error(self) -> None:
         with self.assertRaises(HTTPError) as raised:
             self.post_completion(

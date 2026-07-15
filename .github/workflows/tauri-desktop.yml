@@ -18,17 +18,9 @@ concurrency:
 
 jobs:
   desktop:
-    name: ${{ matrix.name }} build and smoke
-    runs-on: ${{ matrix.os }}
+    name: Windows build and smoke
+    runs-on: windows-latest
     timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            os: macos-15
-          - name: Windows
-            os: windows-latest
 
     defaults:
       run:

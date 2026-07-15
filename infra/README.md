@@ -56,7 +56,7 @@ LITELLM_UPSTREAM_API_KEY=<your-local-volcengine-key>
 LITELLM_UPSTREAM_API_BASE=
 ```
 
-`LITELLM_UPSTREAM_API_BASE` 对以上两个示例可留空，只在自定义或 OpenAI-compatible 端点要求显式 base URL 时设置。该行为已经按固定版本 v1.86.2 的官方源码审计：环境变量空值被解析为 `""`，DashScope chat adapter 和 Volcengine adapter 都用 truthy fallback 回退各自默认 endpoint，因此空字符串不会覆盖默认地址；升级 LiteLLM 或换用其他 provider 时必须重新审计，不能直接泛化。密钥只能写入被 Git 忽略的本机 `.env.litellm` 或部署密钥服务；不得提交真实值。健康检查只访问 `/health/liveliness`，不会调用上游模型或产生费用。
+`LITELLM_UPSTREAM_API_BASE` 对以上两个示例可留空，只在自定义或 OpenAI-compatible 端点要求显式 base URL 时设置。该行为已经按固定版本 v1.86.2 的官方源码审计：环境变量空值被解析为 `""`，DashScope chat adapter 和 Volcengine adapter 都用 truthy fallback 回退各自默认 endpoint，因此空字符串不会覆盖默认地址；升级 LiteLLM 或换用其他 provider 时必须重新审计，不能直接泛化。当前 Demo 百炼 Key 由用户明确决定随私有仓库同步，以便多台开发电脑直接复用；该例外不得扩展到服务器私钥、生产凭据或客户凭据。健康检查只访问 `/health/liveliness`，不会调用上游模型或产生费用。
 
 启动和停止只影响 LiteLLM project。PostgreSQL 不发布宿主机端口，数据保存在该 project 的命名 volume 中：
 
@@ -153,6 +153,20 @@ MVP_PROFILE_REMOVE_VOLUMES=true bash infra/platform/mvp-profile.sh stop
 ```bash
 bash infra/platform/test-mvp-profile.sh
 ```
+
+该验收同时用测试专用不可见窗口运行真实 Tauri 宿主中的核心业务链路，不会在 macOS
+桌面弹出 App。无业务栈时，普通 `pnpm test:tauri` 只运行桌面能力与 Sidecar smoke，
+完整核心流程按条件跳过；Windows 对应构建和 smoke 在 GitHub Actions 运行。
+
+真实百炼请求必须显式运行，默认回归永远不会调用付费模型：
+
+```bash
+bash infra/litellm/test.sh real-provider
+```
+
+该命令使用项目现有 `.env.litellm`，拉起独立的临时 LiteLLM 和数据库，通过
+`general-purpose` 稳定别名向百炼发送最小 `chat/completions` 请求，并校验真实 token
+usage。输出不包含密钥、请求正文或原始供应商响应；结束后自动清理临时容器、网络和卷。
 
 平台进程使用独立的 `agent-platform-app` Compose project，不会把 core、RAGFlow 或观测容器当作 orphan 管理。它加入 core 创建的外部网络 `agent-platform_default`，通过 `postgres`、`redis`、`minio` 服务 DNS 访问核心依赖；RAGFlow 与 OTLP 使用显式的 `host.docker.internal`/`host-gateway`。因此 core 的宿主机端口可以保持只绑定 `127.0.0.1`，平台也能与三个独立 Compose 栈安全并行；platform `down` 不会删除外部 core 网络，平台 API 与 Web 端口同样只绑定 `127.0.0.1`。
 

@@ -119,7 +119,8 @@ async def serve(
                 stop_event.set()
             except Exception as error:
                 logger.error(
-                    "worker_delivery_processing_failed",
+                    "worker_delivery_processing_failed error_type=%s",
+                    type(error).__name__,
                     extra={"error_type": type(error).__name__},
                 )
                 with suppress(TimeoutError):

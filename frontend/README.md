@@ -19,9 +19,11 @@ pnpm tauri:test:rust    # Rust Command 与原生逻辑测试
 pnpm test:tauri         # 构建测试专用 App 并执行真实桌面 E2E
 ```
 
-`test:tauri` 显式启用 `desktop-test` Rust Feature；WebdriverIO 插件和权限不会进入
-普通 `tauri:dev` / `tauri:build` 产物。macOS 与 Windows 的构建和桌面冒烟由
-`.github/workflows/tauri-desktop.yml` 共同验证。
+`test:tauri` 显式启用 `desktop-test` Rust Feature，并通过测试专用配置把主窗口设为
+不可见；macOS 本机仍使用真实 WKWebView 和原生 IPC，但不会弹窗或抢前台。WebdriverIO
+插件、权限和隐藏窗口覆盖不会进入普通 `tauri:dev` / `tauri:build` 产物。macOS 可在
+本机快速验证，Windows 的正式构建和隐藏桌面冒烟由
+`.github/workflows/tauri-desktop.yml` 在 GitHub Actions 验证。
 
 开发模式下 `/api` 请求由 Vite 转发到 `http://127.0.0.1:8000`。
 

@@ -865,6 +865,8 @@ class RunWorker:
     async def renew_active_runtimes(self) -> None:
         failures = 0
         for run_id, prepared in list(self._prepared_runtimes.items()):
+            if run_id in self._terminal_cleanup_pending:
+                continue
             try:
                 run = self._active_runs.get(run_id)
                 if run is not None:

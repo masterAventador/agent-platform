@@ -48,6 +48,8 @@ describe('WebPlatformAdapter', () => {
       externalLinks: true,
       notifications: false,
       secureCredentials: false,
+      rememberedLogin: false,
+      localExecution: false,
     })
     await expect(adapter.credentials.get('worker-key')).rejects.toEqual(
       expect.objectContaining<Partial<PlatformCapabilityError>>({
@@ -138,6 +140,56 @@ describe('TauriPlatformAdapter', () => {
     })
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'credential_delete', {
       key: 'worker-key',
+    })
+  })
+
+  it('记住登录只经过 App 私有数据命令', async () => {
+    tauriMocks.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce('saved-login')
+    const adapter = createTauriPlatformAdapter()
+
+    await adapter.rememberedLogin.set('saved-login')
+    await expect(adapter.rememberedLogin.get()).resolves.toBe('saved-login')
+    await adapter.rememberedLogin.delete()
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'remembered_login_set', {
+      value: 'saved-login',
+    })
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'remembered_login_get')
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'remembered_login_delete')
+  })
+
+  it('从原生命令读取受校验的桌面运行时配置', async () => {
+    tauriMocks.invoke.mockResolvedValue({
+      apiBaseUrl: 'http://127.0.0.1:18000/api/v1',
+      webUrl: null,
+    })
+    const adapter = createTauriPlatformAdapter()
+
+    await expect(adapter.runtimeConfig()).resolves.toEqual({
+      apiBaseUrl: 'http://127.0.0.1:18000/api/v1',
+      webUrl: null,
+    })
+    expect(tauriMocks.invoke).toHaveBeenCalledWith('platform_runtime_config')
+  })
+
+  it('只通过原生受认证 IPC 管理 Social Operations Sidecar', async () => {
+    tauriMocks.invoke
+      .mockResolvedValueOnce({ running: true, protocolVersion: '1.0', capabilityId: 'social-operations' })
+      .mockResolvedValueOnce({ ok: true, status: 'accepted' })
+      .mockResolvedValueOnce({ running: false, protocolVersion: '1.0', capabilityId: 'social-operations' })
+    const adapter = createTauriPlatformAdapter()
+    const request = { protocol_version: '1.0', message_type: 'task.request' }
+
+    await expect(adapter.localExecutor.start()).resolves.toEqual(expect.objectContaining({ running: true }))
+    await expect(adapter.localExecutor.invoke(request)).resolves.toEqual({ ok: true, status: 'accepted' })
+    await expect(adapter.localExecutor.stop()).resolves.toEqual(expect.objectContaining({ running: false }))
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, 'local_executor_start', {
+      capabilityId: 'social-operations',
+    })
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'local_executor_invoke', {
+      capabilityId: 'social-operations',
+      request,
     })
   })
 })

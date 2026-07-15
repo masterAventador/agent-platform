@@ -7,6 +7,11 @@
   ],
   "permissions": [
     "core:default",
+    "allow-platform-capabilities",
+    "allow-platform-runtime-config",
+    "allow-secure-credentials",
+    "allow-remembered-login-storage",
+    "allow-local-executor",
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-read-file",

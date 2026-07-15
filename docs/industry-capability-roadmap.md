@@ -2,7 +2,7 @@
 
 > 文档性质：行业能力包功能清单、依赖实施顺序与完成状态的唯一执行台账
 > 建立日期：2026-07-14
-> 当前阶段：允许与 AI 中台 Core 隔离并行；B01 首个独立纵切进行中
+> 当前阶段：允许与 AI 中台 Core 隔离并行；B01 已完成，下一项为 B02
 > 适用范围：`video-studio`、`social-operations` 及两者的组合工作流
 > 主要证据：[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md)
 
@@ -230,9 +230,11 @@ deployment_installed && tenant_entitled && user_permitted
 
 **所属：Video Studio + Social Operations**
 
-**状态：`🚧 进行中`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-14**
+
+**完成日期：2026-07-15**
 
 完成定义：
 
@@ -485,12 +487,12 @@ deployment_installed && tenant_entitled && user_permitted
 
 ## 6. 当前业务基线
 
-基线日期：2026-07-14。
+基线日期：2026-07-15。
 
 | 项目 | 当前结果 |
 | --- | --- |
 | `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；业务实现尚未开始 |
-| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest 与本地执行器 v1 协议，协议已覆盖任务、步骤进度、人工接管和脱敏诊断事件及 Mock Host 严格回放；Sidecar、IPC 和业务实现尚未开始 |
+| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest、本地执行器 v1 协议及 Tauri 无固定端口认证 stdio Sidecar；协议覆盖任务、步骤进度、人工接管和脱敏诊断事件及 Mock Host 严格回放；设备、账号和生产 RPA 实现留在 B02 及后续任务 |
 | Core 前置条件 | C01-C02 已完成；C03-C20 继续串行，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
@@ -501,7 +503,7 @@ deployment_installed && tenant_entitled && user_permitted
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 平台/版本 | 验证证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| B01 | 进行中 | 2026-07-14 | — | 本任务提交 | Mock Host / JSON Schema | 首个纵切实现版本化 Manifest、隔离装配、依赖方向与四组合门禁；三轮审计修复补齐相对导入（含 `memory`）、模块段边界和动态导入严格原语门禁（禁止受保护业务目录使用 `importlib`、`__import__` 与 `builtins.__import__`，不模拟执行或数据流，插件加载限 bootstrap/注册表层），以及稳定公开错误、安全诊断上下文、canonical 路由、与能力身份绑定且由 Host 独占的资源命名空间、从 Core 权限与事件定义派生的资源命名空间及真实 API 路由根集中保留契约、控制字符拒绝、架构协议一致性门禁及内置供应商无关精确协议快照；Social Operations 本地执行器 v1 以 Pydantic 为单一来源并导出 Draft 2020-12 JSON Schema，10 个有效/25 个无效样例覆盖任务、步骤进度、人工接管和脱敏诊断事件，锁定任务/租户/能力/设备/执行器身份、显式协议版本、幂等、截止时间、取消、唯一消息 ID、连续事件序号、稳定步骤/接管/诊断 ID、严格步骤状态、Artifact 引用、审批/审计关联、错误及未知字段兼容策略；`started=0` 与 `completed=100` 同时进入 Pydantic 和标准 Schema `if/then`，序号与进度禁止布尔/字符串强转；人工接管理由只允许验证码、扫码失效、风控、元素漂移、权限和未知异常，不表达绕过；扩展键仅允许 `social.*` 且语义层拒绝敏感字段名（含 `api_key`、`private_key`、`access_token`、`refresh_token`、`session_cookie`、`api_token`、`api_file_path`、`result_object_key`、`temp_signed_url` 等下划线组合），控制事件扩展值仅允许平坦安全 JSON 标量并拒绝嵌套 Cookie、内联截图和本机路径 payload，数值拒绝 `NaN`、正负无穷和 `1e309` 溢出，字符串进一步拒绝赋值式凭据、Bearer、Data URI、Base64 内联载荷、`file://`、私有 POSIX/Windows 绝对路径以及任何可解析为 JSON object/array 的标量内嵌套，同时保留普通 URL/API 路由、状态/type 描述、花括号叙述和 JSON 标量字面量；这些规则只作为纵深防御，生产者仍须先行脱敏；任务请求/响应 JSON 载荷兼容性保持不变；Mock Host 仅做内存协议回放，验证身份、执行器、治理关联与时间顺序稳定、消息 ID 唯一、进度单调、状态迁移、接管前置和诊断引用，不实现设备、IPC、Sidecar 或 RPA，畸形 payload 统一为不含原始输入/cause/context 的稳定错误；25 个 invalid fixture 明确分为 5 个语义层样例和 20 个标准结构/格式层样例，并由文档契约测试锁定清单；跨字段截止时间、敏感扩展与安全展示消息规则由 `x-semantic-validation-required` 和独立语义层明确约束；四文件定向命令（两份 capability contract + 两份 Mock Host unit）185 项、后端全部单元与契约测试 694 项通过，项目 Mypy（154 个源码文件）、Ruff、改动范围格式和 Schema 导出一致性检查通过；静态依赖门禁不作为安全沙箱，设备注册与任务持久化、受认证 Tauri IPC、Sidecar、C17 与 B17 真实组合回归仍未完成，因此保持进行中 |
+| B01 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | Mock Host / JSON Schema / macOS Tauri | 两个版本化 Manifest 已覆盖路由、Worker、权限、事件、前端、迁移、健康与桌面声明；Mock Host 四组合隔离及关闭门禁通过。本地执行器 v1 以 Pydantic 为单一来源导出 Draft 2020-12 Schema，10 个有效/25 个无效样例覆盖任务、取消、步骤进度、人工接管、诊断、身份、幂等、截止时间、治理引用、严格状态与脱敏语义。Tauri 现通过匿名 stdin/stdout 管道管理同源 Sidecar，使用 256 位随机会话令牌逐消息认证，不经参数/环境变量泄露且不监听 TCP；Rust 单元/stdio 回放 3 项与隐藏、无 Dock 的 macOS 真实桌面启动、调用、状态、停止生命周期 E2E 通过，完整原生套件 3 项通过。B01 只提供无业务副作用的版本化接收确认；设备注册、任务持久化、Sidecar 下载/签名/崩溃恢复、账号与 RPA 属于 B02，真实四组合回归按定义属于 B17。 |
 | B02-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。

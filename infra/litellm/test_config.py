@@ -109,9 +109,15 @@ class LiteLlmComposeContractTest(unittest.TestCase):
             self.service["command"],
             ["--config", "/app/config.yaml", "--port", "4000"],
         )
-        health_test = self.service["healthcheck"]["test"]
+        healthcheck = self.service["healthcheck"]
+        health_test = healthcheck["test"]
         self.assertEqual(health_test[:3], ["CMD", "python3", "-c"])
         self.assertIn("http://127.0.0.1:4000/health/liveliness", health_test[3])
+        self.assertGreaterEqual(
+            healthcheck["retries"],
+            20,
+            "LiteLLM cold Prisma migrations need the same tolerance as the 240s startup gate",
+        )
 
     def test_credentials_are_environment_only_placeholders(self) -> None:
         environment = self.service["environment"]

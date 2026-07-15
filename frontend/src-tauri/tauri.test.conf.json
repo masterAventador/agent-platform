@@ -5,14 +5,29 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "AI 数字员工平台",
+        "visible": false
+      }
+    ],
     "security": {
       "capabilities": [
         {
           "identifier": "desktop-test",
           "description": "仅供 WebdriverIO 桌面自动化构建使用",
           "windows": ["main"],
+          "remote": {
+            "urls": ["http://127.0.0.1:*"]
+          },
           "permissions": [
             "core:default",
+            "allow-platform-capabilities",
+            "allow-platform-runtime-config",
+            "allow-secure-credentials",
+            "allow-remembered-login-storage",
+            "allow-local-executor",
             "dialog:allow-open",
             "dialog:allow-save",
             "fs:allow-read-file",

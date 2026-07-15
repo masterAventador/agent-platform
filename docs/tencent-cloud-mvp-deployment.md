@@ -7,15 +7,15 @@
 
 ## 1. 已确认的供应商决策
 
-本项目自己的目标云供应商统一为腾讯云：
+本项目采用“腾讯云基础设施 + 阿里云百炼模型服务”的组合：
 
-- 模型服务：腾讯云大模型服务平台 TokenHub；
+- 模型服务：阿里云百炼，当前通过北京地域 OpenAI 兼容接口调用 `qwen-plus`；
 - 业务对象存储：轻量对象存储（Lighthouse 版），必要时兼容普通 COS；
 - 视频最终渲染：腾讯云媒体处理 MPS；
 - 云端运行环境：腾讯云轻量应用服务器；
 - 浏览器 RPA、Windows 微信 UI Automation、macOS Accessibility/AX 和本地 OCR：继续在用户设备的 Tauri Sidecar 执行，不迁移到云服务器。
 
-[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md) 中的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 是竞品事实，不代表本项目继续采用阿里云。竞品证据必须保留原貌；本项目的开发与采购以本文档和两份路线图为准。
+腾讯云是本项目的云端运行、对象存储和视频处理供应商，不代表模型服务必须迁移到腾讯云。[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md) 中的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 是竞品事实，不代表本项目采用这些阿里云媒体产品；百炼模型服务是独立且已经确认的项目决策。竞品证据必须保留原貌；本项目的开发与采购以本文档和两份路线图为准。
 
 ## 2. 当前已有资源实测
 
@@ -36,7 +36,7 @@
 | SSH | `root` + 本机 ED25519 公钥已验证成功 |
 | 轻量对象存储挂载 | `/lhcos-data` 当前不存在 |
 
-禁止把服务器密码、私钥、TokenHub API Key、腾讯云 SecretId/SecretKey 或其他真实凭据写入本文档和 Git。服务器地址不是认证凭据，但所有公网端口仍必须遵守最小暴露原则。
+禁止把服务器密码、私钥、腾讯云 SecretId/SecretKey、生产凭据或客户凭据写入本文档和 Git。当前 Demo 百炼 API Key 由用户明确决定随私有仓库同步，是仅限 Demo 多机开发的例外；不得把该例外扩展到其他凭据。服务器地址不是认证凭据，但所有公网端口仍必须遵守最小暴露原则。
 
 ## 3. MVP 最小部署拓扑
 
@@ -60,7 +60,7 @@ Tauri App / Web 调试端
 ├── MinIO（现有代码过渡期）
 └── 轻量 OpenTelemetry/本地日志
               │
-              ├── TokenHub：对话、工具调用、结构化输出、Embedding
+              ├── 阿里云百炼：对话、工具调用、结构化输出、Embedding
               ├── LighthouseCOS：素材、成片、Artifact、更新文件
               └── MPS：云端剪辑、合成、转码和异步 Job
 ```
@@ -72,18 +72,18 @@ Tauri App / Web 调试端
 | 服务 | MVP 用途 | 计费/采购策略 | 当前结论 |
 | --- | --- | --- | --- |
 | 已有 Lighthouse | API、Worker、LiteLLM 和基础依赖 | 复用现有实例 | 不新增服务器 |
-| TokenHub | 语言模型和向量模型 | 先领取免费体验，之后按量 | 需要开通 |
+| 阿里云百炼 | 语言模型和向量模型 | 现有北京地域 API Key，按量调用 | 已开通 |
 | 轻量对象存储 | 素材、成片、Artifact、安装与更新文件 | 优先使用已有套餐，超额按量 | 不购买普通 COS |
 | MPS | 视频剪辑、拼接、多轨合成、字幕、转场、混音、画中画和转码 | 开通后按任务计费，不买资源包 | 开发视频功能时启用 |
 | CAM / STS | 服务端权限和客户端临时上传凭据 | 平台能力，无独立计算实例 | 必须配置 |
 | TCR 个人版 | 暂存自研 Docker 镜像 | 免费限额版 | 可选 |
 | VPC / 防火墙 | 网络隔离和端口控制 | 使用 Lighthouse 自带能力 | 必须配置 |
 
-### 4.1 TokenHub 使用边界
+### 4.1 阿里云百炼使用边界
 
-- LiteLLM 通过 TokenHub 的 OpenAI 兼容接口接入，业务代码继续只调用 LiteLLM；
+- LiteLLM 通过百炼北京地域 OpenAI 兼容接口接入，业务代码继续只调用稳定别名 `general-purpose`；
 - 普通对话、AI 客服、内容生成和工作流先选择低成本通用模型；
-- RAG 启用后，文本向量优先使用 TokenHub 的低成本 Embedding；
+- RAG 启用后，文本向量优先使用百炼的低成本 Embedding；
 - MVP 不购买专属模型实例，不部署本地大模型，也不购买 GPU；
 - 必须设置调用额度、超额拒绝和费用告警。
 
@@ -220,7 +220,7 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 | 扫码登录和 Cookie 健康检查 | 用户设备，服务端只管理授权状态 | 无 |
 | PC 微信 UIA / OCR | 用户 Windows 电脑 | 无 |
 | macOS 微信 AX / Vision OCR | 用户 Mac；ScreenCaptureKit 只截取授权窗口 | 无 |
-| 微信自动回复和抖音 AI 客服 | 本地执行 + TokenHub 内容生成 | 仅模型用量 |
+| 微信自动回复和抖音 AI 客服 | 本地执行 + 阿里云百炼内容生成 | 仅模型用量 |
 | 自动曝光、定向曝光和主动私信 | 用户设备受控执行 | 无 |
 | 调度、审批、审计和人工接管 | 现有应用服务器 | 无新实例 |
 
@@ -244,25 +244,25 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 
 | 路线图任务 | 腾讯云落地 |
 | --- | --- |
-| C03 | 完整栈先排除 RAGFlow，真实 AI 烟测切换到 TokenHub |
+| C03 | 完整栈先排除 RAGFlow，通过 LiteLLM 完成百炼真实 AI 烟测 |
 | C04 | `ArtifactStorageProvider` + `TencentCosArtifactProvider` |
 | C07 | 新增 4C16G RAGFlow 节点后实施 |
 | C14 | MVP 使用轻量观测，正式阶段再评估 CLS 等托管服务 |
-| C16 | TokenHub 模型别名、质量、成本和配额治理 |
+| C16 | 百炼模型别名、质量、成本和配额治理 |
 | C18 | 腾讯云 CAM/STS、生产凭据和 Sandbox 隔离 |
 | C20 | Lighthouse 部署、LighthouseCOS 更新产物和正式发布流程 |
 | B04 | LighthouseCOS 素材库、STS 直传和下载任务 |
 | B05 | 自研 Timeline DTO、编辑器和 App 内低清预览 |
 | B06 | `TencentMpsProvider`、真实 EditMedia 小样和成片回写 |
 | B07 | 从 LighthouseCOS Artifact 进入多平台发布 |
-| B09-B16 | TokenHub + 用户设备本地执行器，不新增云主机 |
+| B09-B16 | 阿里云百炼 + 用户设备本地执行器，不新增云主机 |
 
 ## 12. MVP 验收清单
 
 - [ ] 服务器安装并锁定 Docker Engine 与 Compose 版本；
 - [ ] 配置容器内存限制、日志轮转和健康检查；
 - [ ] 只开放必要公网端口，SSH 仅使用密钥；
-- [ ] TokenHub 通过 LiteLLM 完成最小真实请求；
+- [x] 阿里云百炼通过 LiteLLM 完成最小真实请求（2026-07-15，`qwen-plus`，23 Token）；
 - [ ] 创建北京私有 LighthouseCOS 存储桶；
 - [ ] 完成服务端 STS、Tauri 直传和签名下载；
 - [ ] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界；
@@ -279,8 +279,8 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - [轻量对象存储挂载说明](https://cloud.tencent.com/document/product/1207/97692)
 - [COS 临时密钥生成及使用](https://cloud.tencent.com/document/product/436/14048)
 - [腾讯云 MPS 编辑视频 API](https://cloud.tencent.com/document/product/862/43010)
-- [TokenHub API 使用说明](https://cloud.tencent.com/document/product/1823/130078)
-- [TokenHub 向量模型](https://cloud.tencent.com/document/product/1823/133515)
+- [阿里云百炼与 LangChain 集成](https://help.aliyun.com/zh/model-studio/use-bailian-in-langchain)
+- [阿里云百炼文本向量接口](https://help.aliyun.com/zh/model-studio/text-embedding-synchronous-api)
 - [RAGFlow 官方部署要求](https://github.com/infiniflow/ragflow/blob/main/README.md)
 - [RAGFlow 官方 Docker 依赖说明](https://github.com/infiniflow/ragflow/blob/main/docker/README.md)
 - [Apple AXUIElement](https://developer.apple.com/documentation/applicationservices/axuielement_h)

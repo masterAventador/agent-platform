@@ -34,6 +34,10 @@
   margin-bottom: 20px;
 }
 
+.auth-remember {
+  margin-top: -8px;
+}
+
 .auth-switch {
   margin: 24px 0 0;
   text-align: center;

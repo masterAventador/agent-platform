@@ -187,6 +187,7 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 - WebdriverIO 与 `@wdio/tauri-service` 负责真实 Tauri 应用的桌面 E2E，至少覆盖应用启动、Rust IPC、文件/外链/通知/凭据等原生桥接和代表性核心流程；
 - Rust `cargo test` 负责 Tauri Command、权限、配置、错误转换和其他无需拉起 WebView 的原生逻辑；
 - WebdriverIO 的内嵌 WebDriver 插件只能在测试构建中启用，禁止打入生产安装包或扩大正式版本攻击面；
+- 在 macOS 上拉起真实 Tauri App（包括窗口设为不可见的无干扰测试构建）以及其内嵌 WebDriver 时，必须在 Codex 的文件/进程沙箱外执行；沙箱内只运行编译、静态检查、Rust 单元测试和其他不启动 AppKit/WebView 的验证。沙箱内启动造成的 LaunchServices、HiServices、AppKit 或 WebDriver 连接失败不得误判为产品缺陷，也不得通过反复延长超时掩盖；
 - `agent-browser` 只用于 Web 入口的探索式检查，不替代 Playwright 回归，也不作为真实 Tauri 窗口的正式验收工具；
 - 共享 UI 行为变更必须运行相关 Vitest 与 Playwright；原生桥接变更还必须运行相关 Rust 与 WebdriverIO 用例；发布候选版本必须在 macOS 和 Windows 分别完成桌面冒烟；
 - 目录、命令、CI 分层和完成判定以 [`docs/tauri-testing-strategy.md`](docs/tauri-testing-strategy.md) 为准。
@@ -242,7 +243,8 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 ### 腾讯云 MVP 基线
 
 - [`docs/tencent-cloud-mvp-deployment.md`](docs/tencent-cloud-mvp-deployment.md) 是当前腾讯云资源、最小采购、单机部署、对象存储、视频云服务、RAGFlow 延后方案和扩容条件的权威基线；涉及腾讯云采购、部署或 Provider 选择前必须先完整阅读；
-- 本项目自己的目标供应商统一为 TokenHub、LighthouseCOS/COS 和 MPS；竞品分析中保留的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 只描述竞品事实，不得作为本项目默认实现；
+- 本项目的模型服务使用阿里云百炼，云端运行、对象存储和视频渲染分别使用腾讯云 Lighthouse、LighthouseCOS/COS 和 MPS；腾讯云部署不代表模型供应商必须迁移到腾讯云，禁止再次把这两个决策绑定；竞品分析中保留的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 只描述竞品事实，不得作为本项目默认实现；
+- 当前 Demo 阶段的百炼 API Key 为方便多台开发电脑同步，由用户明确决定随私有项目仓库版本化；除非用户再次明确要求，不得删除该 Key、要求轮换或改写 Git 历史。此例外只适用于当前 Demo 百炼 Key，不扩展到服务器密码、SSH 私钥、生产凭据、客户凭据或腾讯云 SecretId/SecretKey；
 - 当前无 RAGFlow MVP 复用已有北京 4C4G Lighthouse；在 C07 前不得为了展示提前采购 RAGFlow 或其 MySQL、Redis、Elasticsearch、MinIO 托管服务；
 - 现有 4C4G 只承载低并发演示，不运行本地大模型、完整 FFmpeg 批量渲染、RAGFlow 或重型观测栈；素材和成片必须直传对象存储；
 - 开发到 C07 时，RAGFlow 最小使用独立 4C16G、100GiB 节点，先通过官方 Docker Compose 同机运行其依赖，并保持独立网络、Volume、凭据和端口；
@@ -308,8 +310,13 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 ## 当前阶段本地部署规范（强制）
 
 - 当前开发阶段的运行、验证、联调和部署全部在用户本机完成，禁止未经用户新指令部署到远程服务器、云环境或公网；
-- FastAPI、Agent Worker 和前端开发服务优先直接使用 uv、pnpm 在本机运行；PostgreSQL、Redis、MinIO、RAGFlow 及观测组件使用 Docker Compose；
+- 本地开发采用“常驻开发栈 + 一次性正式验收栈”双轨流程：日常开发、定向回归和 Tauri 调试默认复用固定名称的 `agent-platform-dev` 开发栈；里程碑闭环、完整本机部署验证和发版前才使用随机名称、随机端口、全新数据且结束后自动销毁的隔离验收栈；
+- `agent-platform-dev` 的运行目录固定为仓库内 `.local/mvp-profile/agent-platform-dev`，必须通过 `infra/platform/mvp-profile.sh` 管理，不得另起一套手工 Compose 编排；开发栈的数据库、缓存、对象存储和 LiteLLM Stub 默认保留，以便跨测试轮次复用；
+- 日常修改后只重建或重启受影响的 API、Worker、前端或桌面测试进程，禁止为了单个选择器、前端交互或 Tauri 测试问题反复创建整套随机隔离栈；只有变更基础设施、迁移、跨服务契约，或进入正式完成判定时才运行完整 `infra/platform/test-mvp-profile.sh`；
+- 常驻开发栈的日常功能验收、定向回归和 Tauri 核心流程默认复用 Demo Seed 固定测试账号（`demo@example.com` / `agent-platform-demo`），禁止每轮重新注册随机用户；新增业务数据使用唯一名称或稳定隔离标识，断言不得依赖上轮残留。只有认证/注册本身、租户隔离、并发隔离等必须验证多身份的专项测试才能创建额外账号；一次性全新验收栈先幂等初始化同一套测试账号再复用，正式完成证据仍必须来自该隔离验收栈，不能只以常驻开发栈通过代替；
+- Demo 阶段 Tauri 的“记住账号密码”使用 App 私有数据目录，不调用系统钥匙串，避免 macOS 授权弹窗干扰用户；该例外只覆盖固定 Demo 登录信息，高敏 Token、企业密钥和正式环境凭据仍必须使用系统安全存储，且任何凭据都不得写入浏览器 `localStorage`；
+- FastAPI、Agent Worker 和前端可以按当前任务需要直接使用 uv、pnpm 热更新，或复用 `agent-platform-dev` 中对应容器；PostgreSQL、Redis、MinIO、RAGFlow 及观测组件使用 Docker Compose；
 - 本机性能允许完整平台栈与 RAGFlow 独立服务栈同时运行，不为了节省资源擅自裁剪已确认的验证范围；
 - 本地完整部署时允许同时启动 API、Worker、Web、平台基础设施、RAGFlow 全套依赖和观测组件，并使用 Playwright 运行完整真实用户回归；
 - 本地服务默认只绑定回环地址或受控 Docker 网络，不得无意暴露到公网；开发凭据不得复用到未来生产环境；
-- 每次验证或任务完成后，必须停止本轮由 AI 启动的前后端进程和容器；只有用户明确要求继续保持运行时才允许保留。
+- 每次验证或任务完成后，必须清理本轮临时创建的随机验收栈、Tauri 测试进程、WebDriver 和浏览器进程；`agent-platform-dev` 作为用户已明确要求保留的常驻开发栈，不得在普通测试结束时自动销毁；用户要求释放性能、暂停或关机前，必须立即停止该常驻栈及其他本轮服务。

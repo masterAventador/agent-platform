@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import cast
 
 from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
 from redis.asyncio import Redis
@@ -101,6 +102,13 @@ def create_app(
                 app_telemetry.shutdown()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app_settings.cors_allowed_origins),
+        allow_credentials=True,
+        allow_methods=["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
+        allow_headers=["Accept", "Authorization", "Content-Type"],
+    )
     app.state.settings = app_settings
     app.state.telemetry = app_telemetry
     app.state.session_factory = session_factory

@@ -27,7 +27,10 @@ export function createTauriPlatformAdapter(): PlatformAdapter {
       externalLinks: true,
       notifications: true,
       secureCredentials: true,
+      rememberedLogin: true,
+      localExecution: true,
     }),
+    runtimeConfig: () => invoke('platform_runtime_config'),
     selectFile: async (options = {}) => {
       try {
         const path = await open({
@@ -79,6 +82,20 @@ export function createTauriPlatformAdapter(): PlatformAdapter {
       get: (key) => invoke<string | null>('credential_get', { key }),
       set: (key, secret) => invoke<void>('credential_set', { key, secret }),
       delete: (key) => invoke<void>('credential_delete', { key }),
+    },
+    rememberedLogin: {
+      get: () => invoke<string | null>('remembered_login_get'),
+      set: (value) => invoke<void>('remembered_login_set', { value }),
+      delete: () => invoke<void>('remembered_login_delete'),
+    },
+    localExecutor: {
+      start: () => invoke('local_executor_start', { capabilityId: 'social-operations' }),
+      invoke: (request) => invoke('local_executor_invoke', {
+        capabilityId: 'social-operations',
+        request,
+      }),
+      status: () => invoke('local_executor_status', { capabilityId: 'social-operations' }),
+      stop: () => invoke('local_executor_stop', { capabilityId: 'social-operations' }),
     },
   }
 }

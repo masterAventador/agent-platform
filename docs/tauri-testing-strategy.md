@@ -60,8 +60,8 @@ pnpm tauri build
 依赖安装门禁使用 `pnpm install --frozen-lockfile`，禁止通过放宽锁文件校验掩盖
 `package.json`、工作区配置与锁文件之间的漂移。
 
-macOS 与 Windows 桌面编译和真实冒烟由
-`.github/workflows/tauri-desktop.yml` 的双平台矩阵执行。测试构建通过
+macOS 桌面编译和真实冒烟由开发机以隐藏窗口、Accessory 激活策略（不占 Dock）执行；Windows 桌面编译和隐藏真实冒烟由
+`.github/workflows/tauri-desktop.yml` 在 GitHub Actions 执行。测试构建通过
 `desktop-test` Rust Feature 和 `tauri.test.conf.json` 显式启用驱动，正式构建不启用该 Feature。
 
 ## 4. PlatformAdapter 验收

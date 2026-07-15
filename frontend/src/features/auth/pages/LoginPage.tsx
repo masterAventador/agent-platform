@@ -1,13 +1,21 @@
-import { Alert, Button, Card, Divider, Form, Input, Space, Typography } from 'antd'
+import { useEffect } from 'react'
+import { Alert, Button, Card, Checkbox, Divider, Form, Input, Space, Typography } from 'antd'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
+import { getPlatformAdapter } from '../../../platform'
 import { getApiErrorMessage } from '../api/errors'
 import { useLogin } from '../api/queries'
+import {
+  clearRememberedLogin,
+  loadRememberedLogin,
+  saveRememberedLogin,
+} from '../remembered-login'
 import './auth.css'
 
 interface LoginValues {
   email: string
   password: string
+  remember: boolean
 }
 
 interface LoginLocationState {
@@ -17,14 +25,42 @@ interface LoginLocationState {
 }
 
 export function LoginPage() {
+  const [form] = Form.useForm<LoginValues>()
   const login = useLogin()
   const navigate = useNavigate()
   const location = useLocation()
   const state = (location.state ?? {}) as LoginLocationState
+  const platform = getPlatformAdapter()
+  const canRememberLogin = platform.capabilities().rememberedLogin
+
+  useEffect(() => {
+    if (!canRememberLogin || state.email) return
+    let active = true
+    void loadRememberedLogin(platform)
+      .then((remembered) => {
+        if (active && remembered && !form.isFieldsTouched(['email', 'password'])) {
+          form.setFieldsValue({ ...remembered, remember: true })
+        }
+      })
+      .catch(() => console.error('remembered_login_load_failed'))
+    return () => {
+      active = false
+    }
+  }, [canRememberLogin, form, platform, state.email])
 
   const submit = async (values: LoginValues) => {
+    const { remember, ...credentials } = values
     try {
-      await login.mutateAsync(values)
+      await login.mutateAsync(credentials)
+      try {
+        if (remember) {
+          await saveRememberedLogin(platform, credentials)
+        } else {
+          await clearRememberedLogin(platform)
+        }
+      } catch {
+        console.error('remembered_login_update_failed')
+      }
       navigate(state.from ?? '/', { replace: true })
     } catch {
       // 错误由 Mutation 状态统一渲染。
@@ -53,8 +89,9 @@ export function LoginPage() {
         )}
 
         <Form<LoginValues>
+          form={form}
           layout="vertical"
-          initialValues={{ email: state.email }}
+          initialValues={{ email: state.email, remember: canRememberLogin }}
           requiredMark={false}
           onFinish={submit}
         >
@@ -64,6 +101,11 @@ export function LoginPage() {
           <Form.Item label="密码" name="password" rules={[{ required: true }]}>
             <Input.Password autoComplete="current-password" size="large" />
           </Form.Item>
+          {canRememberLogin && (
+            <Form.Item className="auth-remember" name="remember" valuePropName="checked">
+              <Checkbox>记住账号和密码（仅保存在此设备的 App 数据中）</Checkbox>
+            </Form.Item>
+          )}
           <Button block htmlType="submit" loading={login.isPending} size="large" type="primary">
             登录
           </Button>

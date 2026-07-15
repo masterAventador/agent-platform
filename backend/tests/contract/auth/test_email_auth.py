@@ -99,6 +99,39 @@ async def test_register_login_restore_session_and_logout(auth_client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_tauri_origin_receives_exact_credentialed_cors_headers(
+    auth_client: AsyncClient,
+) -> None:
+    response = await auth_client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "tauri://localhost",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "tauri://localhost"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_untrusted_origin_does_not_receive_cors_access(
+    auth_client: AsyncClient,
+) -> None:
+    response = await auth_client.options(
+        "/api/v1/auth/login",
+        headers={
+            "Origin": "https://attacker.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_duplicate_email_registration_is_rejected(auth_client: AsyncClient) -> None:
     payload = {"email": "member@example.com", "password": "correct horse battery staple"}
     assert (await auth_client.post("/api/v1/auth/register", json=payload)).status_code == 201

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -36,11 +37,81 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("pnpm-workspace.yaml", dockerfile)
         self.assertLess(
             dockerfile.index("COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./"),
-            dockerfile.index("RUN pnpm install --frozen-lockfile"),
+            dockerfile.index("pnpm install --frozen-lockfile"),
         )
         self.assertRegex(dockerfile, r"pnpm install[^\n]*--frozen-lockfile")
+        self.assertRegex(
+            dockerfile,
+            r"RUN --mount=type=cache,[^\n]*target=/pnpm/store",
+        )
         self.assertRegex(dockerfile, r"(?m)^USER (?!0$|root$).+$")
         self.assertNotRegex(dockerfile, r"(?im)^(?:ARG|ENV)\s+.*(?:SECRET|PASSWORD|API_KEY)")
+
+    def test_tauri_mvp_remote_bridge_is_loopback_scoped_and_test_only(self) -> None:
+        dockerfile = self.read("frontend/Dockerfile")
+        compose = self.read("infra/compose/platform.yml")
+        acceptance = self.read("infra/platform/test-mvp-profile.sh")
+        wdio = self.read("frontend/wdio.conf.ts")
+        mvp_spec = self.read("frontend/e2e-tauri/mvp-profile.spec.ts")
+        test_config = json.loads(self.read("frontend/src-tauri/tauri.test.conf.json"))
+        app_permissions = self.read(
+            "frontend/src-tauri/permissions/app-commands.toml"
+        )
+        production_capability = json.loads(
+            self.read("frontend/src-tauri/capabilities/default.json")
+        )
+        production_config_text = self.read("frontend/src-tauri/tauri.conf.json")
+        production_config = json.loads(production_config_text)
+
+        self.assertIn("ARG FRONTEND_BUILD_MODE=production", dockerfile)
+        self.assertIn('pnpm build --mode "${FRONTEND_BUILD_MODE}"', dockerfile)
+        self.assertIn(
+            "FRONTEND_BUILD_MODE: ${PLATFORM_FRONTEND_BUILD_MODE:-production}",
+            compose,
+        )
+        self.assertIn("PLATFORM_FRONTEND_BUILD_MODE=tauri-test", acceptance)
+        self.assertEqual(
+            test_config["app"]["security"]["capabilities"][0]["remote"],
+            {"urls": ["http://127.0.0.1:*"]},
+        )
+        self.assertEqual(
+            test_config["app"]["windows"][0]["title"],
+            production_config["app"]["windows"][0]["title"],
+        )
+        self.assertIn('identifier = "allow-platform-runtime-config"', app_permissions)
+        self.assertIn('commands.allow = ["platform_runtime_config"]', app_permissions)
+        self.assertIn(
+            "allow-platform-runtime-config",
+            test_config["app"]["security"]["capabilities"][0]["permissions"],
+        )
+        self.assertIn(
+            "allow-platform-runtime-config", production_capability["permissions"]
+        )
+        self.assertNotIn('"remote"', production_config_text)
+        self.assertIn("process.env.TAURI_MVP_WEB_URL", wdio)
+        self.assertIn("new URL('/api/v1', mvpWebUrl).toString()", wdio)
+        self.assertIn("process.env.AGENT_PLATFORM_DESKTOP_WEB_URL ??= mvpWebUrl", wdio)
+        self.assertIn("delete process.env.AGENT_PLATFORM_DESKTOP_WEB_URL", wdio)
+        self.assertNotIn("AGENT_PLATFORM_DESKTOP_WEB_URL=", acceptance)
+        self.assertIn("./e2e-tauri/mvp-profile.spec.ts", wdio)
+        self.assertIn("./e2e-tauri/app.spec.ts", wdio)
+        self.assertIn("await emailInput.setValue(demoEmail)", mvp_spec)
+        self.assertIn("await currentPasswordInput.setValue(demoPassword)", mvp_spec)
+        self.assertIn('button[type="submit"]', mvp_spec)
+        self.assertIn("await submitForm('form')", mvp_spec)
+        self.assertNotIn("await loginButton.click()", mvp_spec)
+        self.assertIn("form.requestSubmit()", mvp_spec)
+        self.assertNotIn("const textareas = await $$('textarea')", mvp_spec)
+        self.assertNotIn("waitForClickable", mvp_spec)
+        self.assertIn("#roleDescription", mvp_spec)
+        self.assertIn("#systemPrompt", mvp_spec)
+
+    def test_tauri_ci_runs_windows_only_and_keeps_real_desktop_smoke(self) -> None:
+        workflow = self.read(".github/workflows/tauri-desktop.yml")
+        self.assertIn("runs-on: windows-latest", workflow)
+        self.assertNotIn("macos-15", workflow)
+        self.assertIn("pnpm tauri build --debug --no-bundle", workflow)
+        self.assertIn("pnpm test:tauri", workflow)
 
     def test_web_server_proxies_api_and_supports_spa_routes(self) -> None:
         nginx = self.read("frontend/nginx.conf")
@@ -209,6 +280,10 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("health", acceptance)
         self.assertIn("stop", acceptance)
         self.assertIn("trap cleanup EXIT", acceptance)
+        self.assertIn("print_failure_diagnostics", acceptance)
+        self.assertIn('if [[ "${original_exit}" -ne 0 ]]; then', acceptance)
+        self.assertIn("--tail 200 dispatcher worker api", acceptance)
+        self.assertIn("--tail 200 sandbox-controller", acceptance)
         self.assertIn("openai-stub", acceptance)
         self.assertIn("worker_gateway_probe.py", acceptance)
         self.assertIn('"chat"', acceptance)
@@ -253,6 +328,125 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("'mvp-profile.spec.ts'", default_config)
         self.assertIn("testIgnore:", default_config)
         self.assertIn("testMatch: 'mvp-profile.spec.ts'", mvp_config)
+
+    def test_bailian_smoke_is_explicit_real_and_uses_litellm_alias(self) -> None:
+        smoke = self.read("infra/litellm/test.sh")
+        readme = self.read("infra/README.md")
+        self.assertIn("real-provider", smoke)
+        self.assertIn("infra/compose/.env.litellm", smoke)
+        self.assertIn('"model": "general-purpose"', smoke)
+        self.assertIn("/chat/completions", smoke)
+        self.assertNotIn("set -x", smoke)
+        self.assertNotIn("curl -v", smoke)
+        self.assertIn("Authorization", smoke)
+        self.assertIn("Bearer", smoke)
+        self.assertIn("total_tokens", smoke)
+        self.assertIn("bash infra/litellm/test.sh real-provider", readme)
+
+    def test_mvp_acceptance_includes_tauri_core_flow(self) -> None:
+        acceptance = self.read("infra/platform/test-mvp-profile.sh")
+        desktop_spec = self.read("frontend/e2e-tauri/mvp-profile.spec.ts")
+        self.assertIn("TAURI_MVP_WEB_URL", acceptance)
+        self.assertIn("pnpm test:tauri", acceptance)
+        self.assertIn("agent_platform.bootstrap.demo_seed", acceptance)
+        self.assertIn("AGENT_PLATFORM_APP_ENVIRONMENT=development", acceptance)
+        self.assertIn("TAURI_MVP_WEB_URL", desktop_spec)
+        for label in ("demo@example.com", "发布员工", "发起任务", "已完成", "工作台"):
+            self.assertIn(label, desktop_spec)
+
+    def test_tauri_native_flow_verifies_keychain_restore_across_app_starts(self) -> None:
+        desktop_spec = self.read("frontend/e2e-tauri/app.spec.ts")
+        self.assertIn("TAURI_EXPECT_REMEMBERED_LOGIN", desktop_spec)
+        self.assertIn("demo@example.com", desktop_spec)
+        self.assertIn("remembered_login_get", desktop_spec)
+        self.assertIn("remembered_login_set", desktop_spec)
+
+    def test_tauri_automation_window_is_hidden(self) -> None:
+        config = self.read("frontend/src-tauri/tauri.test.conf.json")
+        source = self.read("frontend/src-tauri/src/lib.rs")
+        wdio = self.read("frontend/wdio.conf.ts")
+        self.assertRegex(config, r'"visible"\s*:\s*false')
+        self.assertIn(
+            '#[cfg(all(feature = "desktop-test", target_os = "macos"))]', source
+        )
+        self.assertIn(
+            "set_activation_policy(tauri::ActivationPolicy::Accessory)", source
+        )
+        self.assertIn("AGENT_PLATFORM_DESKTOP_API_BASE_URL", wdio)
+        self.assertIn("http://127.0.0.1:18000/api/v1", wdio)
+        self.assertIn("delete process.env.AGENT_PLATFORM_DESKTOP_WEB_URL", wdio)
+        self.assertNotIn(
+            "process.env.AGENT_PLATFORM_DESKTOP_WEB_URL ??= process.env.TAURI_MVP_WEB_URL",
+            wdio,
+        )
+        main = self.read("frontend/src/main.tsx")
+        self.assertIn("desktop_runtime_api_url_missing", main)
+
+    def test_tauri_remote_web_override_is_test_only(self) -> None:
+        source = self.read("frontend/src-tauri/src/lib.rs")
+        self.assertRegex(
+            source,
+            r'#\[cfg\(feature = "desktop-test"\)\]\s+let web_url = optional_runtime_url',
+        )
+        self.assertRegex(
+            source,
+            r'#\[cfg\(not\(feature = "desktop-test"\)\)\]\s+let web_url = None',
+        )
+
+    def test_tauri_app_commands_are_explicitly_allowed_in_default_and_test_capabilities(
+        self,
+    ) -> None:
+        default_capability = json.loads(
+            self.read("frontend/src-tauri/capabilities/default.json")
+        )
+        test_config = json.loads(self.read("frontend/src-tauri/tauri.test.conf.json"))
+        test_permissions = test_config["app"]["security"]["capabilities"][0][
+            "permissions"
+        ]
+        required_permissions = (
+            "allow-platform-capabilities",
+            "allow-platform-runtime-config",
+            "allow-secure-credentials",
+            "allow-remembered-login-storage",
+            "allow-local-executor",
+        )
+        for permission in required_permissions:
+            self.assertIn(permission, default_capability["permissions"])
+            self.assertIn(permission, test_permissions)
+
+        app_permissions = self.read("frontend/src-tauri/permissions/app-commands.toml")
+        for command in (
+            "platform_capabilities",
+            "platform_runtime_config",
+            "credential_get",
+            "credential_set",
+            "credential_delete",
+            "remembered_login_get",
+            "remembered_login_set",
+            "remembered_login_delete",
+            "local_executor_start",
+            "local_executor_invoke",
+            "local_executor_status",
+            "local_executor_stop",
+        ):
+            self.assertIn(f'"{command}"', app_permissions)
+
+    def test_social_sidecar_uses_authenticated_stdio_ipc_without_fixed_port(self) -> None:
+        source = self.read("frontend/src-tauri/src/local_executor.rs")
+        main = self.read("frontend/src-tauri/src/main.rs")
+        self.assertIn("--social-operations-sidecar", main)
+        self.assertIn("session_token", source)
+        self.assertIn("Stdio::piped", source)
+        self.assertNotIn("TcpListener", source)
+        self.assertNotIn("127.0.0.1", source)
+        self.assertNotRegex(source, r"bind\s*\(")
+        for command in (
+            "local_executor_start",
+            "local_executor_invoke",
+            "local_executor_status",
+            "local_executor_stop",
+        ):
+            self.assertIn(command, source)
 
 
 class MvpProfileLifecycleBehaviorTest(unittest.TestCase):

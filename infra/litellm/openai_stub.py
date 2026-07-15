@@ -106,7 +106,12 @@ class Handler(BaseHTTPRequestHandler):
         finish_reason = "stop"
         if scenario == "mvp-web-flow":
             message = {"role": "assistant", "content": "local stub completion"}
-        elif request.get("tools"):
+        elif any(
+            isinstance(tool, dict)
+            and isinstance(tool.get("function"), dict)
+            and tool["function"].get("name") == "get_status"
+            for tool in request.get("tools", [])
+        ):
             message = {
                 "role": "assistant",
                 "content": None,

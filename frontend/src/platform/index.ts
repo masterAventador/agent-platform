@@ -17,10 +17,13 @@ export function getPlatformAdapter(): PlatformAdapter {
 
 export type {
   FileSelectionOptions,
+  LocalExecutorBridge,
+  LocalExecutorStatus,
   PlatformAdapter,
   PlatformCapabilities,
   PlatformFile,
   PlatformNotification,
+  PlatformRuntimeConfig,
   SaveFileOptions,
   SaveFileResult,
   SecureCredentialStore,

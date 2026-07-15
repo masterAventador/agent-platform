@@ -6,6 +6,8 @@ export type PlatformCapability =
   | 'externalLinks'
   | 'notifications'
   | 'secureCredentials'
+  | 'rememberedLogin'
+  | 'localExecution'
 
 export interface PlatformCapabilities {
   platform: PlatformKind
@@ -14,6 +16,8 @@ export interface PlatformCapabilities {
   externalLinks: boolean
   notifications: boolean
   secureCredentials: boolean
+  rememberedLogin: boolean
+  localExecution: boolean
 }
 
 export interface FileSelectionOptions {
@@ -40,19 +44,46 @@ export interface PlatformNotification {
   body?: string
 }
 
+export interface PlatformRuntimeConfig {
+  apiBaseUrl: string | null
+  webUrl: string | null
+}
+
 export interface SecureCredentialStore {
   get(key: string): Promise<string | null>
   set(key: string, secret: string): Promise<void>
   delete(key: string): Promise<void>
 }
 
+export interface RememberedLoginStore {
+  get(): Promise<string | null>
+  set(value: string): Promise<void>
+  delete(): Promise<void>
+}
+
+export interface LocalExecutorStatus {
+  running: boolean
+  protocolVersion: '1.0'
+  capabilityId: 'social-operations'
+}
+
+export interface LocalExecutorBridge {
+  start(): Promise<LocalExecutorStatus>
+  invoke(request: Record<string, unknown>): Promise<Record<string, unknown>>
+  status(): Promise<LocalExecutorStatus>
+  stop(): Promise<LocalExecutorStatus>
+}
+
 export interface PlatformAdapter {
   capabilities(): PlatformCapabilities
+  runtimeConfig(): Promise<PlatformRuntimeConfig>
   selectFile(options?: FileSelectionOptions): Promise<PlatformFile | null>
   saveFile(options: SaveFileOptions): Promise<SaveFileResult | null>
   openExternal(url: string): Promise<void>
   notify(notification: PlatformNotification): Promise<boolean>
   credentials: SecureCredentialStore
+  rememberedLogin: RememberedLoginStore
+  localExecutor: LocalExecutorBridge
 }
 
 export type PlatformErrorCode =

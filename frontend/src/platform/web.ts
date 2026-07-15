@@ -69,7 +69,10 @@ export function createWebPlatformAdapter(): PlatformAdapter {
       externalLinks: typeof window !== 'undefined',
       notifications: typeof Notification !== 'undefined',
       secureCredentials: false,
+      rememberedLogin: false,
+      localExecution: false,
     }),
+    runtimeConfig: async () => ({ apiBaseUrl: null, webUrl: null }),
     selectFile,
     saveFile,
     openExternal: async (value) => {
@@ -88,5 +91,16 @@ export function createWebPlatformAdapter(): PlatformAdapter {
       return true
     },
     credentials: unsupportedCredentials,
+    rememberedLogin: {
+      get: async () => { throw new PlatformCapabilityError('rememberedLogin') },
+      set: async () => { throw new PlatformCapabilityError('rememberedLogin') },
+      delete: async () => { throw new PlatformCapabilityError('rememberedLogin') },
+    },
+    localExecutor: {
+      start: async () => { throw new PlatformCapabilityError('localExecution') },
+      invoke: async () => { throw new PlatformCapabilityError('localExecution') },
+      status: async () => { throw new PlatformCapabilityError('localExecution') },
+      stop: async () => { throw new PlatformCapabilityError('localExecution') },
+    },
   }
 }
