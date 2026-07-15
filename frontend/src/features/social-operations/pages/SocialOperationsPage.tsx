@@ -227,7 +227,6 @@ export function SocialOperationsPage({
                 options={[
                   { label: 'macOS', value: 'macos' },
                   { label: 'Windows', value: 'windows' },
-                  { label: 'Linux', value: 'linux' },
                 ]}
                 onChange={setDevicePlatform}
               />

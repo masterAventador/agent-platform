@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 
+import { composeEnvironment, frontendRoot, postgresDatabaseUrl } from './compose-core'
 
 export const validPayloadMarker = 'valid-payload-must-never-appear'
 export const malformedPayloadMarker = 'malformed-payload-must-never-appear'
@@ -15,10 +15,8 @@ export type DeadLetterFixture = {
   malformed_run_id: string
 }
 
-const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const backendRoot = resolve(frontendRoot, '../backend')
-const databaseUrl =
-  `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'}/agent_platform_e2e`
+const databaseUrl = postgresDatabaseUrl('agent_platform_e2e')
 
 export function prepareDeadLetterFixture(ownerEmail: string): DeadLetterFixture {
   const output = execFileSync(
@@ -27,7 +25,7 @@ export function prepareDeadLetterFixture(ownerEmail: string): DeadLetterFixture 
     {
       cwd: backendRoot,
       encoding: 'utf8',
-      env: { ...process.env, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
+      env: { ...composeEnvironment, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
     },
   )
   return JSON.parse(output) as DeadLetterFixture
@@ -43,7 +41,7 @@ export function setDeadLetterWorkspaceRole(
     {
       cwd: backendRoot,
       stdio: 'inherit',
-      env: { ...process.env, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
+      env: { ...composeEnvironment, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
     },
   )
 }

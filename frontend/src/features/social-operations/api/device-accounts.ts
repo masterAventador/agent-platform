@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { apiClient } from '../../../api/client'
 import { tenantRequestConfig } from '../../../api/tenant'
 
-const devicePlatformSchema = z.enum(['macos', 'windows', 'linux'])
+const devicePlatformSchema = z.enum(['macos', 'windows'])
 const deviceStatusSchema = z.enum(['online', 'offline', 'emergency_stopped'])
 const socialDeviceSchema = z.object({
   device_id: z.uuid(),

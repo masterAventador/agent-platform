@@ -1,14 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 
+import {
+  composeArgs,
+  composeArgsForProject,
+  composeEnvironment,
+  repositoryRoot,
+} from './helpers/compose-core'
 
-const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const repositoryRoot = resolve(frontendRoot, '..')
-const composeFile = resolve(repositoryRoot, 'infra/compose/core.yml')
-const composeEnv = resolve(repositoryRoot, 'infra/compose/.env.example')
-const composeArgs = ['compose', '--env-file', composeEnv, '-f', composeFile]
 const ownershipMarker = resolve(repositoryRoot, '.local/playwright-owned-core')
 
 export default function globalTeardown() {
@@ -16,13 +16,20 @@ export default function globalTeardown() {
     execFileSync(
       'docker',
       [...composeArgs, 'exec', '-T', 'postgres', 'dropdb', '--force', '--if-exists', '-U', 'agent_platform', 'agent_platform_e2e'],
-      { cwd: repositoryRoot, stdio: 'inherit' },
+      { cwd: repositoryRoot, env: composeEnvironment, stdio: 'inherit' },
     )
   } finally {
     if (existsSync(ownershipMarker)) {
-      const startedServices = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as string[]
-      execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
+      const marker = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as
+        | string[]
+        | { projectName?: string; startedServices: string[] }
+      const startedServices = Array.isArray(marker) ? marker : marker.startedServices
+      const teardownComposeArgs = Array.isArray(marker) || !marker.projectName
+        ? composeArgs
+        : composeArgsForProject(marker.projectName)
+      execFileSync('docker', [...teardownComposeArgs, 'stop', ...startedServices], {
         cwd: repositoryRoot,
+        env: composeEnvironment,
         stdio: 'inherit',
       })
       rmSync(ownershipMarker, { force: true })

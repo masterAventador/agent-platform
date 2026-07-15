@@ -98,6 +98,11 @@ describe('B02 设备与平台账号中心', () => {
     const { platform, socialOperations } = createPlatform()
     render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
 
+    const [devicePlatformSelect] = screen.getAllByRole('combobox')
+    await user.click(devicePlatformSelect)
+    expect(screen.getByText('Windows')).toBeInTheDocument()
+    expect(screen.queryByText('Linux')).not.toBeInTheDocument()
+
     await user.type(screen.getByLabelText('设备 ID'), deviceId)
     await user.type(screen.getByLabelText('设备名称'), 'Marketing Mac')
     await user.click(screen.getByRole('button', { name: '注册本机设备' }))

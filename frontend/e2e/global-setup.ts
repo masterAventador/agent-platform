@@ -1,16 +1,16 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
+import {
+  composeArgs,
+  composeEnvironment,
+  composeProjectName,
+  postgresDatabaseUrl,
+  repositoryRoot,
+} from './helpers/compose-core'
 
-const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const repositoryRoot = resolve(frontendRoot, '..')
-const composeFile = resolve(repositoryRoot, 'infra/compose/core.yml')
-const composeEnv = resolve(repositoryRoot, 'infra/compose/.env.example')
-const composeArgs = ['compose', '--env-file', composeEnv, '-f', composeFile]
-export const databaseUrl =
-  `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'}/agent_platform_e2e`
+export const databaseUrl = postgresDatabaseUrl('agent_platform_e2e')
 const ownershipMarker = resolve(repositoryRoot, '.local/playwright-owned-core')
 
 export default function globalSetup() {
@@ -20,14 +20,18 @@ export default function globalSetup() {
     const startedServices = services.filter((service) => !execFileSync(
       'docker',
       [...composeArgs, 'ps', '-q', service],
-      { cwd: repositoryRoot, encoding: 'utf8' },
+      { cwd: repositoryRoot, encoding: 'utf8', env: composeEnvironment },
     ).trim())
     if (startedServices.length) {
       mkdirSync(dirname(ownershipMarker), { recursive: true })
-      writeFileSync(ownershipMarker, JSON.stringify(startedServices))
+      writeFileSync(ownershipMarker, JSON.stringify({
+        projectName: composeProjectName,
+        startedServices,
+      }))
     }
     execFileSync('docker', [...composeArgs, 'up', '-d', '--wait', ...services], {
       cwd: repositoryRoot,
+      env: composeEnvironment,
       stdio: 'inherit',
     })
     execFileSync(
@@ -44,21 +48,21 @@ export default function globalSetup() {
         '2',
         'FLUSHDB',
       ],
-      { cwd: repositoryRoot, stdio: 'inherit' },
+      { cwd: repositoryRoot, env: composeEnvironment, stdio: 'inherit' },
     )
     execFileSync(
       'docker',
       [...composeArgs, 'exec', '-T', 'postgres', 'dropdb', '--force', '--if-exists', '-U', 'agent_platform', 'agent_platform_e2e'],
-      { cwd: repositoryRoot, stdio: 'inherit' },
+      { cwd: repositoryRoot, env: composeEnvironment, stdio: 'inherit' },
     )
     execFileSync(
       'docker',
       [...composeArgs, 'exec', '-T', 'postgres', 'createdb', '-U', 'agent_platform', 'agent_platform_e2e'],
-      { cwd: repositoryRoot, stdio: 'inherit' },
+      { cwd: repositoryRoot, env: composeEnvironment, stdio: 'inherit' },
     )
     execFileSync('uv', ['run', 'alembic', 'upgrade', 'head'], {
       cwd: resolve(repositoryRoot, 'backend'),
-      env: { ...process.env, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
+      env: { ...composeEnvironment, AGENT_PLATFORM_DATABASE_URL: databaseUrl },
       stdio: 'inherit',
     })
   } catch (error) {
@@ -70,9 +74,13 @@ export default function globalSetup() {
 function stopOwnedServices() {
   try {
     if (!existsSync(ownershipMarker)) return
-    const startedServices = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as string[]
+    const marker = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as
+      | string[]
+      | { startedServices: string[] }
+    const startedServices = Array.isArray(marker) ? marker : marker.startedServices
     execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
       cwd: repositoryRoot,
+      env: composeEnvironment,
       stdio: 'inherit',
     })
   } catch {

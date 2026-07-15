@@ -55,5 +55,8 @@ describe('B02 设备 API', () => {
 
     vi.mocked(apiClient.get).mockResolvedValueOnce({ data: [{ ...device, status: 'unknown' }] })
     await expect(listSocialDevices(tenantId)).rejects.toThrow()
+
+    vi.mocked(apiClient.get).mockResolvedValueOnce({ data: [{ ...device, platform: 'linux' }] })
+    await expect(listSocialDevices(tenantId)).rejects.toThrow()
   })
 })
