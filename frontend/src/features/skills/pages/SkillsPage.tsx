@@ -4,7 +4,15 @@ import { useNavigate } from 'react-router-dom'
 
 import { getApiErrorMessage } from '../../auth/api/errors'
 import { useCreateSkill, useSkills } from '../api/queries'
+import type { SkillStatus } from '../api/skills'
 import './skills.css'
+
+const skillStatusLabels: Record<SkillStatus, { label: string, color: string }> = {
+  draft: { label: '草稿', color: 'default' },
+  published: { label: '已发布', color: 'success' },
+  archived: { label: '已下线', color: 'warning' },
+  deleted: { label: '已删除', color: 'error' },
+}
 
 export function SkillsPage({ canManageSkills }: { canManageSkills: boolean }) {
   const skills = useSkills()
@@ -45,8 +53,8 @@ export function SkillsPage({ canManageSkills }: { canManageSkills: boolean }) {
               title={skill.name}
               onClick={() => navigate(`/skills/${skill.id}`)}
               extra={(
-                <Tag color={skill.status === 'published' ? 'success' : 'default'}>
-                  {skill.status === 'published' ? '已发布' : '草稿'}
+                <Tag color={skillStatusLabels[skill.status].color}>
+                  {skillStatusLabels[skill.status].label}
                 </Tag>
               )}
             >

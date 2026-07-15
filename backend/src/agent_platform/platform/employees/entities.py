@@ -47,8 +47,8 @@ class EmployeeDraft:
             system_prompt=self.system_prompt.strip(),
         )
 
-    def snapshot(self) -> dict[str, object]:
-        return {
+    def snapshot(self, *, skill_versions: dict[UUID, int] | None = None) -> dict[str, object]:
+        snapshot: dict[str, object] = {
             "name": self.name,
             "avatar_url": self.avatar_url,
             "role_description": self.role_description,
@@ -65,6 +65,12 @@ class EmployeeDraft:
             "approval_policy": self.approval_policy,
             "release_strategy": self.release_strategy,
         }
+        if skill_versions is not None:
+            snapshot["skill_versions"] = [
+                {"skill_id": str(skill_id), "version": skill_versions[skill_id]}
+                for skill_id in self.skill_ids
+            ]
+        return snapshot
 
 
 def is_runnable_employee_definition(definition: Mapping[str, object]) -> bool:
@@ -117,7 +123,12 @@ class Employee:
             updated_at=datetime.now(UTC),
         )
 
-    def publish(self, *, published_by: UUID) -> tuple["Employee", "EmployeeVersion"]:
+    def publish(
+        self,
+        *,
+        published_by: UUID,
+        skill_versions: dict[UUID, int] | None = None,
+    ) -> tuple["Employee", "EmployeeVersion"]:
         version_number = (self.published_version or 0) + 1
         published_at = datetime.now(UTC)
         return (
@@ -132,7 +143,7 @@ class Employee:
                 employee_id=self.id,
                 tenant_id=self.tenant_id,
                 version=version_number,
-                definition=self.draft.snapshot(),
+                definition=self.draft.snapshot(skill_versions=skill_versions),
                 published_by=published_by,
                 published_at=published_at,
             ),

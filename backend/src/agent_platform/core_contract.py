@@ -7,6 +7,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
     {
         "artifacts",
         "auth",
+        "conversations",
         "employees",
         "files",
         "health",

@@ -1,8 +1,29 @@
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from agent_platform.platform.skills.bundle import SkillBundle
+from agent_platform.platform.skills.security import (
+    SkillReviewStatus,
+    SkillSecurityFinding,
+    audit_skill_bundle,
+)
+
+
+class SkillLifecycleStatus(StrEnum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
+
+
+@dataclass(frozen=True, slots=True)
+class SkillUsage:
+    employee_id: UUID
+    employee_name: str
+    relation: str
+    version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -13,9 +34,13 @@ class Skill:
     description: str
     latest_version: int
     published_version: int | None
+    lifecycle_status: SkillLifecycleStatus
+    source: str
     created_by: UUID
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
 
     @classmethod
     def create(
@@ -24,6 +49,7 @@ class Skill:
         tenant_id: UUID,
         created_by: UUID,
         bundle: SkillBundle,
+        source: str = "uploaded",
     ) -> "Skill":
         now = datetime.now(UTC)
         return cls(
@@ -33,6 +59,8 @@ class Skill:
             description=bundle.description,
             latest_version=1,
             published_version=None,
+            lifecycle_status=SkillLifecycleStatus.DRAFT,
+            source=source,
             created_by=created_by,
             created_at=now,
             updated_at=now,
@@ -50,7 +78,29 @@ class Skill:
         return replace(
             self,
             published_version=version,
+            lifecycle_status=SkillLifecycleStatus.PUBLISHED,
+            archived_at=None,
             updated_at=datetime.now(UTC),
+        )
+
+    def offline(self) -> "Skill":
+        now = datetime.now(UTC)
+        return replace(
+            self,
+            published_version=None,
+            lifecycle_status=SkillLifecycleStatus.ARCHIVED,
+            archived_at=now,
+            updated_at=now,
+        )
+
+    def mark_deleted(self) -> "Skill":
+        now = datetime.now(UTC)
+        return replace(
+            self,
+            published_version=None,
+            lifecycle_status=SkillLifecycleStatus.DELETED,
+            deleted_at=now,
+            updated_at=now,
         )
 
 
@@ -64,6 +114,9 @@ class SkillVersion:
     digest: str
     files: list[str]
     storage_key: str
+    review_status: SkillReviewStatus
+    security_findings: list[SkillSecurityFinding]
+    reviewed_at: datetime
     created_by: UUID
     created_at: datetime
     published_at: datetime | None
@@ -78,6 +131,8 @@ class SkillVersion:
         storage_key: str,
         created_by: UUID,
     ) -> "SkillVersion":
+        review = audit_skill_bundle(bundle)
+        now = datetime.now(UTC)
         return cls(
             id=uuid4(),
             skill_id=skill.id,
@@ -87,8 +142,11 @@ class SkillVersion:
             digest=bundle.digest,
             files=bundle.files,
             storage_key=storage_key,
+            review_status=review.status,
+            security_findings=review.findings,
+            reviewed_at=now,
             created_by=created_by,
-            created_at=datetime.now(UTC),
+            created_at=now,
             published_at=None,
         )
 

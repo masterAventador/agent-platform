@@ -65,7 +65,7 @@
 | 多轮会话 | 待集成 | 已具备会话/消息/任务关系、追加输入、错误重试、权限隔离和正式 E2E；活跃任务后的自动排队续跑与会话页直接取消体验仍需主线收口 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
 | 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
-| Skill 生命周期 | 部分完成 | 缺安全审核、下线/删除、内置安装和完整运维能力 | C08 |
+| Skill 生命周期 | 已完成 | 草稿、版本、安全审核、发布、下线、删除、回滚、内置安装、引用保护、差异和使用关系界面已闭环 | C08 |
 | Tool/MCP 生命周期 | 部分完成 | 缺自动发现同步、连接测试、编辑删除和凭据产品化 | C09 |
 | 长期记忆 | 未实现 | 无 Memory 领域、数据库、API、运行时和用户管理能力 | C10 |
 | 工作流/混合员工 | 未开放 | 前端强制禁用，生产 Workflow Registry 没有可用流程 | C11 |
@@ -234,7 +234,11 @@
 
 ### C08 Skill 完整生命周期与安全审核
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-16**
+
+**完成日期：2026-07-16**
 
 完成定义：
 
@@ -244,6 +248,8 @@
 - 已发布版本被员工引用时具备稳定兼容和删除保护；
 - 提供安全审核结果、版本差异和使用关系界面；
 - 生命周期、物化、沙箱执行和租户隔离测试通过。
+
+2026-07-16 完成 C08：Skill 增加显式生命周期状态和版本级安全审核结果，上传后自动记录压缩包、路径、大小、脚本、依赖和危险内容审核，危险脚本、非可信依赖来源和提示注入/疑似密钥会阻断发布；发布旧版本作为回滚入口，下线后不再作为新绑定候选，删除前扫描员工草稿与已发布员工版本并进行引用保护；员工发布版本会固化 `skill_versions`，Worker 运行时优先按固定 Skill 版本物化，因此后续 Skill 回滚不会改变旧员工版本的运行语义。根目录 `skills/builtin/` 已具备内置 Skill 源文件，平台提供幂等安装器和管理端接口；客户端 Skill 详情页展示安全审核结果、版本差异和使用关系，并提供发布、下线和删除操作。新增 `20260716_0023` 迁移补齐持久化字段，`down_revision` 指向 `20260716_0021`，保持主线 Alembic 单头迁移链。
 
 ### C09 Tool/MCP 完整生命周期与凭据产品化
 
@@ -428,16 +434,17 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 默认环境收集 958 项：919 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
+| 后端 Pytest | 默认环境收集 1015 项：976 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
 | 后端 Unit + Contract | 780 项通过；新增覆盖前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
-| Mypy | 170 个源码文件通过 |
-| 前端 Vitest | 28 个测试文件、119 项测试通过；新增同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
+| Mypy | 180 个源码文件通过 |
+| 前端 Vitest | 39 个测试文件、169 项测试通过；新增 Skill 安全审核结果、版本差异、使用关系和生命周期操作组件回归，并保留既有同步双击互斥、上传后 Run 失败补偿、任务意图换键和幂等请求头契约 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
-| 前端 Build | 通过，存在单个 500KB 以上分包警告 |
+| 前端 Build | 通过 |
 | Playwright Web 业务回归 | 15 项完整回归通过；PostgreSQL、Redis、MinIO 与 API 均支持测试进程传入的随机隔离端口，C04 附件场景以延迟上传同步双击验证 1 upload/1 Run；另有正式随机 MVP Profile 3 项真实 Worker/Sandbox 纵切通过，测试容器、网络和卷已销毁 |
+| C08 Skill 生命周期专项 | RED 阶段后端新增测试先失败于缺少 `skills.security`、`skills.builtin` 和固定版本物化类型，前端新增组件测试先失败于缺少“安全审核结果”面板；GREEN 阶段 `uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py tests/unit/workers/test_runtime_composition.py -q` 47 项通过；合并 C05 后发现 `/api/v1/conversations` 未进入能力包 Core API 保留根契约，已补齐 `CORE_API_ROUTE_ROOTS` 并通过 manifest 契约 8 项；正式 Skill Playwright E2E 1 项通过，按 running 状态接管本轮启动的独立 Compose 依赖并自动 `down -v`，测试 project 容器、网络和卷复查为 0 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
@@ -457,8 +464,9 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
 | C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
-| C05 | 待集成 | 2026-07-16 | — | 本任务提交 | RED：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py -q` 首次 404；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q` 首次会话消息为空；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q` 首次准备失败未写回会话 error 消息；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion -q` 首次会话投影保存 12099 字符、超过 PostgreSQL `conversation_messages.content` 12000 边界；`cd frontend && pnpm test -- src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx` 首次缺模块；员工详情“开始会话”用例首次找不到按钮。GREEN：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q`（14 passed）；`cd backend && uv run ruff check . && uv run mypy`；`cd frontend && pnpm exec vitest run src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx src/features/employees/pages/EmployeeDetailPage.test.tsx src/app/App.test.tsx src/features/runs/pages/RunDetailPage.test.tsx --reporter=dot`（47 passed）；`cd frontend && pnpm lint && pnpm typecheck && pnpm build`；`PLAYWRIGHT_*` 隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，真实 PostgreSQL/Redis/MinIO/API/Web，结束后 Docker 容器、网络、卷和残留进程已清理） |
-| C06-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C05 | 已完成 | 2026-07-16 | 2026-07-16（质量收口） | 本任务提交 | RED：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py -q` 首次 404；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q` 首次会话消息为空；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q` 首次准备失败未写回会话 error 消息；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion -q` 首次会话投影保存 12099 字符、超过 PostgreSQL `conversation_messages.content` 12000 边界；`cd frontend && pnpm test -- src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx` 首次缺模块；员工详情“开始会话”用例首次找不到按钮。GREEN：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q`（14 passed）；`cd backend && uv run ruff check . && uv run mypy`；`cd frontend && pnpm exec vitest run src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx src/features/employees/pages/EmployeeDetailPage.test.tsx src/app/App.test.tsx src/features/runs/pages/RunDetailPage.test.tsx --reporter=dot`（47 passed）；`cd frontend && pnpm lint && pnpm typecheck && pnpm build`；`PLAYWRIGHT_*` 隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，真实 PostgreSQL/Redis/MinIO/API/Web，结束后 Docker 容器、网络、卷和残留进程已清理） |
+| C08 | 已完成 | 2026-07-16 | 2026-07-16 | 本任务提交 | RED：`uv run --directory backend pytest tests/unit/skills/test_security_review.py tests/unit/skills/test_builtin_installer.py tests/unit/skills/test_materializer.py tests/contract/skills/test_skills.py -q` 先失败于缺少安全审核、内置安装和固定版本物化接口；`pnpm --dir frontend test src/features/skills/pages/SkillDetailPage.test.tsx` 先失败于缺少“安全审核结果”面板。GREEN：`uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py tests/unit/workers/test_runtime_composition.py -q` 47 项通过；`uv run --directory backend pytest tests/unit/capabilities/test_manifest.py::test_reserved_core_api_route_roots_match_the_running_app_contract tests/unit/capabilities/test_manifest.py::test_manifest_rejects_core_api_route_root -q` 8 项通过；`uv run --directory backend pytest -q` 976 通过、39 跳过；`uv run --directory backend ruff check .` 通过；`uv run --directory backend mypy` 180 个源码文件通过；`pnpm --dir frontend test` 39 个文件、169 项通过；`pnpm --dir frontend lint`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend build` 通过；独立端口和独立 Compose 项目的 `pnpm --dir frontend exec playwright test skills.spec.ts --trace=off` 1 项通过，Playwright 按 running 状态记录本轮 ownership 并自动 `down -v`，`agent-platform-playwright` 与 C08 隔离 project 容器、网络和卷复查均为 0 |
+| C06-C07、C09-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 C05 补充质量验证：代码复审发现会话失败投影除准备失败外，还需要显式覆盖续租失败和孤儿运行恢复失败；进一步复审发现会话投影与 Run 状态、事件、command、ownership/approval 收尾共处同一事务，若 `conversation_messages` 序号并发冲突或投影异常会拖垮核心运行收尾。已补充 RED 用例 `test_worker_completion_survives_conversation_projection_failure` 与 `test_recovered_snapshot_survives_conversation_projection_failure`，修复后投影改为核心事务提交后的独立安全事务，唯一约束冲突最多重试 3 次，最终失败只记录受控日志，不影响 Run 结果。已通过 `cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged tests/integration/queue/test_run_worker.py::test_renewal_failure_marks_running_run_failed_and_releases_environment tests/integration/queue/test_run_worker.py::test_started_tool_without_advanced_checkpoint_fails_uncertain_without_replay -q`（3 passed）、投影异常降级组（5 passed），并通过包含会话契约、迁移、正常输出、超长输出、三条失败投影和五条投影异常降级的综合后端目标回归（21 passed），确保三条直接失败路径都会写入 `conversation_messages` 的 error 消息，且投影失败不泄露底层异常细节、不阻断核心收尾。
 

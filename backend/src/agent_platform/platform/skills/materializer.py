@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from hmac import compare_digest
 from pathlib import PurePosixPath
 from typing import Protocol
 from uuid import UUID
 
 from agent_platform.platform.skills.bundle import SkillBundle, parse_skill_bundle
-from agent_platform.platform.skills.entities import Skill, SkillVersion
+from agent_platform.platform.skills.entities import Skill, SkillLifecycleStatus, SkillVersion
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
 from agent_platform.platform.skills.ports import SkillStorage
 
@@ -36,6 +37,12 @@ class SkillBundleDigestMismatch(Exception):
     """对象存储中的 Skill 包与 Registry 摘要不一致。"""
 
 
+@dataclass(frozen=True, slots=True)
+class SkillVersionReference:
+    skill_id: UUID
+    version: int
+
+
 class SkillMaterializer:
     def __init__(
         self,
@@ -51,19 +58,37 @@ class SkillMaterializer:
         *,
         tenant_id: UUID,
         skill_ids: Sequence[UUID],
+        skill_versions: Sequence[SkillVersionReference] | None = None,
         workspace: SkillWorkspace,
     ) -> list[str]:
         resolved: list[tuple[str, SkillBundle]] = []
-        for skill_id in dict.fromkeys(skill_ids):
+        if skill_versions is None:
+            references = [
+                SkillVersionReference(skill_id=skill_id, version=0)
+                for skill_id in dict.fromkeys(skill_ids)
+            ]
+        else:
+            references = list(dict.fromkeys(skill_versions))
+        for reference in references:
+            skill_id = reference.skill_id
             skill = await self._repository.get(tenant_id=tenant_id, skill_id=skill_id)
             if skill is None:
                 raise SkillNotFound
-            if skill.published_version is None:
+            if reference.version <= 0:
+                if (
+                    skill.published_version is None
+                    or skill.lifecycle_status is not SkillLifecycleStatus.PUBLISHED
+                ):
+                    raise SkillNotPublished
+                version_number = skill.published_version
+            else:
+                version_number = reference.version
+            if version_number is None:
                 raise SkillNotPublished
             version = await self._repository.get_version(
                 tenant_id=tenant_id,
                 skill_id=skill_id,
-                version=skill.published_version,
+                version=version_number,
             )
             if version is None:
                 raise SkillVersionNotFound

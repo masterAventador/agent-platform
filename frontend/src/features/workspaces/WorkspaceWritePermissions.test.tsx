@@ -24,15 +24,30 @@ vi.mock('../skills/api/queries', () => ({
       status: 'draft',
       latest_version: 1,
       published_version: null,
+      source: 'uploaded',
     },
   })),
   useSkillVersions: vi.fn(() => ({
     isPending: false,
-    data: [{ version: 1, description: 'first', files: ['SKILL.md'] }],
+    data: [{
+      version: 1,
+      description: 'first',
+      digest: 'a'.repeat(64),
+      files: ['SKILL.md'],
+      review_status: 'approved',
+      security_findings: [],
+      created_at: '2026-07-16T00:00:00Z',
+      reviewed_at: '2026-07-16T00:00:00Z',
+      published_at: null,
+    }],
   })),
   useSkillFile: vi.fn(() => ({ isPending: false, data: '# Skill' })),
   useAddSkillVersion: vi.fn(() => ({ isPending: false, isError: false, reset: vi.fn() })),
   usePublishSkillVersion: vi.fn(() => ({ isPending: false, mutate: vi.fn() })),
+  useSkillVersionDiff: vi.fn(() => ({ data: { added: [], removed: [], changed: [] } })),
+  useSkillUsage: vi.fn(() => ({ data: { items: [] } })),
+  useOfflineSkill: vi.fn(() => ({ isPending: false, mutate: vi.fn() })),
+  useDeleteSkill: vi.fn(() => ({ isPending: false, mutate: vi.fn() })),
 }))
 
 vi.mock('../tools/api/queries', () => ({

@@ -289,7 +289,15 @@ def test_core_resource_namespaces_follow_stable_permission_and_event_contracts()
 
 @pytest.mark.parametrize(
     "core_route_root",
-    ["artifacts", "auth", "files", "model-gateway", "mcp-servers", "run-dead-letters"],
+    [
+        "artifacts",
+        "auth",
+        "conversations",
+        "files",
+        "model-gateway",
+        "mcp-servers",
+        "run-dead-letters",
+    ],
 )
 def test_manifest_rejects_core_api_route_root(core_route_root: str) -> None:
     resource_namespace = core_route_root.partition("-")[0]

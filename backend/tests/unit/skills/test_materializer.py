@@ -6,13 +6,15 @@ from zipfile import ZipFile
 import pytest
 
 from agent_platform.platform.skills.bundle import parse_skill_bundle
-from agent_platform.platform.skills.entities import Skill, SkillVersion
+from agent_platform.platform.skills.entities import Skill, SkillLifecycleStatus, SkillVersion
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
 from agent_platform.platform.skills.materializer import (
     SkillBundleDigestMismatch,
     SkillMaterializer,
     SkillNotPublished,
+    SkillVersionReference,
 )
+from agent_platform.platform.skills.security import audit_skill_bundle
 
 
 class FakePublishedSkillRepository:
@@ -80,6 +82,7 @@ def _published_skill(
 ) -> tuple[Skill, SkillVersion]:
     now = datetime.now(UTC)
     bundle = parse_skill_bundle(archive)
+    report = audit_skill_bundle(bundle)
     skill = Skill(
         id=skill_id,
         tenant_id=tenant_id,
@@ -87,9 +90,13 @@ def _published_skill(
         description=bundle.description,
         latest_version=version_number,
         published_version=version_number,
+        lifecycle_status=SkillLifecycleStatus.PUBLISHED,
+        source="uploaded",
         created_by=uuid4(),
         created_at=now,
         updated_at=now,
+        archived_at=None,
+        deleted_at=None,
     )
     version = SkillVersion(
         id=uuid4(),
@@ -100,6 +107,9 @@ def _published_skill(
         digest=bundle.digest,
         files=bundle.files,
         storage_key=f"objects/{skill_id}/{version_number}.zip",
+        review_status=report.status,
+        security_findings=report.findings,
+        reviewed_at=now,
         created_by=skill.created_by,
         created_at=now,
         published_at=now,
@@ -267,3 +277,45 @@ async def test_materialize_verifies_digest_before_writing_files() -> None:
         )
 
     assert workspace.files == {}
+
+
+@pytest.mark.asyncio
+async def test_materialize_fixed_skill_version_survives_later_rollback() -> None:
+    tenant_id = uuid4()
+    skill_id = uuid4()
+    first_archive = _archive(name="stable-skill", reference="Version one.")
+    second_archive = _archive(name="stable-skill", reference="Version two.")
+    first_skill, first_version = _published_skill(
+        tenant_id=tenant_id,
+        skill_id=skill_id,
+        name="stable-skill",
+        archive=first_archive,
+        version_number=1,
+    )
+    _, second_version = _published_skill(
+        tenant_id=tenant_id,
+        skill_id=skill_id,
+        name="stable-skill",
+        archive=second_archive,
+        version_number=2,
+    )
+    rolled_back = Skill(**{**first_skill.__dict__, "latest_version": 2, "published_version": 2})
+    repository = FakePublishedSkillRepository()
+    storage = FakeSkillStorage()
+    workspace = RecordingWorkspace()
+    _register(repository, storage, rolled_back, first_version, first_archive)
+    repository.versions[(tenant_id, skill_id, second_version.version)] = second_version
+    storage.objects[second_version.storage_key] = second_archive
+    materializer = SkillMaterializer(repository=repository, storage=storage)
+
+    paths = await materializer.materialize(
+        tenant_id=tenant_id,
+        skill_ids=[],
+        skill_versions=[SkillVersionReference(skill_id=skill_id, version=1)],
+        workspace=workspace,
+    )
+
+    assert paths == [f"/skills/{tenant_id}/{skill_id}/v1"]
+    assert workspace.files[f"/skills/{tenant_id}/{skill_id}/v1/references/guide.md"] == (
+        b"Version one."
+    )

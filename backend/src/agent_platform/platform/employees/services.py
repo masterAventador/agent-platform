@@ -77,11 +77,18 @@ class EmployeeService:
             tenant_id=tenant_id,
             skill_ids=employee.draft.skill_ids,
         )
+        skill_versions = await self._skills.published_versions(
+            tenant_id=tenant_id,
+            skill_ids=employee.draft.skill_ids,
+        )
         await self._ensure_tools_bindable(
             tenant_id=tenant_id,
             tool_ids=employee.draft.tool_ids,
         )
-        published, version = employee.publish(published_by=published_by)
+        published, version = employee.publish(
+            published_by=published_by,
+            skill_versions=skill_versions,
+        )
         await self._employees.update(published)
         await self._versions.add(version)
         return published

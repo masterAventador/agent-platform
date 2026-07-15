@@ -22,16 +22,24 @@ export default function globalTeardown() {
     if (existsSync(ownershipMarker)) {
       const marker = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as
         | string[]
-        | { projectName?: string; startedServices: string[] }
+        | { projectName?: string; startedServices: string[]; removeProjectOnTeardown?: boolean }
       const startedServices = Array.isArray(marker) ? marker : marker.startedServices
       const teardownComposeArgs = Array.isArray(marker) || !marker.projectName
         ? composeArgs
         : composeArgsForProject(marker.projectName)
-      execFileSync('docker', [...teardownComposeArgs, 'stop', ...startedServices], {
-        cwd: repositoryRoot,
-        env: composeEnvironment,
-        stdio: 'inherit',
-      })
+      if (!Array.isArray(marker) && marker.removeProjectOnTeardown) {
+        execFileSync('docker', [...teardownComposeArgs, 'down', '-v'], {
+          cwd: repositoryRoot,
+          env: composeEnvironment,
+          stdio: 'inherit',
+        })
+      } else {
+        execFileSync('docker', [...teardownComposeArgs, 'stop', ...startedServices], {
+          cwd: repositoryRoot,
+          env: composeEnvironment,
+          stdio: 'inherit',
+        })
+      }
       rmSync(ownershipMarker, { force: true })
     }
   }

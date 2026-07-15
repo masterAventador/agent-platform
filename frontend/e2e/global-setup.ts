@@ -19,7 +19,7 @@ export default function globalSetup() {
     const services = ['postgres', 'redis', 'minio']
     const startedServices = services.filter((service) => !execFileSync(
       'docker',
-      [...composeArgs, 'ps', '-q', service],
+      [...composeArgs, 'ps', '--status', 'running', '-q', service],
       { cwd: repositoryRoot, encoding: 'utf8', env: composeEnvironment },
     ).trim())
     if (startedServices.length) {
@@ -27,6 +27,7 @@ export default function globalSetup() {
       writeFileSync(ownershipMarker, JSON.stringify({
         projectName: composeProjectName,
         startedServices,
+        removeProjectOnTeardown: startedServices.length === services.length,
       }))
     }
     execFileSync('docker', [...composeArgs, 'up', '-d', '--wait', ...services], {
@@ -76,13 +77,21 @@ function stopOwnedServices() {
     if (!existsSync(ownershipMarker)) return
     const marker = JSON.parse(readFileSync(ownershipMarker, 'utf8')) as
       | string[]
-      | { startedServices: string[] }
+      | { projectName?: string; startedServices: string[]; removeProjectOnTeardown?: boolean }
     const startedServices = Array.isArray(marker) ? marker : marker.startedServices
-    execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
-      cwd: repositoryRoot,
-      env: composeEnvironment,
-      stdio: 'inherit',
-    })
+    if (!Array.isArray(marker) && marker.removeProjectOnTeardown) {
+      execFileSync('docker', [...composeArgs, 'down', '-v'], {
+        cwd: repositoryRoot,
+        env: composeEnvironment,
+        stdio: 'inherit',
+      })
+    } else {
+      execFileSync('docker', [...composeArgs, 'stop', ...startedServices], {
+        cwd: repositoryRoot,
+        env: composeEnvironment,
+        stdio: 'inherit',
+      })
+    }
   } catch {
     // 标记不存在时没有本轮启动的容器需要停止。
   } finally {

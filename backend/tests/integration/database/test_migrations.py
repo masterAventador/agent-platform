@@ -200,8 +200,27 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert {"event_id", "run_id", "sequence", "event_type", "payload"} <= event_columns
     assert {"id", "run_id", "action", "dispatched_at", "processed_at"} <= command_columns
     assert {"id", "tenant_id", "name", "provider", "provider_id"} <= knowledge_columns
-    assert {"id", "tenant_id", "name", "latest_version", "published_version"} <= skill_columns
-    assert {"id", "skill_id", "version", "digest", "storage_key"} <= skill_version_columns
+    assert {
+        "id",
+        "tenant_id",
+        "name",
+        "latest_version",
+        "published_version",
+        "lifecycle_status",
+        "source",
+        "archived_at",
+        "deleted_at",
+    } <= skill_columns
+    assert {
+        "id",
+        "skill_id",
+        "version",
+        "digest",
+        "storage_key",
+        "review_status",
+        "security_findings",
+        "reviewed_at",
+    } <= skill_version_columns
     assert {"id", "tenant_id", "name", "transport", "secret_reference"} <= mcp_server_columns
     assert {"id", "tenant_id", "server_id", "name", "input_schema", "risk_level"} <= tool_columns
     assert {
@@ -574,7 +593,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0021"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0023"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

@@ -12,3 +12,15 @@ class SkillNameAlreadyExists(Exception):
 
 class SkillNameMismatch(Exception):
     """新版本声明的名称与已有 Skill 不一致。"""
+
+
+class SkillReviewBlocked(Exception):
+    """Skill 版本安全审核未通过，不能发布。"""
+
+
+class SkillAlreadyDeleted(Exception):
+    """Skill 已删除。"""
+
+
+class SkillInUse(Exception):
+    """Skill 仍被员工草稿或已发布员工版本引用。"""
