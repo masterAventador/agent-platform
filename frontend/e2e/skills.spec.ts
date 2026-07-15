@@ -50,7 +50,7 @@ test('用户可以管理 Skill 版本并将已发布 Skill 绑定到数字员工
   await expect(page.getByText('版本 2', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('第二版支持按日期核验研究资料').first()).toBeVisible()
   await expect(page.getByRole('heading', { name: '版本差异' })).toBeVisible()
-  await expect(page.getByText('references/checklist.md')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'references/checklist.md', exact: true })).toBeVisible()
   await page.getByRole('button', { name: '发布版本 2' }).click()
   await expect(page.getByText('已发布版本 2')).toBeVisible()
   await expect(page.getByRole('button', { name: '下线 Skill' })).toBeVisible()
