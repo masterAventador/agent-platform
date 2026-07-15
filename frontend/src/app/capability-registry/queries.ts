@@ -1,10 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 
 import { apiClient } from '../../api/client'
-import { loadFrontendCapabilityModule } from './modules'
+import { loadAuthorizedFrontendCapabilityModules } from './modules'
 import { parseCapabilityRegistry } from './registry'
 
-export function useCapabilityRegistry(workspaceId: string | undefined) {
+export function useCapabilityRegistry(
+  workspaceId: string | undefined,
+  userPermissions: readonly string[],
+) {
   const registry = useQuery({
     queryKey: ['capability-registry', workspaceId],
     enabled: workspaceId !== undefined,
@@ -15,17 +18,14 @@ export function useCapabilityRegistry(workspaceId: string | undefined) {
       return parseCapabilityRegistry(response.data)
     },
   })
-  const capabilityIds = registry.data?.capabilities
-    .map((capability) => capability.capability_id)
-    .sort() ?? []
+  const registryFingerprint = JSON.stringify(registry.data?.capabilities ?? [])
+  const permissionKey = [...userPermissions].sort()
   const modules = useQuery({
-    queryKey: ['capability-modules', ...capabilityIds],
+    queryKey: ['capability-modules', registryFingerprint, ...permissionKey],
     enabled: registry.isSuccess,
-    queryFn: async () => Promise.all(
-      capabilityIds.map(async (capabilityId) => [
-        capabilityId,
-        await loadFrontendCapabilityModule(capabilityId),
-      ] as const),
+    queryFn: async () => loadAuthorizedFrontendCapabilityModules(
+      registry.data?.capabilities,
+      new Set(userPermissions),
     ),
   })
 

@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { FrontendCapabilityModule } from './types'
 import { parseCapabilityRegistry, resolveCapabilityAccess } from './registry'
 
-const module: FrontendCapabilityModule = {
+const descriptor = {
   capabilityId: 'social-operations',
-  frontendEntry: 'social.routes.v1',
-  navigation: [{ label: '设备与平台账号', path: '/video/account' }],
-  routes: [],
+  frontendEntries: ['social.routes.v1'],
+  permissions: ['social.read', 'social.manage', 'social.execute'],
 }
 
 const capability = {
@@ -44,21 +42,21 @@ describe('capability registry', () => {
     expect(resolveCapabilityAccess(undefined, undefined, userPermissions)).toBe('not-installed')
     expect(resolveCapabilityAccess(
       { ...capability, deployment_installed: false },
-      module,
+      descriptor,
       userPermissions,
     )).toBe('not-installed')
     expect(resolveCapabilityAccess(
       { ...capability, tenant_entitled: false },
-      module,
+      descriptor,
       userPermissions,
     )).toBe('not-entitled')
-    expect(resolveCapabilityAccess(capability, module, new Set(['runs.execute'])))
+    expect(resolveCapabilityAccess(capability, descriptor, new Set(['runs.execute'])))
       .toBe('forbidden')
     expect(resolveCapabilityAccess(
       { ...capability, frontend_entries: ['social.other.v1'] },
-      module,
+      descriptor,
       userPermissions,
     )).toBe('incompatible')
-    expect(resolveCapabilityAccess(capability, module, userPermissions)).toBe('allowed')
+    expect(resolveCapabilityAccess(capability, descriptor, userPermissions)).toBe('allowed')
   })
 })

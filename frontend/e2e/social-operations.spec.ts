@@ -7,7 +7,11 @@ const deviceId = '00000000-0000-4000-8000-000000000301'
 const accountId = '00000000-0000-4000-8000-000000000501'
 const socialPermissions = ['social.read', 'social.manage', 'social.execute']
 
-async function mockCapabilityRegistry(page: Page, tenantEntitled: boolean) {
+async function mockCapabilityRegistry(
+  page: Page,
+  tenantEntitled: boolean,
+  frontendEntries = ['social.routes.v1'],
+) {
   await page.route('**/api/v1/capabilities/registry', (route) => route.fulfill({
     contentType: 'application/json',
     json: {
@@ -16,11 +20,21 @@ async function mockCapabilityRegistry(page: Page, tenantEntitled: boolean) {
         capability_id: 'social-operations',
         deployment_installed: true,
         tenant_entitled: tenantEntitled,
-        frontend_entries: ['social.routes.v1'],
+        frontend_entries: frontendEntries,
         permissions: socialPermissions,
       }],
     },
   }))
+}
+
+function trackSocialModuleRequests(page: Page): string[] {
+  const requests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/src/features/social-operations/module.tsx')) {
+      requests.push(request.url())
+    }
+  })
+  return requests
 }
 
 async function grantSocialPermissionsOnLogin(page: Page) {
@@ -41,6 +55,7 @@ async function grantSocialPermissionsOnLogin(page: Page) {
 }
 
 test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ page }) => {
+  const moduleRequests = trackSocialModuleRequests(page)
   await mockCapabilityRegistry(page, true)
   await grantSocialPermissionsOnLogin(page)
   await page.addInitScript(() => {
@@ -75,6 +90,7 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
   await page.getByRole('link', { name: '设备与平台账号' }).click()
   await expect(page).toHaveURL(/\/video\/account$/)
   await expect(page.getByRole('heading', { name: '设备与平台账号中心' })).toBeVisible()
+  expect(moduleRequests).toHaveLength(1)
 
   await page.getByLabel('设备 ID').fill(deviceId)
   await page.getByLabel('设备名称').fill('E2E Mac')
@@ -108,6 +124,7 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
 })
 
 test('B02 租户未授权时隐藏入口并拒绝直达账号路由', async ({ page }) => {
+  const moduleRequests = trackSocialModuleRequests(page)
   await mockCapabilityRegistry(page, false)
   await registerAndLogin(page)
 
@@ -115,4 +132,17 @@ test('B02 租户未授权时隐藏入口并拒绝直达账号路由', async ({ p
   await page.goto('/tiktok/account')
   await expect(page.getByText('当前工作区未获此能力授权')).toBeVisible()
   await expect(page.getByRole('heading', { name: '设备与平台账号中心' })).toHaveCount(0)
+  expect(moduleRequests).toHaveLength(0)
+})
+
+test('B02 frontend_entries 恶意漂移时拒绝且不下载业务模块', async ({ page }) => {
+  const moduleRequests = trackSocialModuleRequests(page)
+  await mockCapabilityRegistry(page, true, ['social.routes.v1', 'social.evil.v1'])
+  await grantSocialPermissionsOnLogin(page)
+  await registerAndLogin(page)
+
+  await page.goto('/video/account')
+  await expect(page.getByText('能力清单与客户端模块不兼容')).toBeVisible()
+  await expect(page.getByRole('link', { name: '设备与平台账号' })).toHaveCount(0)
+  expect(moduleRequests).toHaveLength(0)
 })

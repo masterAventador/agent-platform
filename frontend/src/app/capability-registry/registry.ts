@@ -1,7 +1,5 @@
 import { z } from 'zod'
 
-import type { FrontendCapabilityModule } from './types'
-
 const resourceDeclaration = z.string().regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/)
 
 const capabilityRegistryEntrySchema = z.object({
@@ -35,22 +33,38 @@ export function parseCapabilityRegistry(input: unknown): CapabilityRegistry {
   return capabilityRegistrySchema.parse(input)
 }
 
+export function parseCapabilityRegistryEntries(input: unknown): CapabilityRegistryEntry[] {
+  return z.array(capabilityRegistryEntrySchema).parse(input)
+}
+
+export interface CapabilityAccessDescriptor {
+  capabilityId: string
+  frontendEntries: readonly string[]
+  permissions: readonly string[]
+}
+
 export function resolveCapabilityAccess(
   capability: CapabilityRegistryEntry | undefined,
-  module: FrontendCapabilityModule | undefined,
+  descriptor: CapabilityAccessDescriptor | undefined,
   userPermissions: ReadonlySet<string>,
 ): CapabilityAccess {
   if (capability === undefined || !capability.deployment_installed) return 'not-installed'
   if (!capability.tenant_entitled) return 'not-entitled'
-  if (!capability.permissions.every((permission) => userPermissions.has(permission))) {
-    return 'forbidden'
-  }
   if (
-    module === undefined
-    || module.capabilityId !== capability.capability_id
-    || !capability.frontend_entries.includes(module.frontendEntry)
+    descriptor === undefined
+    || descriptor.capabilityId !== capability.capability_id
+    || !sameDeclarations(capability.frontend_entries, descriptor.frontendEntries)
+    || !sameDeclarations(capability.permissions, descriptor.permissions)
   ) {
     return 'incompatible'
   }
+  if (!descriptor.permissions.every((permission) => userPermissions.has(permission))) {
+    return 'forbidden'
+  }
   return 'allowed'
+}
+
+function sameDeclarations(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length
+    && actual.every((declaration) => expected.includes(declaration))
 }
