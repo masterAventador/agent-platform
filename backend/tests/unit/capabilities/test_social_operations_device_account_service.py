@@ -7,6 +7,8 @@ from uuid import UUID
 import pytest
 
 from agent_platform.capabilities.social_operations.device_account_service import (
+    AccountActionResult,
+    AccountHandoffReason,
     AccountHealthSignal,
     AccountStatus,
     ActorContext,
@@ -351,3 +353,384 @@ def test_reregister_cannot_clear_device_emergency_stop(service: DeviceAccountSer
     )
 
     assert replay.status is DeviceStatus.EMERGENCY_STOPPED
+
+
+def test_account_governance_cold_start_daily_limit_is_atomic(
+    service: DeviceAccountService,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="publish_video",
+        min_interval=timedelta(0),
+        daily_limit=10,
+        cold_start_daily_limit=2,
+        cold_start_days=7,
+        consecutive_failure_threshold=3,
+    )
+
+    def authorize_once(index: int) -> bool:
+        try:
+            service.authorize_account_action(
+                actor(),
+                ACCOUNT_ID,
+                action_type="publish_video",
+                idempotency_key=f"publish-{index}",
+            )
+        except AuthorizationError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = tuple(executor.map(authorize_once, range(5)))
+
+    assert results.count(True) == 2
+    assert results.count(False) == 3
+    snapshot = service.get_account_governance(actor(), ACCOUNT_ID)
+    assert snapshot.health_score == 100
+    assert snapshot.policy_limits["publish_video"].daily_limit == 10
+    assert snapshot.policy_limits["publish_video"].effective_daily_limit == 2
+    assert snapshot.policy_limits["publish_video"].remaining_daily == 0
+    assert snapshot.recommendations == ("冷启动账号今日已达到 publish_video 上限，请明日再执行。",)
+
+
+def test_account_governance_rate_window_blocks_immediate_retry(
+    service: DeviceAccountService,
+    clock: MutableClock,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="comment",
+        min_interval=timedelta(seconds=60),
+        daily_limit=5,
+        cold_start_daily_limit=5,
+        cold_start_days=7,
+        consecutive_failure_threshold=3,
+    )
+
+    first = service.authorize_account_action(
+        actor(),
+        ACCOUNT_ID,
+        action_type="comment",
+        idempotency_key="comment-1",
+    )
+    assert first.allowed is True
+    assert first.remaining_daily == 4
+
+    with pytest.raises(AuthorizationError, match="frequency"):
+        service.authorize_account_action(
+            actor(),
+            ACCOUNT_ID,
+            action_type="comment",
+            idempotency_key="comment-2",
+        )
+
+    clock.now += timedelta(seconds=60)
+    service.heartbeat(
+        actor(),
+        device_id=DEVICE_ID,
+        app_version="0.2.0",
+        executor_version="1.1.0",
+        heartbeat_sequence=1,
+    )
+    second = service.authorize_account_action(
+        actor(),
+        ACCOUNT_ID,
+        action_type="comment",
+        idempotency_key="comment-2",
+    )
+    assert second.allowed is True
+    assert second.remaining_daily == 3
+
+
+def test_consecutive_failures_open_circuit_and_surface_recommendations(
+    service: DeviceAccountService,
+    audit: InMemoryAuditSink,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="private_message",
+        min_interval=timedelta(0),
+        daily_limit=10,
+        cold_start_daily_limit=10,
+        cold_start_days=7,
+        consecutive_failure_threshold=3,
+    )
+
+    for index in range(3):
+        service.authorize_account_action(
+            actor(),
+            ACCOUNT_ID,
+            action_type="private_message",
+            idempotency_key=f"dm-{index}",
+        )
+        service.record_account_action_result(
+            actor(),
+            ACCOUNT_ID,
+            action_type="private_message",
+            result=AccountActionResult.FAILED,
+            idempotency_key=f"dm-{index}",
+            failure_reason="platform_rejected",
+        )
+
+    account = service.get_account(actor(), ACCOUNT_ID)
+    assert account.status is AccountStatus.HUMAN_HANDOFF
+    assert account.circuit_open is True
+    assert account.handoff_reason is AccountHandoffReason.CONSECUTIVE_FAILURES
+    with pytest.raises(AuthorizationError, match="circuit"):
+        service.authorize_account_action(
+            actor(),
+            ACCOUNT_ID,
+            action_type="private_message",
+            idempotency_key="dm-blocked",
+        )
+
+    snapshot = service.get_account_governance(actor(), ACCOUNT_ID)
+    assert snapshot.health_score == 40
+    assert snapshot.failure_trend["private_message"] == 3
+    assert snapshot.recent_tasks[0].result is AccountActionResult.FAILED
+    assert "连续失败" in snapshot.recommendations[0]
+    assert "failure_reason" not in repr(audit.events).casefold()
+    assert "platform_rejected" not in repr(audit.events)
+    assert "social.account.circuit_opened" in [
+        event.action for event in audit.events
+    ]
+
+
+def test_action_result_requires_authorization_and_is_idempotent(
+    service: DeviceAccountService,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="private_message",
+        min_interval=timedelta(0),
+        daily_limit=10,
+        cold_start_daily_limit=10,
+        cold_start_days=7,
+        consecutive_failure_threshold=3,
+    )
+
+    with pytest.raises(AuthorizationError, match="not authorized"):
+        service.record_account_action_result(
+            actor(),
+            ACCOUNT_ID,
+            action_type="private_message",
+            result=AccountActionResult.FAILED,
+            idempotency_key="missing-authorization",
+        )
+
+    service.authorize_account_action(
+        actor(),
+        ACCOUNT_ID,
+        action_type="private_message",
+        idempotency_key="dm-1",
+    )
+    failed = service.record_account_action_result(
+        actor(),
+        ACCOUNT_ID,
+        action_type="private_message",
+        result=AccountActionResult.FAILED,
+        idempotency_key="dm-1",
+    )
+    replayed = service.record_account_action_result(
+        actor(),
+        ACCOUNT_ID,
+        action_type="private_message",
+        result=AccountActionResult.FAILED,
+        idempotency_key="dm-1",
+    )
+
+    assert failed.failure_trend["private_message"] == 1
+    assert replayed.failure_trend["private_message"] == 1
+    assert len([
+        task for task in replayed.recent_tasks if task.idempotency_key == "dm-1"
+    ]) == 1
+
+    with pytest.raises(ConflictError, match="already recorded"):
+        service.record_account_action_result(
+            actor(),
+            ACCOUNT_ID,
+            action_type="private_message",
+            result=AccountActionResult.SUCCEEDED,
+            idempotency_key="dm-1",
+        )
+
+
+def test_login_expired_and_abnormal_behavior_enter_handoff(
+    service: DeviceAccountService,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+
+    expired = service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.LOGIN_EXPIRED
+    )
+    assert expired.status is AccountStatus.HUMAN_HANDOFF
+    assert expired.handoff_reason is AccountHandoffReason.LOGIN_EXPIRED
+
+    service.resume_account(actor(), ACCOUNT_ID)
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="follow",
+        min_interval=timedelta(0),
+        daily_limit=10,
+        cold_start_daily_limit=10,
+        cold_start_days=7,
+        consecutive_failure_threshold=99,
+    )
+    service.authorize_account_action(
+        actor(),
+        ACCOUNT_ID,
+        action_type="follow",
+        idempotency_key="follow-1",
+    )
+    snapshot = service.record_account_action_result(
+        actor(),
+        ACCOUNT_ID,
+        action_type="follow",
+        result=AccountActionResult.ABNORMAL_BEHAVIOR,
+        idempotency_key="follow-1",
+        failure_reason="sensitive-platform-message",
+    )
+
+    account = service.get_account(actor(), ACCOUNT_ID)
+    assert account.status is AccountStatus.HUMAN_HANDOFF
+    assert account.handoff_reason is AccountHandoffReason.ABNORMAL_BEHAVIOR
+    assert "异常行为" in snapshot.recommendations[0]
+
+
+def test_pause_resume_offline_and_remote_stop_govern_action_execution(
+    service: DeviceAccountService,
+    clock: MutableClock,
+) -> None:
+    register_device(service)
+    service.bind_account(
+        actor(),
+        account_id=ACCOUNT_ID,
+        platform=SocialPlatform.DOUYIN,
+        display_name="Demo Publisher",
+        device_id=DEVICE_ID,
+    )
+    service.report_account_health(
+        actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+    )
+    service.configure_account_governance_policy(
+        actor(),
+        platform=SocialPlatform.DOUYIN,
+        action_type="publish_video",
+        min_interval=timedelta(0),
+        daily_limit=5,
+        cold_start_daily_limit=5,
+        cold_start_days=7,
+        consecutive_failure_threshold=3,
+    )
+
+    paused = service.pause_account(actor(), ACCOUNT_ID, reason="operator_review")
+    assert paused.status is AccountStatus.PAUSED
+    with pytest.raises(
+        AuthorizationError, match="paused account requires explicit operator resume"
+    ):
+        service.report_account_health(
+            actor(), ACCOUNT_ID, signal=AccountHealthSignal.AUTHENTICATED
+        )
+    assert service.get_account(actor(), ACCOUNT_ID).status is AccountStatus.PAUSED
+    with pytest.raises(AuthorizationError, match="paused"):
+        service.authorize_account_action(
+            actor(),
+            ACCOUNT_ID,
+            action_type="publish_video",
+            idempotency_key="paused",
+        )
+
+    resumed = service.resume_account(actor(), ACCOUNT_ID)
+    assert resumed.status is AccountStatus.HEALTHY
+    service.authorize_account_action(
+        actor(),
+        ACCOUNT_ID,
+        action_type="publish_video",
+        idempotency_key="after-resume",
+    )
+
+    clock.now += timedelta(seconds=31)
+    with pytest.raises(AuthorizationError, match="device is not online"):
+        service.authorize_account_action(
+            actor(),
+            ACCOUNT_ID,
+            action_type="publish_video",
+            idempotency_key="offline",
+        )
+    assert service.get_account_governance(
+        actor(), ACCOUNT_ID
+    ).policy_limits["publish_video"].remaining_daily == 4
+
+    service.heartbeat(
+        actor(),
+        device_id=DEVICE_ID,
+        app_version="0.2.0",
+        executor_version="1.1.0",
+        heartbeat_sequence=1,
+    )
+    stopped = service.remote_stop_account(actor(), ACCOUNT_ID, reason="remote_stop")
+    assert stopped.status is AccountStatus.HUMAN_HANDOFF
+    assert stopped.circuit_open is True
+    assert stopped.handoff_reason is AccountHandoffReason.REMOTE_STOP

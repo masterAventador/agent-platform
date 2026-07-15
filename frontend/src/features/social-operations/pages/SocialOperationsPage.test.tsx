@@ -8,12 +8,25 @@ import type {
   SocialLoginState,
   SocialOperationsBridge,
 } from '../../../platform'
-import { listSocialDevices, registerSocialDevice } from '../api/device-accounts'
+import {
+  authorizeSocialAccountAction,
+  getSocialAccountGovernance,
+  listSocialDevices,
+  pauseSocialAccount,
+  registerSocialDevice,
+  remoteStopSocialAccount,
+  resumeSocialAccount,
+} from '../api/device-accounts'
 import { SocialOperationsPage } from './SocialOperationsPage'
 
 vi.mock('../api/device-accounts', () => ({
+  authorizeSocialAccountAction: vi.fn(),
+  getSocialAccountGovernance: vi.fn(),
   listSocialDevices: vi.fn(),
+  pauseSocialAccount: vi.fn(),
   registerSocialDevice: vi.fn(),
+  remoteStopSocialAccount: vi.fn(),
+  resumeSocialAccount: vi.fn(),
 }))
 
 const tenantId = '00000000-0000-4000-8000-000000000101'
@@ -32,6 +45,28 @@ const device = {
   registered_at: '2026-07-15T02:00:00Z',
   last_seen_at: '2026-07-15T02:00:00Z',
   heartbeat_sequence: 0,
+}
+
+const healthyGovernance = {
+  account_id: accountId,
+  status: 'healthy' as const,
+  circuit_open: false,
+  health_score: 100,
+  recent_tasks: [],
+  failure_trend: {},
+  policy_limits: {
+    'social.account.health_check': {
+      action_type: 'social.account.health_check',
+      daily_limit: 10,
+      effective_daily_limit: 2,
+      remaining_daily: 1,
+      min_interval_seconds: 60,
+      cold_start_days: 7,
+      consecutive_failure_threshold: 3,
+      next_available_at: null,
+    },
+  },
+  recommendations: [],
 }
 
 function createPlatform(supported = true) {
@@ -91,6 +126,29 @@ describe('B02 设备与平台账号中心', () => {
     vi.clearAllMocks()
     vi.mocked(listSocialDevices).mockResolvedValue([])
     vi.mocked(registerSocialDevice).mockResolvedValue(device)
+    vi.mocked(getSocialAccountGovernance).mockResolvedValue(healthyGovernance)
+    vi.mocked(authorizeSocialAccountAction).mockResolvedValue({
+      account_id: accountId,
+      action_type: 'social.account.health_check',
+      allowed: true,
+      remaining_daily: 0,
+      next_available_at: null,
+      idempotency_key: 'health-check',
+    })
+    vi.mocked(pauseSocialAccount).mockResolvedValue({
+      ...healthyGovernance,
+      status: 'paused',
+      circuit_open: true,
+      recommendations: ['账号已暂停，请完成复核后再恢复自动执行。'],
+    })
+    vi.mocked(resumeSocialAccount).mockResolvedValue(healthyGovernance)
+    vi.mocked(remoteStopSocialAccount).mockResolvedValue({
+      ...healthyGovernance,
+      status: 'human_handoff',
+      circuit_open: true,
+      health_score: 80,
+      recommendations: ['远程停止已生效，请人工检查后再恢复。'],
+    })
   })
 
   it('设备平台入口只暴露后端支持的平台', async () => {
@@ -147,6 +205,13 @@ describe('B02 设备与平台账号中心', () => {
         protocol_version: '1.0',
         message_type: 'task.request',
         task_type: 'social.account.health_check',
+      }),
+    )
+    expect(authorizeSocialAccountAction).toHaveBeenCalledWith(
+      tenantId,
+      accountId,
+      expect.objectContaining({
+        action_type: 'social.account.health_check',
       }),
     )
     expect(socialOperations.takeSafeDiagnostics).toHaveBeenCalledOnce()
@@ -216,5 +281,81 @@ describe('B02 设备与平台账号中心', () => {
     expect(await screen.findByText('账号操作失败，请检查执行器、登录态和网络后重试。'))
       .toBeInTheDocument()
     expect(screen.queryByText(/token=secret/)).not.toBeInTheDocument()
+  })
+
+  it('设备离线时即使账号治理健康也禁用本地动作', async () => {
+    const user = userEvent.setup()
+    const { platform } = createPlatform()
+    vi.mocked(listSocialDevices).mockResolvedValueOnce([{
+      ...device,
+      status: 'offline',
+    }])
+    render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
+
+    await user.type(screen.getByLabelText('设备 ID'), deviceId)
+    await user.type(screen.getByLabelText('平台账号 ID'), accountId)
+    await user.click(screen.getByRole('button', { name: '刷新治理状态' }))
+
+    expect(await screen.findByText('离线')).toBeInTheDocument()
+    expect(await screen.findByText('账号健康度 100')).toBeInTheDocument()
+    const healthCheck = screen.getByRole('button', { name: '执行无副作用健康检查' })
+    expect(healthCheck).toBeDisabled()
+
+    await user.click(healthCheck)
+    expect(authorizeSocialAccountAction).not.toHaveBeenCalled()
+  })
+
+  it('展示服务端账号治理状态并在熔断时禁用本地动作', async () => {
+    const user = userEvent.setup()
+    const { platform } = createPlatform()
+    vi.mocked(getSocialAccountGovernance).mockResolvedValueOnce({
+      ...healthyGovernance,
+      status: 'human_handoff',
+      circuit_open: true,
+      health_score: 40,
+      recent_tasks: [{
+        account_id: accountId,
+        action_type: 'private_message',
+        idempotency_key: 'dm-1',
+        result: 'failed',
+        occurred_at: '2026-07-15T02:30:00Z',
+        consecutive_failures: 3,
+      }],
+      failure_trend: { private_message: 3 },
+      recommendations: ['连续失败已触发熔断，请人工检查平台页面和任务参数。'],
+    })
+    render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
+
+    await user.type(screen.getByLabelText('设备 ID'), deviceId)
+    await user.type(screen.getByLabelText('平台账号 ID'), accountId)
+    await user.click(screen.getByRole('button', { name: '刷新治理状态' }))
+
+    expect(getSocialAccountGovernance).toHaveBeenCalledWith(tenantId, accountId)
+    expect(await screen.findByText('账号健康度 40')).toBeInTheDocument()
+    expect(screen.getByText('private_message：失败（连续失败 3 次）')).toBeInTheDocument()
+    expect(screen.getByText('private_message：3 次失败')).toBeInTheDocument()
+    expect(screen.getByText('连续失败已触发熔断，请人工检查平台页面和任务参数。'))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '执行无副作用健康检查' }))
+      .toBeDisabled()
+  })
+
+  it('暂停、恢复和远程停止都通过服务端治理 API 而不是本地放宽策略', async () => {
+    const user = userEvent.setup()
+    const { platform } = createPlatform()
+    render(<SocialOperationsPage platform={platform} workspaceId={tenantId} />)
+
+    await user.type(screen.getByLabelText('平台账号 ID'), accountId)
+    await user.click(screen.getByRole('button', { name: '暂停账号' }))
+    await user.click(screen.getByRole('button', { name: '恢复账号' }))
+    await user.click(screen.getByRole('button', { name: '远程停止账号' }))
+
+    expect(pauseSocialAccount).toHaveBeenCalledWith(tenantId, accountId, {
+      reason: 'operator_review',
+    })
+    expect(resumeSocialAccount).toHaveBeenCalledWith(tenantId, accountId)
+    expect(remoteStopSocialAccount).toHaveBeenCalledWith(tenantId, accountId, {
+      reason: 'remote_stop',
+    })
   })
 })

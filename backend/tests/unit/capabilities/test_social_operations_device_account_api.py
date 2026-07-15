@@ -215,3 +215,205 @@ def test_api_rejects_free_form_emergency_stop_reason(tmp_path: Path) -> None:
     assert response.status_code == 422
     assert response.json() == {"detail": "invalid emergency stop reason"}
     assert "token" not in response.text.casefold()
+
+
+def test_api_authorizes_governed_actions_without_client_policy_override(
+    tmp_path: Path,
+) -> None:
+    client = make_client(make_service(tmp_path / "social-operations.db"))
+    client.post(
+        "/api/v1/social-operations/devices/register",
+        json={
+            "device_id": str(DEVICE_ID),
+            "display_name": "Marketing Mac",
+            "platform": "macos",
+            "app_version": "0.1.0",
+            "executor_version": "1.0.0",
+        },
+    )
+    client.post(
+        "/api/v1/social-operations/accounts",
+        json={
+            "account_id": str(ACCOUNT_ID),
+            "platform": "douyin",
+            "display_name": "Demo Publisher",
+            "device_id": str(DEVICE_ID),
+        },
+    )
+    client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/health",
+        json={"signal": "authenticated"},
+    )
+    assert client.post(
+        "/api/v1/social-operations/governance/policies",
+        json={
+            "platform": "douyin",
+            "action_type": "publish_video",
+            "min_interval_seconds": 0,
+            "daily_limit": 3,
+            "cold_start_daily_limit": 1,
+            "cold_start_days": 7,
+            "consecutive_failure_threshold": 2,
+        },
+    ).status_code == 201
+
+    overridden = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/authorize",
+        json={
+            "action_type": "publish_video",
+            "idempotency_key": "publish-1",
+            "daily_limit": 999,
+        },
+    )
+    assert overridden.status_code == 422
+
+    allowed = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/authorize",
+        json={
+            "action_type": "publish_video",
+            "idempotency_key": "publish-1",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["allowed"] is True
+    assert allowed.json()["remaining_daily"] == 0
+
+    blocked = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/authorize",
+        json={
+            "action_type": "publish_video",
+            "idempotency_key": "publish-2",
+        },
+    )
+    assert blocked.status_code == 403
+    assert blocked.json() == {"detail": "daily limit exceeded"}
+
+
+def test_api_pause_resume_remote_stop_and_governance_snapshot(tmp_path: Path) -> None:
+    client = make_client(make_service(tmp_path / "social-operations.db"))
+    client.post(
+        "/api/v1/social-operations/devices/register",
+        json={
+            "device_id": str(DEVICE_ID),
+            "display_name": "Marketing Mac",
+            "platform": "macos",
+            "app_version": "0.1.0",
+            "executor_version": "1.0.0",
+        },
+    )
+    client.post(
+        "/api/v1/social-operations/accounts",
+        json={
+            "account_id": str(ACCOUNT_ID),
+            "platform": "douyin",
+            "display_name": "Demo Publisher",
+            "device_id": str(DEVICE_ID),
+        },
+    )
+    client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/health",
+        json={"signal": "authenticated"},
+    )
+    client.post(
+        "/api/v1/social-operations/governance/policies",
+        json={
+            "platform": "douyin",
+            "action_type": "private_message",
+            "min_interval_seconds": 0,
+            "daily_limit": 10,
+            "cold_start_daily_limit": 10,
+            "cold_start_days": 7,
+            "consecutive_failure_threshold": 2,
+        },
+    )
+
+    paused = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/pause",
+        json={"reason": "operator_review"},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+    blocked = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/authorize",
+        json={"action_type": "private_message", "idempotency_key": "blocked"},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json() == {"detail": "account is paused"}
+
+    resumed = client.post(f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["status"] == "healthy"
+
+    missing_idempotency = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/result",
+        json={
+            "action_type": "private_message",
+            "result": "failed",
+        },
+    )
+    assert missing_idempotency.status_code == 422
+    not_authorized = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/result",
+        json={
+            "action_type": "private_message",
+            "result": "failed",
+            "idempotency_key": "missing-authorization",
+        },
+    )
+    assert not_authorized.status_code == 403
+    assert not_authorized.json() == {"detail": "action result was not authorized"}
+
+    for index in range(2):
+        client.post(
+            f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/authorize",
+            json={
+                "action_type": "private_message",
+                "idempotency_key": f"dm-{index}",
+            },
+        )
+        client.post(
+            f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/result",
+            json={
+                "action_type": "private_message",
+                "result": "failed",
+                "idempotency_key": f"dm-{index}",
+                "failure_reason": "token=redacted-by-service",
+            },
+        )
+    duplicate = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/result",
+        json={
+            "action_type": "private_message",
+            "result": "failed",
+            "idempotency_key": "dm-0",
+        },
+    )
+    assert duplicate.status_code == 200
+    conflicting = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/actions/result",
+        json={
+            "action_type": "private_message",
+            "result": "succeeded",
+            "idempotency_key": "dm-0",
+        },
+    )
+    assert conflicting.status_code == 409
+    assert conflicting.json() == {"detail": "action result already recorded"}
+
+    snapshot = client.get(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/governance"
+    )
+    assert snapshot.status_code == 200
+    assert snapshot.json()["health_score"] == 60
+    assert len(snapshot.json()["recent_tasks"]) == 2
+    assert snapshot.json()["failure_trend"] == {"private_message": 2}
+    assert "连续失败" in snapshot.json()["recommendations"][0]
+    assert "token" not in snapshot.text.casefold()
+
+    stopped = client.post(
+        f"/api/v1/social-operations/accounts/{ACCOUNT_ID}/remote-stop",
+        json={"reason": "remote_stop"},
+    )
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "human_handoff"
+    assert stopped.json()["handoff_reason"] == "remote_stop"

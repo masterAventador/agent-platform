@@ -25,9 +25,15 @@ import {
   type SocialSidecarManifest,
 } from '../../../platform'
 import {
+  authorizeSocialAccountAction,
+  getSocialAccountGovernance,
   listSocialDevices,
+  pauseSocialAccount,
   registerSocialDevice,
+  remoteStopSocialAccount,
+  resumeSocialAccount,
   type RegisterSocialDeviceInput,
+  type SocialAccountGovernance,
   type SocialDevice,
   type SocialDevicePlatform,
 } from '../api/device-accounts'
@@ -49,6 +55,23 @@ const accountStatusLabels: Record<SocialAccountSnapshot['state'], string> = {
   awaiting_confirmation: '等待确认',
   healthy: '健康',
   human_handoff: '等待人工接管',
+}
+
+const governanceStatusLabels: Record<SocialAccountGovernance['status'], string> = {
+  awaiting_scan: '等待扫码',
+  healthy: '健康',
+  human_handoff: '等待人工接管',
+  logged_out: '已注销',
+  paused: '已暂停',
+}
+
+const accountActionResultLabels: Record<
+  SocialAccountGovernance['recent_tasks'][number]['result'],
+  string
+> = {
+  succeeded: '成功',
+  failed: '失败',
+  abnormal_behavior: '异常行为',
 }
 
 const deviceStatusLabels: Record<SocialDevice['status'], string> = {
@@ -92,6 +115,7 @@ export function SocialOperationsPage({
   const [accountId, setAccountId] = useState('')
   const [socialPlatform, setSocialPlatform] = useState<SocialPlatform>('douyin')
   const [accountSnapshot, setAccountSnapshot] = useState<SocialAccountSnapshot>()
+  const [accountGovernance, setAccountGovernance] = useState<SocialAccountGovernance>()
   const [executorRunning, setExecutorRunning] = useState(false)
   const [cookieData, setCookieData] = useState('')
   const [hasCookies, setHasCookies] = useState<boolean>()
@@ -189,6 +213,19 @@ export function SocialOperationsPage({
     operation: () => Promise<SocialAccountSnapshot>,
     successMessage: string,
   ) => perform(action, operation, setAccountSnapshot, successMessage)
+  const governanceAction = (
+    action: string,
+    operation: () => Promise<SocialAccountGovernance>,
+    successMessage: string,
+  ) => perform(action, operation, setAccountGovernance, successMessage)
+  const selectedDevice = devices.find((item) => item.device_id === deviceId)
+  const deviceBlocksExecution = selectedDevice === undefined
+    || selectedDevice.status !== 'online'
+  const governanceBlocksExecution = accountGovernance?.circuit_open === true
+    || accountGovernance?.status === 'paused'
+    || accountGovernance?.status === 'human_handoff'
+    || accountGovernance?.status === 'logged_out'
+  const blocksLocalExecution = governanceBlocksExecution || deviceBlocksExecution
 
   if (!supported) {
     return (
@@ -401,6 +438,89 @@ export function SocialOperationsPage({
         )}
 
         <Divider />
+        <Card
+          size="small"
+          title="账号治理"
+          role="region"
+          aria-label="账号治理"
+        >
+          <Typography.Paragraph type="secondary">
+            频控、每日上限、冷启动、暂停恢复和远程停止均由服务端授权；本地客户端只能请求执行，不能自行放宽策略。
+          </Typography.Paragraph>
+          <Space wrap>
+            <Button onClick={() => void governanceAction(
+              'refresh-governance',
+              () => getSocialAccountGovernance(
+                workspaceId,
+                uuidSchema.parse(accountId),
+              ),
+              '账号治理状态已刷新。',
+            )}>刷新治理状态</Button>
+            <Button danger onClick={() => void governanceAction(
+              'pause-account',
+              () => pauseSocialAccount(
+                workspaceId,
+                uuidSchema.parse(accountId),
+                { reason: 'operator_review' },
+              ),
+              '账号已暂停。',
+            )}>暂停账号</Button>
+            <Button onClick={() => void governanceAction(
+              'resume-account',
+              () => resumeSocialAccount(workspaceId, uuidSchema.parse(accountId)),
+              '账号已恢复。',
+            )}>恢复账号</Button>
+            <Button danger onClick={() => void governanceAction(
+              'remote-stop-account',
+              () => remoteStopSocialAccount(
+                workspaceId,
+                uuidSchema.parse(accountId),
+                { reason: 'remote_stop' },
+              ),
+              '远程停止已生效。',
+            )}>远程停止账号</Button>
+          </Space>
+          {accountGovernance && (
+            <div className="social-governance-panel">
+              <Descriptions bordered size="small" column={3}>
+                <Descriptions.Item label="健康度">
+                  <Typography.Text>{`账号健康度 ${accountGovernance.health_score}`}</Typography.Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="治理状态">
+                  {governanceStatusLabels[accountGovernance.status]}
+                </Descriptions.Item>
+                <Descriptions.Item label="熔断">
+                  {accountGovernance.circuit_open ? '已打开' : '已关闭'}
+                </Descriptions.Item>
+              </Descriptions>
+              {accountGovernance.recent_tasks.length > 0 && (
+                <ul aria-label="最近任务" className="social-governance-list">
+                  {accountGovernance.recent_tasks.map((task) => (
+                    <li key={`${task.action_type}-${task.occurred_at}`}>
+                      {`${task.action_type}：${accountActionResultLabels[task.result]}（连续失败 ${task.consecutive_failures} 次）`}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {Object.keys(accountGovernance.failure_trend).length > 0 && (
+                <ul aria-label="失败趋势" className="social-governance-list">
+                  {Object.entries(accountGovernance.failure_trend).map(([actionType, count]) => (
+                    <li key={actionType}>{`${actionType}：${count} 次失败`}</li>
+                  ))}
+                </ul>
+              )}
+              {accountGovernance.recommendations.length > 0 && (
+                <ul aria-label="处置建议" className="social-governance-list">
+                  {accountGovernance.recommendations.map((recommendation) => (
+                    <li key={recommendation}>{recommendation}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </Card>
+
+        <Divider />
         <Form layout="vertical">
           <Form.Item label="Cookie 数据">
             <Input.TextArea
@@ -441,13 +561,24 @@ export function SocialOperationsPage({
           )}>启动本地执行器</Button>
           <Button onClick={() => void perform(
             'health-check',
-            () => requireAccount().invoke(createHealthCheckRequest(
-              workspaceId,
-              uuidSchema.parse(deviceId),
-            )),
+            async () => {
+              const request = createHealthCheckRequest(
+                workspaceId,
+                uuidSchema.parse(deviceId),
+              )
+              await authorizeSocialAccountAction(
+                workspaceId,
+                uuidSchema.parse(accountId),
+                {
+                  action_type: request.task_type,
+                  idempotency_key: request.idempotency_key,
+                },
+              )
+              return requireAccount().invoke(request)
+            },
             undefined,
             '无副作用健康检查已接受。',
-          )}>执行无副作用健康检查</Button>
+          )} disabled={blocksLocalExecution}>执行无副作用健康检查</Button>
           <Button danger onClick={() => void perform(
             'emergency-stop',
             () => requireAccount().emergencyStop(),
@@ -487,7 +618,32 @@ export function SocialOperationsPage({
   )
 }
 
-function createHealthCheckRequest(tenantId: string, deviceId: string): JsonValue {
+type HealthCheckRequest = {
+  [key: string]: JsonValue
+  protocol_version: '1.0'
+  message_type: 'task.request'
+  message_id: string
+  sent_at: string
+  identity: {
+    task_id: string
+    correlation_id: string
+    tenant_id: string
+    capability_id: 'social-operations'
+    target_device_id: string
+  }
+  governance: {
+    audit_correlation_id: string
+    approval_id: null
+  }
+  idempotency_key: string
+  deadline_at: string
+  task_type: 'social.account.health_check'
+  input: { dry_run: true }
+  artifact_refs: []
+  extensions: Record<string, never>
+}
+
+function createHealthCheckRequest(tenantId: string, deviceId: string): HealthCheckRequest {
   const sentAt = new Date()
   const deadlineAt = new Date(sentAt.getTime() + 60_000)
   const taskId = crypto.randomUUID()
