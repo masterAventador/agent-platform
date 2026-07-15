@@ -7,8 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
@@ -20,6 +21,8 @@ from agent_platform.api.routes.tools import mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.engine import create_database_engine
+from agent_platform.infrastructure.object_storage.artifacts import MinioArtifactStorageProvider
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -29,6 +32,7 @@ from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimi
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
@@ -46,6 +50,7 @@ def create_app(
     auth_rate_limiter: AuthRateLimiter | None = None,
     knowledge_provider: KnowledgeProvider | None = None,
     skill_storage: SkillStorage | None = None,
+    artifact_storage: ArtifactStorageProvider | None = None,
     telemetry: Telemetry | None = None,
 ) -> FastAPI:
     initialize_database_metadata()
@@ -54,7 +59,7 @@ def create_app(
     app_telemetry.instrument_libraries()
     owned_engine = None
     if session_factory is None:
-        owned_engine = create_async_engine(app_settings.database_url)
+        owned_engine = create_database_engine(app_settings.database_url)
         session_factory = async_sessionmaker(owned_engine, expire_on_commit=False)
 
     owned_redis: Redis | None = None
@@ -74,16 +79,21 @@ def create_app(
         )
         knowledge_provider = owned_knowledge_provider
 
-    if skill_storage is None:
+    minio_client: Minio | None = None
+    if skill_storage is None or artifact_storage is None:
         minio_client = Minio(
             app_settings.minio_endpoint,
             access_key=app_settings.minio_access_key,
             secret_key=app_settings.minio_secret_key,
             secure=app_settings.minio_secure,
         )
+    if skill_storage is None:
         skill_storage = MinioSkillStorage(
-            client=cast(MinioClient, minio_client),
-            bucket=app_settings.skill_storage_bucket,
+            client=cast(MinioClient, minio_client), bucket=app_settings.skill_storage_bucket
+        )
+    if artifact_storage is None:
+        artifact_storage = MinioArtifactStorageProvider(
+            client=cast(MinioClient, minio_client), bucket=app_settings.artifact_storage_bucket
         )
 
     @asynccontextmanager
@@ -118,9 +128,11 @@ def create_app(
     app.state.knowledge_provider = knowledge_provider
     app.state.knowledge_provider_registry = KnowledgeProviderRegistry([knowledge_provider])
     app.state.skill_storage = skill_storage
+    app.state.artifact_storage = artifact_storage
     app.include_router(auth_router)
     app.include_router(employees_router)
     app.include_router(runs_router)
+    app.include_router(artifacts_router)
     app.include_router(dead_letters_router)
     app.include_router(knowledge_router)
     app.include_router(skills_router)

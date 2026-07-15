@@ -59,6 +59,8 @@ class RunRecord(Base):
     error_code: Mapped[str | None] = mapped_column(String(200), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(4000), nullable=True)
 
+    __table_args__ = (UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id_id"),)
+
 
 class RunEventRecord(Base):
     __tablename__ = "run_events"

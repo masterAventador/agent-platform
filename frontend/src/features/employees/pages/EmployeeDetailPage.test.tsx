@@ -7,6 +7,8 @@ import type { Employee } from '../api/employees'
 import { useEmployee, usePublishEmployee } from '../api/queries'
 import { useCreateRun } from '../../runs/api/queries'
 import { EmployeeDetailPage } from './EmployeeDetailPage'
+import { getPlatformAdapter } from '../../../platform'
+import { uploadFile } from '../../runs/api/runs'
 
 
 vi.mock('../api/queries', () => ({
@@ -17,6 +19,9 @@ vi.mock('../api/queries', () => ({
 vi.mock('../../runs/api/queries', () => ({
   useCreateRun: vi.fn(),
 }))
+
+vi.mock('../../../platform', () => ({ getPlatformAdapter: vi.fn() }))
+vi.mock('../../runs/api/runs', () => ({ uploadFile: vi.fn() }))
 
 const employee: Employee = {
   id: 'employee-1',
@@ -79,6 +84,12 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
       mutateAsync: vi.fn(),
       reset: vi.fn(),
     } as never)
+    vi.mocked(getPlatformAdapter).mockReturnValue({
+      selectFile: vi.fn().mockResolvedValue({ name: 'brief.txt', bytes: new Uint8Array([1, 2]) }),
+    } as never)
+    vi.mocked(uploadFile).mockResolvedValue({
+      id: 'file-1', name: 'brief.txt', media_type: 'text/plain', size_bytes: 2, sha256: 'abc',
+    })
   })
 
   it('does not silently publish a legacy configuration', () => {
@@ -161,6 +172,38 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     expect(screen.getByRole('button', { name: /编\s*辑/ })).toBeInTheDocument()
   })
 
+  it('selects and uploads an attachment before creating a file-enabled run', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'run-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择文件' }))
+    expect(await screen.findByText('brief.txt')).toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: '任务内容' }), '总结附件')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(uploadFile).toHaveBeenCalled())
+    expect(mutateAsync).toHaveBeenCalledWith({
+      input: { message: '总结附件' }, attachmentIds: ['file-1'],
+    })
+  })
+
   it('catches createRun 409 and renders an actionable error in the modal', async () => {
     const user = userEvent.setup()
     const mutateAsync = vi.fn().mockRejectedValue({
@@ -188,7 +231,9 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     await user.type(screen.getByRole('textbox', { name: '任务内容' }), '执行任务')
     await user.click(screen.getByRole('button', { name: '确认发起' }))
 
-    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ message: '执行任务' }))
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
+      input: { message: '执行任务' }, attachmentIds: [],
+    }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 

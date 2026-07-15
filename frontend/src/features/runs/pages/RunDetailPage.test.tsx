@@ -4,7 +4,15 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWorkspaceStore } from '../../workspaces/store'
-import { useControlRun, useRun, useRunEvents } from '../api/queries'
+import { getPlatformAdapter } from '../../../platform'
+import {
+  useArtifacts,
+  useControlRun,
+  useDeleteArtifact,
+  useRun,
+  useRunEvents,
+} from '../api/queries'
+import { downloadArtifact } from '../api/runs'
 import { RunDetailPage } from './RunDetailPage'
 
 
@@ -12,10 +20,18 @@ vi.mock('../api/queries', async (importOriginal) => {
   const original = await importOriginal<typeof import('../api/queries')>()
   return {
     ...original,
+    useArtifacts: vi.fn(),
     useControlRun: vi.fn(),
+    useDeleteArtifact: vi.fn(),
     useRun: vi.fn(),
     useRunEvents: vi.fn(),
   }
+})
+
+vi.mock('../../../platform', () => ({ getPlatformAdapter: vi.fn() }))
+vi.mock('../api/runs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../api/runs')>()
+  return { ...original, downloadArtifact: vi.fn() }
 })
 
 class EventSourceStub {
@@ -75,6 +91,10 @@ describe('RunDetailPage tenant-scoped event stream', () => {
     vi.mocked(useRun).mockReturnValue({ data: runningRun, isPending: false } as never)
     vi.mocked(useRunEvents).mockReturnValue({ data: [], isPending: false } as never)
     vi.mocked(useControlRun).mockReturnValue({ mutate: vi.fn(), isPending: false } as never)
+    vi.mocked(useArtifacts).mockReturnValue({ data: [], isPending: false } as never)
+    vi.mocked(useDeleteArtifact).mockReturnValue({ mutate: vi.fn(), isPending: false } as never)
+    vi.mocked(getPlatformAdapter).mockReturnValue({ saveFile: vi.fn() } as never)
+    vi.mocked(downloadArtifact).mockResolvedValue(new TextEncoder().encode('artifact content'))
   })
 
   it('binds the stream to the active workspace and closes the old connection on switch', async () => {
@@ -163,6 +183,50 @@ describe('RunDetailPage tenant-scoped event stream', () => {
     renderPage(false, false)
 
     expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+  })
+
+  it('previews, downloads, locates and deletes persistent artifacts', async () => {
+    const user = (await import('@testing-library/user-event')).default.setup()
+    const mutate = vi.fn()
+    const saveFile = vi.fn()
+    vi.mocked(useArtifacts).mockReturnValue({
+      data: [{
+        id: 'artifact-1',
+        run_id: 'run-1',
+        name: 'result.txt',
+        media_type: 'text/plain',
+        size_bytes: 16,
+        sha256: 'abc',
+        created_at: '2026-07-15T00:00:00Z',
+      }],
+      isPending: false,
+    } as never)
+    vi.mocked(useDeleteArtifact).mockReturnValue({ mutate, isPending: false } as never)
+    vi.mocked(getPlatformAdapter).mockReturnValue({ saveFile } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'event-1',
+        type: 'artifact.created',
+        sequence: 2,
+        payload: { artifact_id: 'artifact-1', name: 'result.txt' },
+      }],
+      isPending: false,
+    } as never)
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+
+    renderPage()
+
+    expect(screen.getAllByText('result.txt')).toHaveLength(2)
+    await user.click(screen.getByRole('button', { name: '预览 result.txt' }))
+    expect(await screen.findByText('artifact content')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /关\s*闭/ }))
+    await user.click(screen.getByRole('button', { name: '下载 result.txt' }))
+    expect(saveFile).toHaveBeenCalledWith(expect.objectContaining({ suggestedName: 'result.txt' }))
+    await user.click(screen.getByRole('button', { name: '定位 result.txt' }))
+    expect(scrollIntoView).toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: '删除 result.txt' }))
+    expect(mutate).toHaveBeenCalledWith('artifact-1')
   })
 
   it.each([

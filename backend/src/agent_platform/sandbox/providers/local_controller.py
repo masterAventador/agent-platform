@@ -150,6 +150,13 @@ class LocalControllerWorkspace:
         if results[0].error is not None:
             raise RuntimeError(f"sandbox write failed: {results[0].error}")
 
+    async def read_file(self, *, path: str) -> bytes:
+        results = await self.backend.adownload_files([path])
+        result = results[0]
+        if result.error is not None or result.content is None:
+            raise RuntimeError(f"sandbox read failed: {result.error or 'missing content'}")
+        return result.content
+
 
 class LocalControllerSandboxProvider:
     name = "local-controller"

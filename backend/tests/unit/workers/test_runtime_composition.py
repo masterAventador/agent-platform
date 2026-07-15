@@ -26,6 +26,17 @@ from agent_platform.workers.runtime_composition import (
 )
 
 
+class EmptyArtifactStorage:
+    async def put(self, *, key: str, content: bytes, media_type: str) -> None:
+        del key, content, media_type
+
+    async def get(self, *, key: str) -> bytes:
+        raise KeyError(key)
+
+    async def delete(self, *, key: str) -> None:
+        del key
+
+
 class EmptyStorage:
     async def get(self, *, key: str) -> bytes:
         raise AssertionError(key)
@@ -281,6 +292,50 @@ async def test_composed_resolver_uses_one_environment_for_skills_and_runtime(
     await prepared.close()
     await prepared.close()
     assert len(manager.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_composed_resolver_materializes_attachments_and_installs_artifact_tool(
+    session_factory,
+    monkeypatch,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    model_resolver, _ = injected_model_resolver()
+    materialized: list[tuple[UUID, UUID, object]] = []
+
+    async def record_materialize(self, *, tenant_id, run_id, workspace):
+        del self
+        materialized.append((tenant_id, run_id, workspace))
+
+    monkeypatch.setattr(
+        "agent_platform.platform.artifacts.services.TaskAttachmentService.materialize",
+        record_materialize,
+    )
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        artifact_storage=EmptyArtifactStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+        model_resolver=model_resolver,
+    )
+
+    await resolver.resolve(run, autonomous_definition())
+
+    assert materialized == [(run.tenant_id, run.id, manager.workspace)]
+    assert selector.selection is not None
+    assert "create_artifact" in {
+        tool.name for tool in selector.selection["tools"]
+    }
 
 
 @pytest.mark.asyncio

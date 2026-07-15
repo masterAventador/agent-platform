@@ -3,7 +3,9 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { useCreateRun } from '../../runs/api/queries'
+import { uploadFile } from '../../runs/api/runs'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
+import { getPlatformAdapter, type PlatformFile } from '../../../platform'
 import { isEmployeeConfigurationAvailable } from '../api/employees'
 import { getEmployeeApiErrorMessage } from '../api/errors'
 import { useEmployee, usePublishEmployee } from '../api/queries'
@@ -30,6 +32,8 @@ export function EmployeeDetailPage({
   const createRun = useCreateRun(employeeId ?? '')
   const [runModalOpen, setRunModalOpen] = useState(false)
   const [task, setTask] = useState('')
+  const [selectedFile, setSelectedFile] = useState<PlatformFile | null>(null)
+  const [selectingFile, setSelectingFile] = useState(false)
 
   if (employee.isPending) {
     return <Flex className="employee-loading" justify="center"><Spin /></Flex>
@@ -124,13 +128,21 @@ export function EmployeeDetailPage({
         onCancel={() => {
           setRunModalOpen(false)
           setTask('')
+          setSelectedFile(null)
           createRun.reset()
         }}
         onOk={async () => {
           try {
-            const run = await createRun.mutateAsync({ message: task.trim() })
+            const attachmentIds = selectedFile
+              ? [(await uploadFile(data.tenant_id, selectedFile)).id]
+              : []
+            const run = await createRun.mutateAsync({
+              input: { message: task.trim() },
+              attachmentIds,
+            })
             setRunModalOpen(false)
             setTask('')
+            setSelectedFile(null)
             navigate(`/runs/${run.id}`)
           } catch {
             // Mutation 错误在弹窗内统一渲染，避免 Modal onOk 泄漏 rejection。
@@ -155,6 +167,27 @@ export function EmployeeDetailPage({
           placeholder="例如：整理本周项目进展并输出摘要"
           onChange={(event) => setTask(event.target.value)}
         />
+        {data.definition.capabilities.file_upload && (
+          <Space className="employee-run-attachment" orientation="vertical" size={4}>
+            <Button
+              loading={selectingFile}
+              onClick={async () => {
+                setSelectingFile(true)
+                try {
+                  const file = await getPlatformAdapter().selectFile({
+                    extensions: ['txt', 'md', 'json', 'csv', 'pdf', 'png', 'jpg', 'jpeg', 'docx'],
+                  })
+                  if (file) setSelectedFile(file)
+                } finally {
+                  setSelectingFile(false)
+                }
+              }}
+            >
+              选择文件
+            </Button>
+            {selectedFile && <Typography.Text>{selectedFile.name}</Typography.Text>}
+          </Space>
+        )}
       </Modal>
     </section>
   )

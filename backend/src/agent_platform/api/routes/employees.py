@@ -48,7 +48,7 @@ class ModelSettings(GatewayModelReference):
 class EmployeeCapabilities(BaseModel):
     conversation: bool = True
     scheduled_tasks: Literal[False] = False
-    file_upload: Literal[False] = False
+    file_upload: bool = False
 
 
 class EmployeeCapabilitiesResponse(BaseModel):

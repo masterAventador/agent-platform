@@ -351,9 +351,15 @@ skill-name/
 
 `run_id` 是平台任务主键；`thread_id` 是 LangGraph 执行线程标识。二者建立明确映射，不创建第三套会话状态。
 
+文件与产物采用“PostgreSQL 权限元数据 + 对象存储字节”的单一事实边界：`files`、`task_attachments`、`artifacts` 都通过 `tenant_id` 与所属资源建立复合外键，存储 Key 只能由服务端生成。任务启动前，Worker 只把已授权且摘要、大小校验通过的附件写入本次运行的同一沙箱工作区；Agent 通过受控 `create_artifact` 工具读取该工作区并持久化产物。`artifact.created`、产物 API 与 `EmployeeRuntime.get_artifacts()` 均读取同一份持久目录，不依赖进程内缓存。
+
+对象存储由 `ArtifactStorageProvider` 隔离，开发环境使用 MinIO，LighthouseCOS/腾讯云环境使用 COS 实现。同步 SDK 调用必须移出事件循环；上传元数据提交失败或取消时清理对象，删除元数据失败时恢复对象，避免静默形成孤儿或丢失已登记内容。
+
 ## 9. 基础设施
 
 ### 9.1 PostgreSQL
+
+API 自有连接池在每次复用连接前执行健康探测；浏览器导航、SSE 断开或请求取消期间未完整关闭的 asyncpg 连接必须在再次分配前淘汰，禁止把失效连接传播到后续请求。
 
 保存：
 
@@ -387,6 +393,8 @@ Worker 的 Redis Stream 投递重试次数以 Consumer Group 的持久 delivery 
 - PDF、Word、PPT、图片等产物；
 - 大型工具输出；
 - 临时文件和版本化资产。
+
+数据库不保存文件正文，只保存租户、所属任务、摘要、大小、媒体类型和服务端生成的对象 Key；下载前必须再次校验对象内容完整性。
 
 ### 9.4 API 与 Worker 分离
 

@@ -15,6 +15,8 @@ class SandboxWorkspace(Protocol):
 
     async def write_file(self, *, path: str, content: bytes) -> None: ...
 
+    async def read_file(self, *, path: str) -> bytes: ...
+
 
 class SandboxBackendValidator(Protocol):
     """在环境进入运行时前，对官方公开 Backend 协议做 fail-fast 校验。"""

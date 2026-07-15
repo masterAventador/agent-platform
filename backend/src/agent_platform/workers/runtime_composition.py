@@ -8,13 +8,19 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyArtifactRepository,
+    SqlAlchemyFileRepository,
+    SqlAlchemyTaskAttachmentRepository,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
+    SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
 )
 from agent_platform.infrastructure.database.repositories.skills import (
@@ -23,11 +29,15 @@ from agent_platform.infrastructure.database.repositories.skills import (
 from agent_platform.infrastructure.database.repositories.tools import (
     SqlAlchemyToolRepository,
 )
+from agent_platform.platform.artifacts.entities import Artifact, validate_workspace_path
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
+from agent_platform.platform.artifacts.services import ArtifactService, TaskAttachmentService
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
 )
 from agent_platform.platform.runs.entities import Run, RunStatus
+from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.platform.skills.errors import SkillNotFound, SkillVersionNotFound
 from agent_platform.platform.skills.materializer import (
     SkillBundleDigestMismatch,
@@ -36,7 +46,8 @@ from agent_platform.platform.skills.materializer import (
 )
 from agent_platform.platform.skills.ports import SkillStorage
 from agent_platform.platform.tool_gateway import PolicyContext
-from agent_platform.runtimes.base import EmployeeRuntime
+from agent_platform.runtimes.artifacts import ArtifactBackedRuntime
+from agent_platform.runtimes.base import ArtifactReference, EmployeeRuntime
 from agent_platform.runtimes.deep_agent import (
     DeepAgentFactory,
     DeepAgentRuntime,
@@ -347,6 +358,7 @@ class ComposedRuntimeResolver:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         skill_storage: SkillStorage,
+        artifact_storage: ArtifactStorageProvider | None = None,
         sandbox_manager: SandboxManager,
         gateway: ToolGatewayInvoker,
         runtime_selector: PlatformRuntimeSelector,
@@ -356,6 +368,7 @@ class ComposedRuntimeResolver:
     ) -> None:
         self._session_factory = session_factory
         self._skill_storage = skill_storage
+        self._artifact_storage = artifact_storage
         self._sandbox_manager = sandbox_manager
         self._gateway = gateway
         self._runtime_selector = runtime_selector
@@ -433,7 +446,18 @@ class ComposedRuntimeResolver:
         delete_on_error: bool,
     ) -> PreparedRuntimeResult:
         try:
+            artifact_events: list[PlatformEvent] = []
             async with self._session_factory() as session:
+                if self._artifact_storage is not None:
+                    await TaskAttachmentService(
+                        file_repository=SqlAlchemyFileRepository(session),
+                        attachment_repository=SqlAlchemyTaskAttachmentRepository(session),
+                        storage=self._artifact_storage,
+                    ).materialize(
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        workspace=environment.workspace,
+                    )
                 try:
                     skill_paths = await SkillMaterializer(
                         repository=SqlAlchemySkillRepository(session),
@@ -480,6 +504,70 @@ class ComposedRuntimeResolver:
                 ),
             )
             tools = [gateway_adapter.adapt(metadata) for metadata in tool_metadata]
+            artifact_storage = self._artifact_storage
+            if artifact_storage is not None:
+
+                async def create_artifact(
+                    name: str,
+                    media_type: str,
+                    workspace_path: str,
+                ) -> str:
+                    """Publish a file from /workspace as a task artifact."""
+
+                    safe_path = validate_workspace_path(workspace_path)
+                    content = await environment.workspace.read_file(
+                        path=f"/workspace/{safe_path}"
+                    )
+                    async with self._session_factory() as artifact_session:
+                        created_event: PlatformEvent | None = None
+
+                        async def persist_created_event(artifact: Artifact) -> None:
+                            nonlocal created_event
+                            events = SqlAlchemyRunEventRepository(artifact_session)
+                            created_event = PlatformEvent.create(
+                                tenant_id=run.tenant_id,
+                                employee_id=run.employee_id,
+                                run_id=run.id,
+                                sequence=await events.next_sequence(run_id=run.id),
+                                event_type=EventType.ARTIFACT_CREATED,
+                                payload={
+                                    "artifact_id": str(artifact.id),
+                                    "name": artifact.name,
+                                    "media_type": artifact.media_type,
+                                    "size_bytes": artifact.size_bytes,
+                                },
+                            )
+                            await events.append(created_event)
+
+                        artifact = await ArtifactService(
+                            file_repository=SqlAlchemyFileRepository(artifact_session),
+                            artifact_repository=SqlAlchemyArtifactRepository(artifact_session),
+                            storage=artifact_storage,
+                        ).create_artifact(
+                            tenant_id=run.tenant_id,
+                            run_id=run.id,
+                            created_by=run.created_by,
+                            name=name,
+                            media_type=media_type,
+                            content=content,
+                            before_commit=persist_created_event,
+                            commit=artifact_session.commit,
+                        )
+                    if created_event is None:
+                        raise RuntimeError("artifact event was not persisted")
+                    artifact_events.append(created_event)
+                    return str(artifact.id)
+
+                tools.append(
+                    StructuredTool.from_function(
+                        coroutine=create_artifact,
+                        name="create_artifact",
+                        description=(
+                            "Publish a validated relative file from the task workspace "
+                            "as a downloadable artifact."
+                        ),
+                    )
+                )
             runtime = self._runtime_selector.select(
                 capabilities=capabilities,
                 tools=tools,
@@ -487,6 +575,30 @@ class ComposedRuntimeResolver:
                 model=model,
                 approval_store=approval_store,
             )
+            if self._artifact_storage is not None:
+
+                async def artifact_catalog(run_id: UUID) -> list[ArtifactReference]:
+                    if run_id != run.id:
+                        return []
+                    async with self._session_factory() as artifact_session:
+                        artifacts = await SqlAlchemyArtifactRepository(
+                            artifact_session
+                        ).list_for_run(tenant_id=run.tenant_id, run_id=run.id)
+                    return [
+                        ArtifactReference(
+                            artifact_id=artifact.id,
+                            name=artifact.name,
+                            media_type=artifact.media_type,
+                            size_bytes=artifact.size_bytes,
+                        )
+                        for artifact in artifacts
+                    ]
+
+                runtime = ArtifactBackedRuntime(
+                    runtime=runtime,
+                    artifact_catalog=artifact_catalog,
+                    artifact_events=lambda: list(artifact_events),
+                )
         except PermanentRuntimePreparationError as error:
 
             async def cleanup() -> None:

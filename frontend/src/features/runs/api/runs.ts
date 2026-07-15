@@ -1,5 +1,6 @@
 import { apiClient } from '../../../api/client'
 import { tenantRequestConfig } from '../../../api/tenant'
+import type { PlatformFile } from '../../../platform'
 
 
 export type RunStatus =
@@ -35,14 +36,61 @@ export interface RunEvent {
   payload: Record<string, unknown>
 }
 
+export interface StoredFile {
+  id: string
+  name: string
+  media_type: string
+  size_bytes: number
+  sha256: string
+}
+
+export interface Artifact {
+  id: string
+  run_id: string
+  name: string
+  media_type: string
+  size_bytes: number
+  sha256: string
+  created_at: string
+}
+
+const mediaTypes: Record<string, string> = {
+  csv: 'text/csv',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  jpeg: 'image/jpeg',
+  jpg: 'image/jpeg',
+  json: 'application/json',
+  md: 'text/markdown',
+  pdf: 'application/pdf',
+  png: 'image/png',
+  txt: 'text/plain',
+}
+
+function fileMediaType(name: string): string {
+  const extension = name.split('.').at(-1)?.toLowerCase() ?? ''
+  return mediaTypes[extension] ?? 'application/octet-stream'
+}
+
+export async function uploadFile(tenantId: string, file: PlatformFile): Promise<StoredFile> {
+  const form = new FormData()
+  form.append(
+    'file',
+    new Blob([Uint8Array.from(file.bytes).buffer], { type: fileMediaType(file.name) }),
+    file.name,
+  )
+  const response = await apiClient.post<StoredFile>('/files', form, tenantRequestConfig(tenantId))
+  return response.data
+}
+
 export async function createRun(
   tenantId: string,
   employeeId: string,
   input: Record<string, unknown>,
+  attachmentIds: string[] = [],
 ): Promise<Run> {
   const response = await apiClient.post<Run>(
     `/employees/${employeeId}/runs`,
-    { input },
+    { input, attachment_ids: attachmentIds },
     tenantRequestConfig(tenantId),
   )
   return response.data
@@ -62,6 +110,30 @@ export async function listRunEvents(tenantId: string, runId: string): Promise<Ru
       ...tenantRequestConfig(tenantId),
     })
   ).data
+}
+
+export async function listArtifacts(tenantId: string, runId: string): Promise<Artifact[]> {
+  return (
+    await apiClient.get<Artifact[]>(
+      `/runs/${runId}/artifacts`,
+      tenantRequestConfig(tenantId),
+    )
+  ).data
+}
+
+export async function downloadArtifact(
+  tenantId: string,
+  artifactId: string,
+): Promise<Uint8Array> {
+  const response = await apiClient.get<ArrayBuffer>(`/artifacts/${artifactId}/content`, {
+    ...tenantRequestConfig(tenantId),
+    responseType: 'arraybuffer',
+  })
+  return new Uint8Array(response.data)
+}
+
+export async function deleteArtifact(tenantId: string, artifactId: string): Promise<void> {
+  await apiClient.delete(`/artifacts/${artifactId}`, tenantRequestConfig(tenantId))
 }
 
 export async function controlRun(

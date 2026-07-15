@@ -15,7 +15,7 @@ export interface EmployeeCapabilities {
 export interface EmployeeWriteCapabilities {
   conversation: boolean
   scheduled_tasks: false
-  file_upload: false
+  file_upload: boolean
 }
 
 export interface GatewayModelReference {
@@ -58,7 +58,6 @@ export interface Employee {
 export function isEmployeeConfigurationAvailable(definition: EmployeeDefinition): boolean {
   return definition.work_mode === 'autonomous'
     && !definition.capabilities.scheduled_tasks
-    && !definition.capabilities.file_upload
 }
 
 function assertEmployeeConfigurationAvailable(definition: EmployeeDefinition): void {

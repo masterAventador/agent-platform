@@ -2,13 +2,22 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
-import { controlRun, createRun, getRun, listRunEvents, listRuns } from './runs'
+import {
+  controlRun,
+  createRun,
+  deleteArtifact,
+  getRun,
+  listArtifacts,
+  listRunEvents,
+  listRuns,
+} from './runs'
 
 
 export const runKeys = {
   all: (tenantId: string) => ['runs', tenantId] as const,
   detail: (tenantId: string, runId: string) => ['runs', tenantId, runId] as const,
   events: (tenantId: string, runId: string) => ['runs', tenantId, runId, 'events'] as const,
+  artifacts: (tenantId: string, runId: string) => ['runs', tenantId, runId, 'artifacts'] as const,
 }
 
 export function useRuns() {
@@ -38,12 +47,39 @@ export function useRunEvents(runId: string | undefined) {
   })
 }
 
+export function useArtifacts(runId: string | undefined) {
+  const tenantId = useActiveWorkspaceId()
+  return useQuery({
+    queryKey: runKeys.artifacts(tenantId ?? '', runId ?? ''),
+    queryFn: () => listArtifacts(tenantId!, runId!),
+    enabled: Boolean(tenantId && runId),
+  })
+}
+
+export function useDeleteArtifact(runId: string) {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'artifacts', 'delete', runId),
+    mutationFn: (artifactId: string) => deleteArtifact(tenantId!, artifactId),
+    onSuccess: async () => queryClient.invalidateQueries({
+      queryKey: runKeys.artifacts(tenantId!, runId),
+    }),
+  })
+}
+
 export function useCreateRun(employeeId: string) {
   const tenantId = useActiveWorkspaceId()
   const queryClient = useQueryClient()
   return useMutation({
     mutationKey: tenantMutationKey(tenantId ?? '', 'runs', 'create', employeeId),
-    mutationFn: (input: Record<string, unknown>) => createRun(tenantId!, employeeId, input),
+    mutationFn: ({
+      input,
+      attachmentIds = [],
+    }: {
+      input: Record<string, unknown>
+      attachmentIds?: string[]
+    }) => createRun(tenantId!, employeeId, input, attachmentIds),
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: runKeys.all(tenantId!) }),
   })
 }

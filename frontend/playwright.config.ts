@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
+const apiPort = process.env.PLAYWRIGHT_API_PORT ?? '18000'
+
 export default defineConfig({
   testDir: './e2e',
   testIgnore: [
@@ -27,7 +29,7 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: 'uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port 18000',
+      command: `uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port ${apiPort}`,
       cwd: '../backend',
       env: {
         AGENT_PLATFORM_DATABASE_URL:
@@ -39,13 +41,13 @@ export default defineConfig({
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
       },
-      url: 'http://127.0.0.1:18000/api/v1/health/live',
+      url: `http://127.0.0.1:${apiPort}/api/v1/health/live`,
       reuseExistingServer: false,
     },
     {
       command: 'pnpm dev --host 127.0.0.1 --port 15173',
       cwd: '.',
-      env: { VITE_API_PROXY_TARGET: 'http://127.0.0.1:18000' },
+      env: { VITE_API_PROXY_TARGET: `http://127.0.0.1:${apiPort}` },
       url: 'http://127.0.0.1:15173',
       reuseExistingServer: false,
     },

@@ -61,7 +61,7 @@
 | 工程质量基线 | 已完成 | 后端 0 失败；真实依赖跳过项均明确标注所需外部依赖 | C01 |
 | Tauri 桌面客户端 | 已完成 | 共享 React、`PlatformAdapter`、macOS/Windows 构建和真实桌面 E2E 已落地 | C02 |
 | 全栈真实验收与工作台 | 已完成 | 本地 Stub 成功/受控失败整栈闭环、工作台真实数据、Tauri 内核心流程及百炼真实请求均已通过 | C03 |
-| 文件与产物 | 未实现 | 文件上传关闭，运行时 `get_artifacts()` 返回空列表 | C04 |
+| 文件与产物 | 已完成 | 租户隔离的附件、沙箱物化、持久产物目录与客户端闭环已落地 | C04 |
 | 多轮会话 | 部分完成 | 主要是一次性任务，没有完整消息、追加输入和恢复体验 | C05 |
 | 动态输入输出 | 未实现 | Schema 只存储，未驱动表单、校验和结构化结果展示 | C06 |
 | 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
@@ -165,7 +165,11 @@
 
 ### C04 文件上传、任务工作区与产物系统
 
-**状态：`⬜ 未开始`**
+**状态：`✅ 已完成`**
+
+**开始日期：2026-07-15**
+
+**完成日期：2026-07-15**
 
 完成定义：
 
@@ -411,15 +415,16 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 收集 585 项：550 通过、35 跳过、0 失败；跳过项均明确标注 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖 |
-| 后端 Unit + Contract | 580 项通过；包含 Core API route manifest 与工作台严格响应契约 |
+| 后端 Pytest | 默认环境收集 913 项：876 通过、37 跳过、0 失败；跳过项均明确标注缺少 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖，不计作真实依赖验收通过 |
+| 后端 Unit + Contract | 739 项通过；包含 Core API route manifest、文件/产物契约、连接池复用健康探测与工作台严格响应契约 |
+| C04 真实依赖专项 | 独立随机端口验收栈从空 PostgreSQL 升级至 `20260715_0018`；显式注入 `TEST_DATABASE_URL`、`TEST_REDIS_URL`、`TEST_MINIO_*` 后 38 项通过、0 跳过，覆盖 PostgreSQL 复合租户外键/任务路径唯一约束、MinIO Artifact 字节往返与删除、附件物化和恶意路径拒绝；验收容器、网络、Volume 已销毁 |
 | Ruff | 通过 |
-| Mypy | 159 个源码文件通过 |
-| 前端 Vitest | 23 个测试文件、98 项测试通过；含 PlatformAdapter、工作台 API/查询/页面与架构边界测试 |
+| Mypy | 169 个源码文件通过 |
+| 前端 Vitest | 27 个测试文件、113 项测试通过；含附件上传、产物查询/页面、PlatformAdapter、工作台与架构边界测试 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
-| Playwright Web 业务回归 | 14 项通过；本机 Chrome 149 下以 `--trace=off` 规避既有 trace 收尾阻塞，测试服务与容器自动清理 |
+| Playwright Web 业务回归 | 15 项完整回归通过；C04 正式纵切完成真实文件上传和任务附件绑定，产物目录以受控运行时边界覆盖预览、下载、事件定位和删除；并发页面取消后的 asyncpg 连接复用已通过连接池健康探测根治，本机 Chrome 149 下使用隔离 API 端口，测试服务与容器自动清理 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
@@ -438,6 +443,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
-| C04-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
+| C04 | 已完成 | 2026-07-15 | 2026-07-15 | 本任务提交 | 文件、附件、产物领域/迁移/仓储/API、MinIO/COS 端口、同沙箱物化、`create_artifact` 工具、持久 `get_artifacts()` 与 `artifact.created` 已闭环；默认 `uv run pytest -ra` 收集 913 项（876 通过、37 项因缺显式真实依赖跳过），`uv run pytest tests/unit tests/contract -q` 739 项通过；独立随机端口 PostgreSQL/Redis/MinIO 验收栈显式注入全部 `TEST_*` 后 C04 专项 38 项通过、0 跳过，并验证空库迁移、真实复合外键/唯一约束、MinIO Artifact 往返删除、附件物化与恶意路径；Ruff、Mypy（169 个源码文件）、前端 Vitest（113 项）、Lint、Typecheck、Build 全通过；正式 Playwright 15 项完整回归通过，真实上传并校验任务附件绑定，覆盖产物预览、下载、事件定位和删除，隔离容器/网络/Volume 自动清理 |
+| C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

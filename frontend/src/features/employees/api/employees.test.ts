@@ -65,10 +65,6 @@ describe('employee write boundary', () => {
       'scheduled tasks',
       { ...definition, capabilities: { ...definition.capabilities, scheduled_tasks: true } },
     ],
-    [
-      'file upload',
-      { ...definition, capabilities: { ...definition.capabilities, file_upload: true } },
-    ],
   ])('rejects unavailable %s before create reaches the API', async (_, unavailable) => {
     await expect(createEmployee(
       'tenant-1',
@@ -86,10 +82,6 @@ describe('employee write boundary', () => {
       'scheduled tasks',
       { ...definition, capabilities: { ...definition.capabilities, scheduled_tasks: true } },
     ],
-    [
-      'file upload',
-      { ...definition, capabilities: { ...definition.capabilities, file_upload: true } },
-    ],
   ])('rejects unavailable %s before update reaches the API', async (_, unavailable) => {
     await expect(updateEmployee(
       'tenant-1',
@@ -99,5 +91,17 @@ describe('employee write boundary', () => {
       'employee_configuration_unavailable',
     )
     expect(apiClient.put).not.toHaveBeenCalled()
+  })
+
+  it('allows file upload capability through the write boundary', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ data: { id: 'employee-1' } })
+    const withFiles = {
+      ...definition,
+      capabilities: { ...definition.capabilities, file_upload: true },
+    }
+
+    await createEmployee('tenant-1', withFiles)
+
+    expect(apiClient.post).toHaveBeenCalledWith('/employees', withFiles, expect.anything())
   })
 })

@@ -45,6 +45,7 @@ class AppSettings(BaseSettings):
     minio_secret_key: str = "agent-platform-local-minio"
     minio_secure: bool = False
     skill_storage_bucket: str = "agent-platform-skills"
+    artifact_storage_bucket: str = "agent-platform-artifacts"
     local_credentials_file: str | None = None
     local_credentials_repository_root: str | None = None
     sandbox_provider: Literal["local-controller"] = "local-controller"

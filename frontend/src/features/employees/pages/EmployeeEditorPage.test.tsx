@@ -89,17 +89,17 @@ describe('EmployeeEditorPage configuration availability', () => {
     updateMutateAsync.mockResolvedValue(employee)
   })
 
-  it('shows unavailable modes and keeps unfinished capabilities disabled and false', async () => {
+  it('shows unavailable modes, enables file uploads and keeps scheduling disabled', async () => {
     const user = userEvent.setup()
     renderEditor()
 
     expect(screen.getByRole('checkbox', { name: '支持对话' })).toBeEnabled()
     expect(screen.getByRole('checkbox', { name: '支持对话' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeEnabled()
     expect(screen.getByRole('checkbox', { name: /文件上传/ })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeDisabled()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).not.toBeChecked()
-    expect(screen.getByText(/文件上传与定时任务尚未接通/)).toBeInTheDocument()
+    expect(screen.getByText(/文件上传已接通/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('combobox', { name: '工作模式' }))
     expect(screen.getByRole('option', { name: '自主执行' })).not.toHaveAttribute(
@@ -128,6 +128,7 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(screen.getByRole('combobox', { name: '平台模型' })).toBeDisabled()
     expect(screen.getByText('general-purpose')).toBeInTheDocument()
     await user.click(screen.getByRole('checkbox', { name: '支持对话' }))
+    await user.click(screen.getByRole('checkbox', { name: /文件上传/ }))
     await user.click(screen.getByRole('button', { name: '保存草稿' }))
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
@@ -137,7 +138,7 @@ describe('EmployeeEditorPage configuration availability', () => {
       capabilities: {
         conversation: false,
         scheduled_tasks: false,
-        file_upload: false,
+        file_upload: true,
       },
     }))
   })
@@ -168,9 +169,9 @@ describe('EmployeeEditorPage configuration availability', () => {
     renderEditor('/employees/employee-1/edit')
 
     expect(await screen.findByText(/历史配置使用了尚未开放的工作模式/)).toBeInTheDocument()
-    expect(screen.getByText(/历史配置声明了尚未接通的能力/)).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeDisabled()
-    expect(screen.getByRole('checkbox', { name: /文件上传/ })).not.toBeChecked()
+    expect(screen.getByText(/历史配置使用了尚未接通的定时任务/)).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeDisabled()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).not.toBeChecked()
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
@@ -185,7 +186,7 @@ describe('EmployeeEditorPage configuration availability', () => {
       capabilities: {
         conversation: true,
         scheduled_tasks: false,
-        file_upload: false,
+        file_upload: true,
       },
     }))
   })

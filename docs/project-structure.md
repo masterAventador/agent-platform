@@ -89,7 +89,7 @@ backend/
 │       │   ├── employees/         # 数字员工定义、版本和发布
 │       │   ├── runs/              # 任务、状态和事件
 │       │   ├── approvals/         # 人工审批
-│       │   ├── artifacts/         # 文件和任务产物索引
+│       │   ├── artifacts/         # 文件、任务附件、产物领域与存储端口
 │       │   ├── skills/            # Skill 注册、版本、绑定和发布
 │       │   ├── model_gateway/     # 租户模型网关 desired policy 与端口
 │       │   └── audit/             # 企业审计
@@ -111,7 +111,7 @@ backend/
 │       │   ├── database/
 │       │   ├── cache/
 │       │   ├── llm/               # LiteLLM 公开 HTTP 协议的宿主侧 Adapter
-│       │   ├── object_storage/
+│       │   ├── object_storage/    # MinIO/COS 文件与产物端口实现
 │       │   ├── queue/
 │       │   └── secrets/
 │       ├── observability/         # OpenTelemetry、日志和指标

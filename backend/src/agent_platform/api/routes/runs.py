@@ -6,9 +6,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, Field, JsonValue
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyFileRepository,
+    SqlAlchemyTaskAttachmentRepository,
+)
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
@@ -18,6 +22,7 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
 )
+from agent_platform.platform.artifacts.entities import TaskAttachment
 from agent_platform.platform.employees.entities import (
     EmployeeStatus,
     EmployeeVisibility,
@@ -35,6 +40,7 @@ StreamTenantQuery = Annotated[UUID | None, Query(alias="tenant_id")]
 
 class CreateRunRequest(BaseModel):
     input: dict[str, JsonValue]
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 
 class ControlRunRequest(BaseModel):
@@ -144,6 +150,33 @@ async def create_run(
             input_data=payload.input,
         )
         await SqlAlchemyRunRepository(database_session).add(run)
+        capabilities = version.definition.get("capabilities")
+        if payload.attachment_ids and (
+            not isinstance(capabilities, dict) or capabilities.get("file_upload") is not True
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "file_upload_disabled", "message": "数字员工未启用文件输入"},
+            )
+        file_repository = SqlAlchemyFileRepository(database_session)
+        attachment_repository = SqlAlchemyTaskAttachmentRepository(database_session)
+        for file_id in dict.fromkeys(payload.attachment_ids):
+            file = await file_repository.get(tenant_id=run.tenant_id, file_id=file_id)
+            if file is None or (
+                file.owner_id != user.id
+                and not role_has_permission(
+                    role=access.role, permission=TenantPermission.RUNS_MANAGE
+                )
+            ):
+                raise _not_found()
+            await attachment_repository.add(
+                TaskAttachment.create(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    file_id=file.id,
+                    workspace_path=f"inputs/{file.id}/{file.name}",
+                )
+            )
         await SqlAlchemyRunCommandRepository(database_session).add(
             RunCommand.create(
                 run_id=run.id,
