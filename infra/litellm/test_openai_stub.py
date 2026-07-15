@@ -90,16 +90,18 @@ class OpenAiStubProtocolTest(unittest.TestCase):
         self.assertEqual(choice["finish_reason"], "tool_calls")
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "get_status")
 
-    def test_artifact_flow_writes_then_publishes_the_same_sandbox_file(self) -> None:
+    def test_artifact_flow_reads_attachment_then_writes_and_publishes_derived_file(
+        self,
+    ) -> None:
         messages: list[dict[str, object]] = [
             {"role": "user", "content": json.dumps({"message": "mvp-artifact-flow"})}
         ]
         first = self.post_completion({"model": "primary-test", "messages": messages})
         first_call = first["choices"][0]["message"]["tool_calls"][0]
-        self.assertEqual(first_call["function"]["name"], "write_file")
+        self.assertEqual(first_call["function"]["name"], "glob")
         self.assertEqual(
-            json.loads(first_call["function"]["arguments"])["file_path"],
-            "/workspace/result.txt",
+            json.loads(first_call["function"]["arguments"]),
+            {"path": "/workspace/inputs", "pattern": "**/brief.txt"},
         )
 
         messages.extend(
@@ -108,15 +110,52 @@ class OpenAiStubProtocolTest(unittest.TestCase):
                 {
                     "role": "tool",
                     "tool_call_id": first_call["id"],
-                    "content": "Updated file /workspace/result.txt",
+                    # Deep Agents' SandboxBackend changes into the requested
+                    # directory before globbing, so tool output is relative.
+                    "content": "['file-id/brief.txt']",
                 },
             ]
         )
         second = self.post_completion({"model": "primary-test", "messages": messages})
         second_call = second["choices"][0]["message"]["tool_calls"][0]
-        self.assertEqual(second_call["function"]["name"], "create_artifact")
+        self.assertEqual(second_call["function"]["name"], "read_file")
         self.assertEqual(
-            json.loads(second_call["function"]["arguments"])["workspace_path"],
+            json.loads(second_call["function"]["arguments"])["file_path"],
+            "/workspace/inputs/file-id/brief.txt",
+        )
+
+        messages.extend(
+            [
+                second["choices"][0]["message"],
+                {
+                    "role": "tool",
+                    "tool_call_id": second_call["id"],
+                    "content": "1\tC04 attachment content: derive this artifact",
+                },
+            ]
+        )
+        third = self.post_completion({"model": "primary-test", "messages": messages})
+        third_call = third["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(third_call["function"]["name"], "write_file")
+        third_arguments = json.loads(third_call["function"]["arguments"])
+        self.assertEqual(third_arguments["file_path"], "/workspace/result.txt")
+        self.assertIn("C04 attachment content", third_arguments["content"])
+
+        messages.extend(
+            [
+                third["choices"][0]["message"],
+                {
+                    "role": "tool",
+                    "tool_call_id": third_call["id"],
+                    "content": "Updated file /workspace/result.txt",
+                },
+            ]
+        )
+        fourth = self.post_completion({"model": "primary-test", "messages": messages})
+        fourth_call = fourth["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(fourth_call["function"]["name"], "create_artifact")
+        self.assertEqual(
+            json.loads(fourth_call["function"]["arguments"])["workspace_path"],
             "result.txt",
         )
 

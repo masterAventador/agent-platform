@@ -354,6 +354,22 @@ class PlatformContainerContractTest(unittest.TestCase):
         for label in ("demo@example.com", "发布员工", "发起任务", "已完成", "工作台"):
             self.assertIn(label, desktop_spec)
 
+    def test_mvp_web_acceptance_reuses_demo_account_and_exercises_real_attachment_input(self) -> None:
+        spec = self.read("frontend/e2e/mvp-profile.spec.ts")
+        auth_helper = self.read("frontend/e2e/helpers/auth.ts")
+        acceptance = self.read("infra/platform/test-mvp-profile.sh")
+        self.assertIn("loginWithDemoAccount", spec)
+        self.assertNotIn("registerAndLogin", spec)
+        self.assertIn("demo@example.com", auth_helper)
+        self.assertIn("agent-platform-demo", auth_helper)
+        self.assertIn("支持文件上传", spec)
+        self.assertIn("brief.txt", spec)
+        self.assertIn("C04 attachment content", spec)
+        self.assertIn("/attachments", spec)
+        self.assertIn("client.stat_object", acceptance)
+        self.assertIn('bucket = "agent-platform-artifacts"', acceptance)
+        self.assertNotIn('test -f "/data/agent-platform', acceptance)
+
     def test_tauri_native_flow_verifies_keychain_restore_across_app_starts(self) -> None:
         desktop_spec = self.read("frontend/e2e-tauri/app.spec.ts")
         self.assertIn("TAURI_EXPECT_REMEMBERED_LOGIN", desktop_spec)

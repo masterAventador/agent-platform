@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -58,9 +59,115 @@ class MemoryOperationRepository:
     async def add(self, operation: StorageOperation) -> None:
         self.operations[operation.id] = operation
 
-    async def mark_status(self, *, operation_id: UUID, status: str) -> None:
+    async def lock_owned(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        now: datetime,
+    ) -> bool:
         operation = self.operations[operation_id]
-        self.operations[operation_id] = replace(operation, status=status)
+        return (
+            operation.status == "pending"
+            and operation.phase == expected_phase
+            and operation.lease_owner == lease_owner
+            and operation.reconcile_after > now
+        )
+
+    async def advance_phase(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        phase: str,
+        reconcile_after: datetime,
+    ) -> bool:
+        operation = self.operations[operation_id]
+        if not (
+            operation.status == "pending"
+            and operation.phase == expected_phase
+            and operation.lease_owner == lease_owner
+        ):
+            return False
+        self.operations[operation_id] = replace(
+            operation,
+            phase=phase,
+            reconcile_after=reconcile_after,
+            updated_at=datetime.now(UTC),
+        )
+        return True
+
+    async def mark_status(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        status: str,
+    ) -> bool:
+        operation = self.operations[operation_id]
+        if not (
+            operation.status == "pending"
+            and operation.phase == expected_phase
+            and operation.lease_owner == lease_owner
+        ):
+            return False
+        self.operations[operation_id] = replace(
+            operation,
+            status=status,
+            lease_owner=None,
+            updated_at=datetime.now(UTC),
+        )
+        return True
+
+    async def release_claim(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        reconcile_after: datetime,
+    ) -> bool:
+        operation = self.operations[operation_id]
+        if not (
+            operation.status == "pending"
+            and operation.phase == expected_phase
+            and operation.lease_owner == lease_owner
+        ):
+            return False
+        self.operations[operation_id] = replace(
+            operation,
+            lease_owner=None,
+            reconcile_after=reconcile_after,
+            updated_at=datetime.now(UTC),
+        )
+        return True
+
+    async def claim_pending(
+        self,
+        *,
+        lease_owner: UUID,
+        claimed_at: datetime,
+        lease_expires_at: datetime,
+        limit: int,
+    ) -> list[StorageOperation]:
+        claimed: list[StorageOperation] = []
+        for operation_id, operation in self.operations.items():
+            if operation.status != "pending" or operation.reconcile_after > claimed_at:
+                continue
+            claimed_operation = replace(
+                operation,
+                lease_owner=lease_owner,
+                reconcile_after=lease_expires_at,
+                updated_at=claimed_at,
+            )
+            self.operations[operation_id] = claimed_operation
+            claimed.append(claimed_operation)
+            if len(claimed) == limit:
+                break
+        return claimed
 
     async def list_pending(self, *, limit: int) -> list[StorageOperation]:
         return [
@@ -145,6 +252,42 @@ class MemoryArtifactRepository:
             return False
         del self.artifacts[artifact_id]
         return True
+
+
+class TransactionalArtifactState:
+    def __init__(self) -> None:
+        self.artifacts: dict[UUID, Artifact] = {}
+        self.operations: dict[UUID, StorageOperation] = {}
+
+
+class ForegroundArtifactRepository(MemoryArtifactRepository):
+    def __init__(self, state: TransactionalArtifactState) -> None:
+        super().__init__()
+        self._state = state
+
+    async def commit(self) -> None:
+        self._state.artifacts.update(self.artifacts)
+
+
+class ReconcilerArtifactRepository(MemoryArtifactRepository):
+    def __init__(self, state: TransactionalArtifactState) -> None:
+        super().__init__()
+        self.artifacts = state.artifacts
+
+
+class ForegroundOperationRepository(MemoryOperationRepository):
+    def __init__(self, state: TransactionalArtifactState) -> None:
+        super().__init__()
+        self._state = state
+
+    async def commit(self) -> None:
+        self._state.operations.update(self.operations)
+
+
+class ReconcilerOperationRepository(MemoryOperationRepository):
+    def __init__(self, state: TransactionalArtifactState) -> None:
+        super().__init__()
+        self.operations = state.operations
 
 
 class MemoryWorkspace:
@@ -398,6 +541,54 @@ async def test_durable_create_reconciles_a_failed_object_put_without_dangling_me
 
 
 @pytest.mark.asyncio
+async def test_reconciler_claims_only_expired_operations_and_rejects_stale_owner_cas() -> None:
+    operations = MemoryOperationRepository()
+    foreground_owner = uuid4()
+    reconciler_owner = uuid4()
+    now = datetime.now(UTC)
+    operation = StorageOperation.pending(
+        tenant_id=uuid4(),
+        action="put",
+        entity_kind="artifact",
+        entity_id=uuid4(),
+        storage_key="artifact/key",
+        lease_owner=foreground_owner,
+        now=now,
+        lease_duration=timedelta(seconds=5),
+    )
+    await operations.add(operation)
+
+    assert (
+        await operations.claim_pending(
+            lease_owner=reconciler_owner,
+            claimed_at=now + timedelta(seconds=4),
+            lease_expires_at=now + timedelta(seconds=20),
+            limit=10,
+        )
+        == []
+    )
+    claimed = await operations.claim_pending(
+        lease_owner=reconciler_owner,
+        claimed_at=now + timedelta(seconds=6),
+        lease_expires_at=now + timedelta(seconds=20),
+        limit=10,
+    )
+    assert [item.id for item in claimed] == [operation.id]
+    assert not await operations.mark_status(
+        operation_id=operation.id,
+        expected_phase="intent",
+        lease_owner=foreground_owner,
+        status="completed",
+    )
+    assert await operations.mark_status(
+        operation_id=operation.id,
+        expected_phase="intent",
+        lease_owner=reconciler_owner,
+        status="compensated",
+    )
+
+
+@pytest.mark.asyncio
 async def test_durable_create_does_not_swallow_cancellation_after_object_store_applies() -> None:
     repository = MemoryArtifactRepository()
     operations = MemoryOperationRepository()
@@ -481,3 +672,63 @@ async def test_durable_delete_retries_object_failure_from_persisted_intent() -> 
     assert await service.reconcile_pending(commit=commit) == 1
     assert operations.operations[pending[0].id].status == "completed"
     assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_fresh_put_is_not_compensated_while_foreground_metadata_commit_is_active() -> None:
+    state = TransactionalArtifactState()
+    storage = MemoryStorage()
+    foreground_artifacts = ForegroundArtifactRepository(state)
+    foreground_operations = ForegroundOperationRepository(state)
+    reconciler = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=ReconcilerArtifactRepository(state),
+        operation_repository=ReconcilerOperationRepository(state),
+        storage=storage,
+    )
+    metadata_commit_started = asyncio.Event()
+    release_metadata_commit = asyncio.Event()
+    commit_count = 0
+
+    async def foreground_commit() -> None:
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 1:
+            await foreground_operations.commit()
+            return
+        metadata_commit_started.set()
+        await release_metadata_commit.wait()
+        await foreground_artifacts.commit()
+        await foreground_operations.commit()
+
+    async def reconciler_commit() -> None:
+        return None
+
+    create_task = asyncio.create_task(
+        ArtifactService(
+            file_repository=FailingFileRepository(),
+            artifact_repository=foreground_artifacts,
+            operation_repository=foreground_operations,
+            storage=storage,
+        ).create_artifact(
+            tenant_id=uuid4(),
+            run_id=uuid4(),
+            created_by=uuid4(),
+            name="result.txt",
+            media_type="text/plain",
+            content=b"done",
+            commit=foreground_commit,
+        )
+    )
+    await asyncio.wait_for(metadata_commit_started.wait(), timeout=1)
+
+    try:
+        reconciled = await reconciler.reconcile_pending(commit=reconciler_commit)
+    finally:
+        release_metadata_commit.set()
+    artifact = await asyncio.wait_for(create_task, timeout=1)
+    assert reconciled == 0
+    operation = next(iter(state.operations.values()))
+    assert operation.status == "completed"
+    assert state.artifacts == {artifact.id: artifact}
+    assert storage.objects == {artifact.storage_key: b"done"}

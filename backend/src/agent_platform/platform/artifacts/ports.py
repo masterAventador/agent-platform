@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -44,9 +45,51 @@ class ArtifactRepository(Protocol):
 class StorageOperationRepository(Protocol):
     async def add(self, operation: StorageOperation) -> None: ...
 
-    async def mark_status(self, *, operation_id: UUID, status: str) -> None: ...
+    async def lock_owned(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        now: datetime,
+    ) -> bool: ...
 
-    async def list_pending(self, *, limit: int = 100) -> list[StorageOperation]: ...
+    async def advance_phase(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        phase: str,
+        reconcile_after: datetime,
+    ) -> bool: ...
+
+    async def mark_status(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        status: str,
+    ) -> bool: ...
+
+    async def release_claim(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        reconcile_after: datetime,
+    ) -> bool: ...
+
+    async def claim_pending(
+        self,
+        *,
+        lease_owner: UUID,
+        claimed_at: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[StorageOperation]: ...
 
 
 class ArtifactWorkspace(Protocol):

@@ -265,6 +265,9 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "entity_id",
         "storage_key",
         "status",
+        "phase",
+        "lease_owner",
+        "reconcile_after",
         "created_at",
         "updated_at",
     } == storage_operation_columns
@@ -291,6 +294,85 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             ")"
         ).fetchall()
     assert platform_tables == []
+
+
+def test_artifact_storage_lease_migration_backfills_existing_operations(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "artifact-storage-lease.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "20260715_0018")
+
+    tenant_id = uuid4().hex
+    timestamp = "2026-07-15 12:00:00+00:00"
+    operations = [
+        (uuid4().hex, "put", "pending", "intent"),
+        (uuid4().hex, "delete", "pending", "metadata_applied"),
+        (uuid4().hex, "put", "completed", "storage_applied"),
+    ]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+            (tenant_id, "迁移租户", f"migration-{tenant_id}", timestamp),
+        )
+        connection.executemany(
+            """
+            INSERT INTO artifact_storage_operations (
+                id, tenant_id, action, entity_kind, entity_id, storage_key,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, 'artifact', ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    operation_id,
+                    tenant_id,
+                    action,
+                    uuid4().hex,
+                    f"migration/{operation_id}",
+                    status,
+                    timestamp,
+                    timestamp,
+                )
+                for operation_id, action, status, _expected_phase in operations
+            ],
+        )
+        connection.commit()
+
+    command.upgrade(config, "20260715_0019")
+    with sqlite3.connect(database_path) as connection:
+        migrated = connection.execute(
+            """
+            SELECT id, phase, lease_owner, reconcile_after
+            FROM artifact_storage_operations
+            ORDER BY id
+            """
+        ).fetchall()
+    expected_phases = {
+        operation_id: expected_phase
+        for operation_id, _action, _status, expected_phase in operations
+    }
+    assert {
+        operation_id: (phase, lease_owner, reconcile_after)
+        for operation_id, phase, lease_owner, reconcile_after in migrated
+    } == {
+        operation_id: (expected_phase, None, timestamp)
+        for operation_id, expected_phase in expected_phases.items()
+    }
+
+    command.downgrade(config, "20260715_0018")
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(artifact_storage_operations)"
+            ).fetchall()
+        }
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM artifact_storage_operations"
+        ).fetchone()[0]
+    assert {"phase", "lease_owner", "reconcile_after"}.isdisjoint(columns)
+    assert remaining == 3
 
 
 def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> None:
@@ -337,7 +419,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260715_0018"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260715_0019"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

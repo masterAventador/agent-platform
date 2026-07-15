@@ -2,10 +2,41 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import PurePosixPath
 from typing import Any
+
+
+_ATTACHMENT_ROOT = PurePosixPath("/workspace/inputs")
+_MISSING_ATTACHMENT = _ATTACHMENT_ROOT / "missing" / "brief.txt"
+
+
+def _attachment_path_from_glob(content: object) -> str:
+    """Resolve Deep Agents' relative glob result inside the attachment root."""
+    try:
+        candidates = ast.literal_eval(str(content))
+    except (SyntaxError, ValueError):
+        return str(_MISSING_ATTACHMENT)
+    if not isinstance(candidates, list):
+        return str(_MISSING_ATTACHMENT)
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        candidate_path = PurePosixPath(candidate)
+        if candidate_path.is_absolute():
+            resolved = candidate_path
+        else:
+            resolved = _ATTACHMENT_ROOT / candidate_path
+        if (
+            ".." not in resolved.parts
+            and resolved.name == "brief.txt"
+            and resolved.is_relative_to(_ATTACHMENT_ROOT)
+        ):
+            return str(resolved)
+    return str(_MISSING_ATTACHMENT)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -123,12 +154,56 @@ class Handler(BaseHTTPRequestHandler):
         if scenario == "mvp-web-flow":
             message = {"role": "assistant", "content": "local stub completion"}
         elif scenario == "mvp-artifact-flow":
-            completed_tool_calls = sum(
-                1
+            tool_messages = [
+                candidate
                 for candidate in messages
                 if isinstance(candidate, dict) and candidate.get("role") == "tool"
-            )
+            ]
+            completed_tool_calls = len(tool_messages)
             if completed_tool_calls == 0:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-find-attachment",
+                            "type": "function",
+                            "function": {
+                                "name": "glob",
+                                "arguments": json.dumps(
+                                    {
+                                        "path": "/workspace/inputs",
+                                        "pattern": "**/brief.txt",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+                finish_reason = "tool_calls"
+            elif completed_tool_calls == 1:
+                attachment_path = _attachment_path_from_glob(
+                    tool_messages[-1].get("content", "")
+                )
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-read-attachment",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps(
+                                    {"file_path": attachment_path}
+                                ),
+                            },
+                        }
+                    ],
+                }
+                finish_reason = "tool_calls"
+            elif completed_tool_calls == 2:
+                attachment_content = str(tool_messages[-1].get("content", ""))
                 message = {
                     "role": "assistant",
                     "content": None,
@@ -141,7 +216,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "arguments": json.dumps(
                                     {
                                         "file_path": "/workspace/result.txt",
-                                        "content": "artifact content from real sandbox",
+                                        "content": (
+                                            "attachment-derived result:\n"
+                                            f"{attachment_content}"
+                                        ),
                                     }
                                 ),
                             },
@@ -149,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
                     ],
                 }
                 finish_reason = "tool_calls"
-            elif completed_tool_calls == 1:
+            elif completed_tool_calls == 3:
                 message = {
                     "role": "assistant",
                     "content": None,

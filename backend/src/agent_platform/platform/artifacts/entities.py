@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import PurePosixPath
 from uuid import UUID, uuid4
@@ -54,6 +54,9 @@ class StorageOperation:
     entity_id: UUID
     storage_key: str
     status: str
+    phase: str
+    lease_owner: UUID | None
+    reconcile_after: datetime
     created_at: datetime
     updated_at: datetime
 
@@ -66,10 +69,18 @@ class StorageOperation:
         entity_kind: str,
         entity_id: UUID,
         storage_key: str,
+        lease_owner: UUID,
+        phase: str = "intent",
+        now: datetime | None = None,
+        lease_duration: timedelta = timedelta(minutes=5),
     ) -> "StorageOperation":
         if action not in {"put", "delete"} or entity_kind not in {"file", "artifact"}:
             raise ValueError("invalid storage operation")
-        now = datetime.now(UTC)
+        if phase not in {"intent", "metadata_applied", "storage_applied"}:
+            raise ValueError("invalid storage operation phase")
+        if lease_duration <= timedelta(0):
+            raise ValueError("storage operation lease must be positive")
+        current_time = now or datetime.now(UTC)
         return cls(
             id=uuid4(),
             tenant_id=tenant_id,
@@ -78,8 +89,11 @@ class StorageOperation:
             entity_id=entity_id,
             storage_key=storage_key,
             status="pending",
-            created_at=now,
-            updated_at=now,
+            phase=phase,
+            lease_owner=lease_owner,
+            reconcile_after=current_time + lease_duration,
+            created_at=current_time,
+            updated_at=current_time,
         )
 
 

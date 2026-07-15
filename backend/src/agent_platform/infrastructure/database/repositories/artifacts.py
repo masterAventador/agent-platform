@@ -13,6 +13,7 @@ from sqlalchemy import (
     Uuid,
     delete,
     select,
+    update,
 )
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,6 +108,9 @@ class ArtifactStorageOperationRecord(Base):
     entity_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), index=True)
     storage_key: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(32), index=True)
+    phase: Mapped[str] = mapped_column(String(32))
+    lease_owner: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    reconcile_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -119,6 +123,10 @@ class ArtifactStorageOperationRecord(Base):
         CheckConstraint(
             "status IN ('pending', 'completed', 'compensated')",
             name="ck_artifact_storage_status",
+        ),
+        CheckConstraint(
+            "phase IN ('intent', 'metadata_applied', 'storage_applied')",
+            name="ck_artifact_storage_phase",
         ),
     )
 
@@ -263,19 +271,117 @@ class SqlAlchemyArtifactStorageOperationRepository:
         self._session.add(ArtifactStorageOperationRecord(**asdict(operation)))
         await self._session.flush()
 
-    async def mark_status(self, *, operation_id: UUID, status: str) -> None:
-        record = await self._session.get(ArtifactStorageOperationRecord, operation_id)
-        if record is None:
-            raise RuntimeError("artifact storage operation disappeared")
-        record.status = status
-        record.updated_at = datetime.now(UTC)
-        await self._session.flush()
+    async def lock_owned(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        now: datetime,
+    ) -> bool:
+        record = (
+            await self._session.execute(
+                select(ArtifactStorageOperationRecord)
+                .where(
+                    ArtifactStorageOperationRecord.id == operation_id,
+                    ArtifactStorageOperationRecord.status == "pending",
+                    ArtifactStorageOperationRecord.phase == expected_phase,
+                    ArtifactStorageOperationRecord.lease_owner == lease_owner,
+                    ArtifactStorageOperationRecord.reconcile_after > now,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        return record is not None
 
-    async def list_pending(self, *, limit: int = 100) -> list[StorageOperation]:
+    async def advance_phase(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        phase: str,
+        reconcile_after: datetime,
+    ) -> bool:
+        result = await self._session.execute(
+            update(ArtifactStorageOperationRecord)
+            .where(
+                ArtifactStorageOperationRecord.id == operation_id,
+                ArtifactStorageOperationRecord.status == "pending",
+                ArtifactStorageOperationRecord.phase == expected_phase,
+                ArtifactStorageOperationRecord.lease_owner == lease_owner,
+            )
+            .values(
+                phase=phase,
+                reconcile_after=reconcile_after,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        return isinstance(result, CursorResult) and result.rowcount == 1
+
+    async def mark_status(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        status: str,
+    ) -> bool:
+        result = await self._session.execute(
+            update(ArtifactStorageOperationRecord)
+            .where(
+                ArtifactStorageOperationRecord.id == operation_id,
+                ArtifactStorageOperationRecord.status == "pending",
+                ArtifactStorageOperationRecord.phase == expected_phase,
+                ArtifactStorageOperationRecord.lease_owner == lease_owner,
+            )
+            .values(
+                status=status,
+                lease_owner=None,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        return isinstance(result, CursorResult) and result.rowcount == 1
+
+    async def release_claim(
+        self,
+        *,
+        operation_id: UUID,
+        expected_phase: str,
+        lease_owner: UUID,
+        reconcile_after: datetime,
+    ) -> bool:
+        result = await self._session.execute(
+            update(ArtifactStorageOperationRecord)
+            .where(
+                ArtifactStorageOperationRecord.id == operation_id,
+                ArtifactStorageOperationRecord.status == "pending",
+                ArtifactStorageOperationRecord.phase == expected_phase,
+                ArtifactStorageOperationRecord.lease_owner == lease_owner,
+            )
+            .values(
+                lease_owner=None,
+                reconcile_after=reconcile_after,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        return isinstance(result, CursorResult) and result.rowcount == 1
+
+    async def claim_pending(
+        self,
+        *,
+        lease_owner: UUID,
+        claimed_at: datetime,
+        lease_expires_at: datetime,
+        limit: int = 100,
+    ) -> list[StorageOperation]:
         records = (
             await self._session.execute(
                 select(ArtifactStorageOperationRecord)
-                .where(ArtifactStorageOperationRecord.status == "pending")
+                .where(
+                    ArtifactStorageOperationRecord.status == "pending",
+                    ArtifactStorageOperationRecord.reconcile_after <= claimed_at,
+                )
                 .order_by(
                     ArtifactStorageOperationRecord.created_at,
                     ArtifactStorageOperationRecord.id,
@@ -284,17 +390,27 @@ class SqlAlchemyArtifactStorageOperationRepository:
                 .with_for_update(skip_locked=True)
             )
         ).scalars()
-        return [
-            StorageOperation(
-                id=record.id,
-                tenant_id=record.tenant_id,
-                action=record.action,
-                entity_kind=record.entity_kind,
-                entity_id=record.entity_id,
-                storage_key=record.storage_key,
-                status=record.status,
-                created_at=_utc(record.created_at),
-                updated_at=_utc(record.updated_at),
-            )
-            for record in records
-        ]
+        claimed_records = list(records)
+        for record in claimed_records:
+            record.lease_owner = lease_owner
+            record.reconcile_after = lease_expires_at
+            record.updated_at = claimed_at
+        await self._session.flush()
+        return [self._to_entity(record) for record in claimed_records]
+
+    @staticmethod
+    def _to_entity(record: ArtifactStorageOperationRecord) -> StorageOperation:
+        return StorageOperation(
+            id=record.id,
+            tenant_id=record.tenant_id,
+            action=record.action,
+            entity_kind=record.entity_kind,
+            entity_id=record.entity_id,
+            storage_key=record.storage_key,
+            status=record.status,
+            phase=record.phase,
+            lease_owner=record.lease_owner,
+            reconcile_after=_utc(record.reconcile_after),
+            created_at=_utc(record.created_at),
+            updated_at=_utc(record.updated_at),
+        )

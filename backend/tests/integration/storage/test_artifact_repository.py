@@ -1,6 +1,6 @@
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -12,6 +12,7 @@ from agent_platform.infrastructure.database.engine import create_database_engine
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
 )
@@ -22,7 +23,12 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunEventRepository,
 )
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
-from agent_platform.platform.artifacts.entities import Artifact, File, TaskAttachment
+from agent_platform.platform.artifacts.entities import (
+    Artifact,
+    File,
+    StorageOperation,
+    TaskAttachment,
+)
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 
 
@@ -238,5 +244,82 @@ async def test_real_postgres_artifact_repositories_enforce_composite_tenant_boun
             with pytest.raises(IntegrityError):
                 await attachments.add(cross_tenant_attachment)
             await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protected() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("需要 TEST_DATABASE_URL 才运行真实 PostgreSQL Saga 领取测试")
+
+    engine = create_database_engine(database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = uuid4()
+    foreground_owner = uuid4()
+    first_reconciler = uuid4()
+    second_reconciler = uuid4()
+    expired_at = datetime.now(UTC) - timedelta(minutes=10)
+    operation = StorageOperation.pending(
+        tenant_id=tenant_id,
+        action="put",
+        entity_kind="artifact",
+        entity_id=uuid4(),
+        storage_key=f"saga/{uuid4()}",
+        lease_owner=foreground_owner,
+        now=expired_at,
+        lease_duration=timedelta(minutes=1),
+    )
+    try:
+        async with sessions() as setup_session:
+            setup_session.add(
+                TenantRecord(
+                    id=tenant_id,
+                    name="Saga 租约租户",
+                    slug=f"artifact-saga-{tenant_id}",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await setup_session.flush()
+            await SqlAlchemyArtifactStorageOperationRepository(setup_session).add(operation)
+            await setup_session.commit()
+
+        async with sessions() as first_session, sessions() as second_session:
+            first_repository = SqlAlchemyArtifactStorageOperationRepository(first_session)
+            second_repository = SqlAlchemyArtifactStorageOperationRepository(second_session)
+            claimed_at = datetime.now(UTC)
+            first_claim = await first_repository.claim_pending(
+                lease_owner=first_reconciler,
+                claimed_at=claimed_at,
+                lease_expires_at=claimed_at + timedelta(minutes=5),
+                limit=10,
+            )
+            second_claim = await second_repository.claim_pending(
+                lease_owner=second_reconciler,
+                claimed_at=claimed_at,
+                lease_expires_at=claimed_at + timedelta(minutes=5),
+                limit=10,
+            )
+            assert [item.id for item in first_claim] == [operation.id]
+            assert second_claim == []
+            await first_session.commit()
+            await second_session.rollback()
+
+        async with sessions() as cas_session:
+            repository = SqlAlchemyArtifactStorageOperationRepository(cas_session)
+            assert not await repository.mark_status(
+                operation_id=operation.id,
+                expected_phase="intent",
+                lease_owner=foreground_owner,
+                status="completed",
+            )
+            assert await repository.mark_status(
+                operation_id=operation.id,
+                expected_phase="intent",
+                lease_owner=first_reconciler,
+                status="compensated",
+            )
+            await cas_session.commit()
     finally:
         await engine.dispose()

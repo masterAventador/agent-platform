@@ -1,8 +1,9 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from agent_platform.platform.artifacts.entities import Artifact, File, StorageOperation
 from agent_platform.platform.artifacts.ports import (
@@ -15,6 +16,12 @@ from agent_platform.platform.artifacts.ports import (
 )
 
 logger = logging.getLogger(__name__)
+
+STORAGE_OPERATION_LEASE = timedelta(minutes=5)
+
+
+class StorageOperationLeaseLost(RuntimeError):
+    pass
 
 
 class ArtifactService:
@@ -49,26 +56,52 @@ class ArtifactService:
             content=content,
         )
         if self._operations is not None and commit is not None:
+            lease_owner = uuid4()
             operation = StorageOperation.pending(
                 tenant_id=file.tenant_id,
                 action="put",
                 entity_kind="file",
                 entity_id=file.id,
                 storage_key=file.storage_key,
+                lease_owner=lease_owner,
             )
             await self._operations.add(operation)
             await commit()
-            await self._await_storage(
-                self._storage.put(
-                    key=file.storage_key,
-                    content=content,
-                    media_type=file.media_type,
+            try:
+                await self._await_storage(
+                    self._storage.put(
+                        key=file.storage_key,
+                        content=content,
+                        media_type=file.media_type,
+                    )
                 )
+            except BaseException:
+                await asyncio.shield(
+                    self._release_for_reconciliation(
+                        operation=operation,
+                        expected_phase="intent",
+                        lease_owner=lease_owner,
+                        commit=commit,
+                    )
+                )
+                raise
+            await self._advance_foreground_phase(
+                operation=operation,
+                expected_phase="intent",
+                phase="storage_applied",
+                lease_owner=lease_owner,
+                commit=commit,
+            )
+            await self._lock_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
             )
             await self._files.add(file)
-            await self._operations.mark_status(
-                operation_id=operation.id,
-                status="completed",
+            await self._complete_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
             )
             await commit()
             return file
@@ -118,28 +151,54 @@ class ArtifactService:
             content=content,
         )
         if self._operations is not None and commit is not None:
+            lease_owner = uuid4()
             operation = StorageOperation.pending(
                 tenant_id=artifact.tenant_id,
                 action="put",
                 entity_kind="artifact",
                 entity_id=artifact.id,
                 storage_key=artifact.storage_key,
+                lease_owner=lease_owner,
             )
             await self._operations.add(operation)
             await commit()
-            await self._await_storage(
-                self._storage.put(
-                    key=artifact.storage_key,
-                    content=content,
-                    media_type=artifact.media_type,
+            try:
+                await self._await_storage(
+                    self._storage.put(
+                        key=artifact.storage_key,
+                        content=content,
+                        media_type=artifact.media_type,
+                    )
                 )
+            except BaseException:
+                await asyncio.shield(
+                    self._release_for_reconciliation(
+                        operation=operation,
+                        expected_phase="intent",
+                        lease_owner=lease_owner,
+                        commit=commit,
+                    )
+                )
+                raise
+            await self._advance_foreground_phase(
+                operation=operation,
+                expected_phase="intent",
+                phase="storage_applied",
+                lease_owner=lease_owner,
+                commit=commit,
+            )
+            await self._lock_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
             )
             await repository.add(artifact)
             if before_commit is not None:
                 await before_commit(artifact)
-            await self._operations.mark_status(
-                operation_id=operation.id,
-                status="completed",
+            await self._complete_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
             )
             await commit()
             return artifact
@@ -179,12 +238,15 @@ class ArtifactService:
     ) -> None:
         repository = self._required_artifact_repository()
         if self._operations is not None and commit is not None:
+            lease_owner = uuid4()
             operation = StorageOperation.pending(
                 tenant_id=artifact.tenant_id,
                 action="delete",
                 entity_kind="artifact",
                 entity_id=artifact.id,
                 storage_key=artifact.storage_key,
+                lease_owner=lease_owner,
+                phase="metadata_applied",
             )
             await self._operations.add(operation)
             deleted = await repository.delete(
@@ -194,10 +256,34 @@ class ArtifactService:
             if not deleted:
                 raise RuntimeError("artifact metadata disappeared during delete")
             await commit()
-            await self._await_storage(self._storage.delete(key=artifact.storage_key))
-            await self._operations.mark_status(
-                operation_id=operation.id,
-                status="completed",
+            try:
+                await self._await_storage(self._storage.delete(key=artifact.storage_key))
+            except BaseException:
+                await asyncio.shield(
+                    self._release_for_reconciliation(
+                        operation=operation,
+                        expected_phase="metadata_applied",
+                        lease_owner=lease_owner,
+                        commit=commit,
+                    )
+                )
+                raise
+            await self._advance_foreground_phase(
+                operation=operation,
+                expected_phase="metadata_applied",
+                phase="storage_applied",
+                lease_owner=lease_owner,
+                commit=commit,
+            )
+            await self._lock_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
+            )
+            await self._complete_foreground_operation(
+                operation=operation,
+                expected_phase="storage_applied",
+                lease_owner=lease_owner,
             )
             await commit()
             return
@@ -236,27 +322,127 @@ class ArtifactService:
     ) -> int:
         if self._operations is None:
             return 0
+        lease_owner = uuid4()
+        claimed_at = datetime.now(UTC)
+        operations = await self._operations.claim_pending(
+            lease_owner=lease_owner,
+            claimed_at=claimed_at,
+            lease_expires_at=claimed_at + STORAGE_OPERATION_LEASE,
+            limit=limit,
+        )
+        if not operations:
+            return 0
+        # 先提交领取结果，再访问对象存储；其他进程只能在租约到期后接管。
+        await commit()
         reconciled = 0
-        for operation in await self._operations.list_pending(limit=limit):
-            if operation.action == "put":
-                exists = await self._entity_exists(operation)
-                if exists:
-                    status = "completed"
+        for operation in operations:
+            try:
+                if operation.action == "put":
+                    exists = await self._entity_exists(operation)
+                    if exists:
+                        status = "completed"
+                    else:
+                        await self._await_storage(
+                            self._storage.delete(key=operation.storage_key)
+                        )
+                        status = "compensated"
                 else:
                     await self._await_storage(
                         self._storage.delete(key=operation.storage_key)
                     )
-                    status = "compensated"
-            else:
-                await self._await_storage(self._storage.delete(key=operation.storage_key))
-                status = "completed"
-            await self._operations.mark_status(
+                    status = "completed"
+            except BaseException:
+                await asyncio.shield(
+                    self._release_for_reconciliation(
+                        operation=operation,
+                        expected_phase=operation.phase,
+                        lease_owner=lease_owner,
+                        commit=commit,
+                    )
+                )
+                raise
+            updated = await self._operations.mark_status(
                 operation_id=operation.id,
+                expected_phase=operation.phase,
+                lease_owner=lease_owner,
                 status=status,
             )
+            if not updated:
+                # 所有权已被别的进程接管时，禁止陈旧协调器覆盖新状态。
+                continue
             await commit()
             reconciled += 1
         return reconciled
+
+    async def _advance_foreground_phase(
+        self,
+        *,
+        operation: StorageOperation,
+        expected_phase: str,
+        phase: str,
+        lease_owner: UUID,
+        commit: Callable[[], Awaitable[None]],
+    ) -> None:
+        operations = self._required_operation_repository()
+        updated = await operations.advance_phase(
+            operation_id=operation.id,
+            expected_phase=expected_phase,
+            lease_owner=lease_owner,
+            phase=phase,
+            reconcile_after=datetime.now(UTC) + STORAGE_OPERATION_LEASE,
+        )
+        if not updated:
+            raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+        await commit()
+
+    async def _lock_foreground_operation(
+        self,
+        *,
+        operation: StorageOperation,
+        expected_phase: str,
+        lease_owner: UUID,
+    ) -> None:
+        locked = await self._required_operation_repository().lock_owned(
+            operation_id=operation.id,
+            expected_phase=expected_phase,
+            lease_owner=lease_owner,
+            now=datetime.now(UTC),
+        )
+        if not locked:
+            raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+
+    async def _complete_foreground_operation(
+        self,
+        *,
+        operation: StorageOperation,
+        expected_phase: str,
+        lease_owner: UUID,
+    ) -> None:
+        updated = await self._required_operation_repository().mark_status(
+            operation_id=operation.id,
+            expected_phase=expected_phase,
+            lease_owner=lease_owner,
+            status="completed",
+        )
+        if not updated:
+            raise StorageOperationLeaseLost("artifact storage operation lease was lost")
+
+    async def _release_for_reconciliation(
+        self,
+        *,
+        operation: StorageOperation,
+        expected_phase: str,
+        lease_owner: UUID,
+        commit: Callable[[], Awaitable[None]],
+    ) -> None:
+        released = await self._required_operation_repository().release_claim(
+            operation_id=operation.id,
+            expected_phase=expected_phase,
+            lease_owner=lease_owner,
+            reconcile_after=datetime.now(UTC),
+        )
+        if released:
+            await commit()
 
     async def _entity_exists(self, operation: StorageOperation) -> bool:
         if operation.entity_kind == "file":
@@ -298,6 +484,11 @@ class ArtifactService:
         if self._artifacts is None:
             raise RuntimeError("artifact repository is not configured")
         return self._artifacts
+
+    def _required_operation_repository(self) -> StorageOperationRepository:
+        if self._operations is None:
+            raise RuntimeError("artifact storage operation repository is not configured")
+        return self._operations
 
     @staticmethod
     def _assert_integrity(

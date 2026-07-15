@@ -329,15 +329,18 @@ if [[ ! -f "${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}" ]]; then
   printf 'MVP artifact flow did not record run and artifact IDs\n' >&2
   exit 1
 fi
-IFS='|' read -r MVP_ARTIFACT_RUN_ID MVP_ARTIFACT_ID \
-  <"${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}"
+if ! IFS='|' read -r MVP_ARTIFACT_RUN_ID MVP_ARTIFACT_ID \
+  <"${MVP_WEB_FLOW_ARTIFACT_RESULT_FILE}"; then
+  printf 'MVP artifact flow could not read its result IDs\n' >&2
+  exit 1
+fi
 UUID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 if [[ ! "${MVP_ARTIFACT_RUN_ID}" =~ ${UUID_PATTERN} || \
   ! "${MVP_ARTIFACT_ID}" =~ ${UUID_PATTERN} ]]; then
   printf 'MVP artifact flow recorded invalid IDs\n' >&2
   exit 1
 fi
-MVP_ARTIFACT_DATABASE_STATE="$(docker compose -p "${PROFILE_NAME}-core" \
+if ! MVP_ARTIFACT_DATABASE_STATE="$(docker compose -p "${PROFILE_NAME}-core" \
   --env-file "${RUNTIME_DIR}/core.env" \
   -f "${ROOT_DIR}/infra/compose/core.yml" \
   exec -T postgres psql -U agent_platform -d agent_platform -At \
@@ -358,9 +361,19 @@ MVP_ARTIFACT_DATABASE_STATE="$(docker compose -p "${PROFILE_NAME}-core" \
        SELECT 1 FROM artifact_storage_operations o
        WHERE o.entity_id = '${MVP_ARTIFACT_ID}'::uuid
          AND o.action = 'delete' AND o.status = 'completed'
+     )::text || '|' ||
+     EXISTS (
+       SELECT 1 FROM task_attachments ta
+       JOIN files f ON f.tenant_id = ta.tenant_id AND f.id = ta.file_id
+       WHERE ta.run_id = r.id
+         AND f.name = 'brief.txt'
+         AND ta.workspace_path LIKE 'inputs/%/brief.txt'
      )::text
-   FROM runs r WHERE r.id = '${MVP_ARTIFACT_RUN_ID}'::uuid")"
-if [[ "${MVP_ARTIFACT_DATABASE_STATE}" != "completed|true|true|true|true" ]]; then
+   FROM runs r WHERE r.id = '${MVP_ARTIFACT_RUN_ID}'::uuid")"; then
+  printf 'MVP artifact persistence/deletion query failed\n' >&2
+  exit 1
+fi
+if [[ "${MVP_ARTIFACT_DATABASE_STATE}" != "completed|true|true|true|true|true" ]]; then
   printf 'MVP artifact persistence/deletion check failed: %s\n' \
     "${MVP_ARTIFACT_DATABASE_STATE}" >&2
   exit 1
@@ -375,19 +388,62 @@ if [[ ! "${MVP_ARTIFACT_TENANT_ID}" =~ ${UUID_PATTERN} ]]; then
   printf 'MVP artifact flow could not resolve its tenant\n' >&2
   exit 1
 fi
-docker compose -p "${PROFILE_NAME}-core" \
+MVP_ATTACHMENT_FILE_ID="$(docker compose -p "${PROFILE_NAME}-core" \
   --env-file "${RUNTIME_DIR}/core.env" \
-  -f "${ROOT_DIR}/infra/compose/core.yml" exec -T minio \
-  test ! -f "/data/agent-platform/tenants/${MVP_ARTIFACT_TENANT_ID}/runs/${MVP_ARTIFACT_RUN_ID}/artifacts/${MVP_ARTIFACT_ID}"
+  -f "${ROOT_DIR}/infra/compose/core.yml" \
+  exec -T postgres psql -U agent_platform -d agent_platform -At \
+  -v ON_ERROR_STOP=1 -c \
+  "SELECT file_id FROM task_attachments
+   WHERE run_id = '${MVP_ARTIFACT_RUN_ID}'::uuid
+   ORDER BY created_at LIMIT 1")"
+if [[ ! "${MVP_ATTACHMENT_FILE_ID}" =~ ${UUID_PATTERN} ]]; then
+  printf 'MVP artifact flow could not resolve its attachment file\n' >&2
+  exit 1
+fi
+MINIO_ROOT_USER="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_USER)"
+MINIO_ROOT_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" MINIO_ROOT_PASSWORD)"
+if ! MVP_MINIO_ENDPOINT="127.0.0.1:${MINIO_API_PORT}" \
+  MVP_MINIO_ACCESS_KEY="${MINIO_ROOT_USER}" \
+  MVP_MINIO_SECRET_KEY="${MINIO_ROOT_PASSWORD}" \
+  MVP_ATTACHMENT_OBJECT_KEY="tenants/${MVP_ARTIFACT_TENANT_ID}/files/${MVP_ATTACHMENT_FILE_ID}" \
+  MVP_DELETED_ARTIFACT_OBJECT_KEY="tenants/${MVP_ARTIFACT_TENANT_ID}/runs/${MVP_ARTIFACT_RUN_ID}/artifacts/${MVP_ARTIFACT_ID}" \
+  uv run --project "${ROOT_DIR}/backend" --frozen --no-dev python - <<'PY'
+import os
+
+from minio import Minio
+from minio.error import S3Error
+
+client = Minio(
+    os.environ["MVP_MINIO_ENDPOINT"],
+    access_key=os.environ["MVP_MINIO_ACCESS_KEY"],
+    secret_key=os.environ["MVP_MINIO_SECRET_KEY"],
+    secure=False,
+)
+bucket = "agent-platform-artifacts"
+client.stat_object(bucket, os.environ["MVP_ATTACHMENT_OBJECT_KEY"])
+try:
+    client.stat_object(bucket, os.environ["MVP_DELETED_ARTIFACT_OBJECT_KEY"])
+except S3Error as exc:
+    if exc.code != "NoSuchKey":
+        raise
+else:
+    raise SystemExit("deleted artifact object still exists")
+PY
+then
+  printf 'MVP artifact MinIO object lifecycle check failed\n' >&2
+  exit 1
+fi
+unset MINIO_ROOT_USER MINIO_ROOT_PASSWORD
 printf 'MVP artifact flow persisted event/saga state and removed metadata/object through the real UI\n'
 
 POSTGRES_PASSWORD="$(read_env_value "${RUNTIME_DIR}/core.env" POSTGRES_PASSWORD)"
 TEST_DATABASE_URL="postgresql+asyncpg://agent_platform:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT}/agent_platform" \
   uv run --project "${ROOT_DIR}/backend" --frozen \
   pytest -q \
-  "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_artifact_repositories_enforce_composite_tenant_boundaries"
+  "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_artifact_repositories_enforce_composite_tenant_boundaries" \
+  "${ROOT_DIR}/backend/tests/integration/storage/test_artifact_repository.py::test_real_postgres_storage_operation_claim_is_exclusive_and_cas_protected"
 unset POSTGRES_PASSWORD
-printf 'MVP artifact event sequence allocation passed under real PostgreSQL concurrency\n'
+printf 'MVP artifact tenant boundary and Saga claim/CAS passed under real PostgreSQL concurrency\n'
 
 docker compose -p "${PROFILE_NAME}-litellm" \
   --env-file "${RUNTIME_DIR}/litellm.env" \
