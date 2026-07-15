@@ -2,12 +2,20 @@ import { z } from 'zod'
 
 const resourceDeclaration = z.string().regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/)
 
+export const resourceDeclarationsSchema = z.array(resourceDeclaration).min(1).superRefine(
+  (declarations, context) => {
+    if (new Set(declarations).size !== declarations.length) {
+      context.addIssue({ code: 'custom', message: 'duplicate resource declaration' })
+    }
+  },
+)
+
 const capabilityRegistryEntrySchema = z.object({
   capability_id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   deployment_installed: z.boolean(),
   tenant_entitled: z.boolean(),
-  frontend_entries: z.array(resourceDeclaration).min(1),
-  permissions: z.array(resourceDeclaration).min(1),
+  frontend_entries: resourceDeclarationsSchema,
+  permissions: resourceDeclarationsSchema,
 }).strict()
 
 const capabilityRegistrySchema = z.object({
@@ -65,6 +73,10 @@ export function resolveCapabilityAccess(
 }
 
 function sameDeclarations(actual: readonly string[], expected: readonly string[]): boolean {
-  return actual.length === expected.length
-    && actual.every((declaration) => expected.includes(declaration))
+  const actualDeclarations = new Set(actual)
+  const expectedDeclarations = new Set(expected)
+  return actualDeclarations.size === actual.length
+    && expectedDeclarations.size === expected.length
+    && actualDeclarations.size === expectedDeclarations.size
+    && [...actualDeclarations].every((declaration) => expectedDeclarations.has(declaration))
 }

@@ -77,6 +77,60 @@ describe('authorized frontend capability module loading', () => {
     expect(load).not.toHaveBeenCalled()
   })
 
+  it.each([
+    [
+      'permissions 重复并缺项',
+      { ...capability, permissions: ['social.read', 'social.read', 'social.manage'] },
+      {},
+    ],
+    [
+      'frontend_entries 重复并缺项',
+      { ...capability, frontend_entries: ['social.routes.v1', 'social.routes.v1'] },
+      { frontendEntries: ['social.routes.v1', 'social.settings.v1'] },
+    ],
+  ])('服务端 %s 时视为畸形且不执行模块 loader', async (
+    _name,
+    registryCapability,
+    descriptorOverride,
+  ) => {
+    const load = vi.fn().mockResolvedValue(module)
+
+    await expect(loadAuthorizedFrontendCapabilityModules(
+      [registryCapability],
+      new Set(permissions),
+      [{ ...descriptor(load), ...descriptorOverride }],
+    )).rejects.toThrow()
+
+    expect(load).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'permissions',
+      { permissions: ['social.read', 'social.read', 'social.manage'] },
+      capability,
+    ],
+    [
+      'frontendEntries',
+      { frontendEntries: ['social.routes.v1', 'social.routes.v1'] },
+      { ...capability, frontend_entries: ['social.routes.v1', 'social.settings.v1'] },
+    ],
+  ])('静态 descriptor 的 %s 重复时视为畸形且不执行 loader', async (
+    _field,
+    override,
+    registryCapability,
+  ) => {
+    const load = vi.fn().mockResolvedValue(module)
+
+    await expect(loadAuthorizedFrontendCapabilityModules(
+      [registryCapability],
+      new Set(permissions),
+      [{ ...descriptor(load), ...override }],
+    )).rejects.toThrow()
+
+    expect(load).not.toHaveBeenCalled()
+  })
+
   it('仅三层满足且 frontend_entries 与公开元数据完全一致时加载一次', async () => {
     const load = vi.fn().mockResolvedValue(module)
 

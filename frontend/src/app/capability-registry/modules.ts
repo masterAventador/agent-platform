@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import {
   parseCapabilityRegistryEntries,
+  resourceDeclarationsSchema,
   resolveCapabilityAccess,
   type CapabilityAccess,
   type CapabilityRegistryEntry,
@@ -34,8 +35,8 @@ export interface ResolvedFrontendCapabilityModule {
 const descriptorSchema = z.object({
   schema_version: z.literal('1.0'),
   capability_id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  frontend_entries: z.array(z.string()).min(1),
-  permissions: z.array(z.string()).min(1),
+  frontend_entries: resourceDeclarationsSchema,
+  permissions: resourceDeclarationsSchema,
   navigation: z.array(z.object({ label: z.string().min(1), path: z.string().startsWith('/') })),
   route_paths: z.array(z.string().startsWith('/')).min(1),
 }).strict()
@@ -70,6 +71,10 @@ export async function loadAuthorizedFrontendCapabilityModules(
   descriptors: readonly FrontendCapabilityDescriptor[] = frontendCapabilityDescriptors,
 ): Promise<ResolvedFrontendCapabilityModule[]> {
   const capabilities = parseCapabilityRegistryEntries(input)
+  descriptors.forEach((descriptor) => {
+    resourceDeclarationsSchema.parse(descriptor.frontendEntries)
+    resourceDeclarationsSchema.parse(descriptor.permissions)
+  })
   return Promise.all(capabilities.map(async (capability) => {
     const descriptor = descriptors.find(
       (candidate) => candidate.capabilityId === capability.capability_id,
