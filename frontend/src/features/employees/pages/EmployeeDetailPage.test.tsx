@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Employee } from '../api/employees'
 import { useEmployee, usePublishEmployee } from '../api/queries'
+import { useCreateConversation } from '../../conversations/api/queries'
 import { useCreateRun } from '../../runs/api/queries'
 import { EmployeeDetailPage } from './EmployeeDetailPage'
 import { getPlatformAdapter } from '../../../platform'
@@ -14,6 +15,10 @@ import { deleteUnboundFile, uploadFile } from '../../runs/api/runs'
 vi.mock('../api/queries', () => ({
   useEmployee: vi.fn(),
   usePublishEmployee: vi.fn(),
+}))
+
+vi.mock('../../conversations/api/queries', () => ({
+  useCreateConversation: vi.fn(),
 }))
 
 vi.mock('../../runs/api/queries', () => ({
@@ -62,6 +67,7 @@ function renderPage(canManageEmployees = true, canExecuteRuns = true) {
           )}
         />
         <Route path="/employees/:employeeId/edit" element={<div>editor</div>} />
+        <Route path="/conversations/:conversationId" element={<div>conversation detail</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -83,6 +89,12 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
       error: null,
       mutateAsync: vi.fn(),
       reset: vi.fn(),
+    } as never)
+    vi.mocked(useCreateConversation).mockReturnValue({
+      isPending: false,
+      isError: false,
+      error: null,
+      mutateAsync: vi.fn(),
     } as never)
     vi.mocked(getPlatformAdapter).mockReturnValue({
       selectFile: vi.fn().mockResolvedValue({ name: 'brief.txt', bytes: new Uint8Array([1, 2]) }),
@@ -153,6 +165,7 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     renderPage(false)
 
     expect(screen.getByRole('button', { name: '发起任务' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '开始会话' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '编辑' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '发布员工' })).not.toBeInTheDocument()
     expect(screen.getByText('网关模型')).toBeInTheDocument()
@@ -170,7 +183,32 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     renderPage(true, false)
 
     expect(screen.queryByRole('button', { name: '发起任务' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '开始会话' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /编\s*辑/ })).toBeInTheDocument()
+  })
+
+  it('starts a durable conversation from a published conversation-enabled employee', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'conversation-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: { ...employee, status: 'published', published_version: 1 },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateConversation).mockReturnValue({
+      isPending: false,
+      isError: false,
+      error: null,
+      mutateAsync,
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '开始会话' }))
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
+      employeeId: 'employee-1',
+      title: '研究专员',
+    }))
+    expect(screen.getByText('conversation detail')).toBeInTheDocument()
   })
 
   it('selects and uploads an attachment before creating a file-enabled run', async () => {

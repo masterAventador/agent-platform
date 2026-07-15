@@ -61,6 +61,7 @@ class RunResponse(BaseModel):
     status: str
     error_code: str | None
     error_message: str | None
+    conversation_id: UUID | None
 
     @classmethod
     def from_entity(cls, run: Run) -> "RunResponse":
@@ -74,6 +75,7 @@ class RunResponse(BaseModel):
             status=run.status.value,
             error_code=run.error_code,
             error_message=run.error_message,
+            conversation_id=run.conversation_id,
         )
 
 

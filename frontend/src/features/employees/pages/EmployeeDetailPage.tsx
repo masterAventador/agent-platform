@@ -2,6 +2,7 @@ import { Alert, Button, Card, Descriptions, Flex, Input, Modal, Space, Spin, Tag
 import { useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
+import { useCreateConversation } from '../../conversations/api/queries'
 import { useCreateRun } from '../../runs/api/queries'
 import { deleteUnboundFile, uploadFile } from '../../runs/api/runs'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
@@ -30,6 +31,7 @@ export function EmployeeDetailPage({
   const publish = usePublishEmployee(employeeId ?? '')
   const navigate = useNavigate()
   const createRun = useCreateRun(employeeId ?? '')
+  const createConversation = useCreateConversation()
   const [runModalOpen, setRunModalOpen] = useState(false)
   const [task, setTask] = useState('')
   const [selectedFile, setSelectedFile] = useState<PlatformFile | null>(null)
@@ -50,6 +52,7 @@ export function EmployeeDetailPage({
   const data = employee.data
   const published = data.status === 'published'
   const configurationAvailable = isEmployeeConfigurationAvailable(data.definition)
+  const conversationAvailable = data.definition.capabilities.conversation
 
   return (
     <section>
@@ -69,6 +72,20 @@ export function EmployeeDetailPage({
               retainedFileIdRef.current = null
               setRunModalOpen(true)
             }}>发起任务</Button>
+          )}
+          {canExecuteRuns && published && configurationAvailable && conversationAvailable && (
+            <Button
+              loading={createConversation.isPending}
+              onClick={async () => {
+                const conversation = await createConversation.mutateAsync({
+                  employeeId: data.id,
+                  title: data.name,
+                })
+                navigate(`/conversations/${conversation.id}`)
+              }}
+            >
+              开始会话
+            </Button>
           )}
           {canManageEmployees && (
             <>
@@ -108,6 +125,14 @@ export function EmployeeDetailPage({
           type="error"
           showIcon
           title={getEmployeeApiErrorMessage(publish.error, '发布失败，请稍后重试')}
+        />
+      )}
+      {createConversation.isError && (
+        <Alert
+          className="employee-detail-card"
+          type="error"
+          showIcon
+          title={getEmployeeApiErrorMessage(createConversation.error, '会话创建失败，请稍后重试')}
         />
       )}
 

@@ -22,6 +22,7 @@ export interface Run {
   status: RunStatus
   error_code: string | null
   error_message: string | null
+  conversation_id: string | null
 }
 
 export interface RunEvent {

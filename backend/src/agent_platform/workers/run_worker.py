@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -12,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.audit import (
     SqlAlchemyToolAuditReader,
+)
+from agent_platform.infrastructure.database.repositories.conversations import (
+    SqlAlchemyConversationMessageRepository,
+    SqlAlchemyConversationRepository,
 )
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeVersionRepository,
@@ -36,6 +41,11 @@ from agent_platform.infrastructure.queue.redis_streams import (
     MalformedRunQueueMessage,
     RedisRunQueue,
     RunQueueDelivery,
+)
+from agent_platform.platform.conversations.entities import (
+    ConversationMessage,
+    ConversationMessageRole,
+    limit_conversation_message_content,
 )
 from agent_platform.platform.runs.commands import RunCommand
 from agent_platform.platform.runs.entities import Run, RunStatus
@@ -546,6 +556,11 @@ class RunWorker:
                 )
             events = SqlAlchemyRunEventRepository(session)
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=current,
+                history=history,
+            )
             if current.status != state.status:
                 if current.status in {
                     RunStatus.WAITING_FOR_INPUT,
@@ -777,15 +792,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
@@ -930,15 +949,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             await session.commit()
 
@@ -973,15 +996,19 @@ class RunWorker:
                 )
             )
             events = SqlAlchemyRunEventRepository(session)
-            await events.append(
-                PlatformEvent.create(
-                    tenant_id=run.tenant_id,
-                    employee_id=run.employee_id,
-                    run_id=run.id,
-                    sequence=await events.next_sequence(run_id=run.id),
-                    event_type=EventType.RUN_FAILED,
-                    payload={"code": error_code},
-                )
+            failed_event = PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=await events.next_sequence(run_id=run.id),
+                event_type=EventType.RUN_FAILED,
+                payload={"code": error_code},
+            )
+            await events.append(failed_event)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=run,
+                history=[failed_event],
             )
             if settle_approval_id is not None:
                 await self._settle_approval_commands(
@@ -1024,6 +1051,11 @@ class RunWorker:
                 and event.payload.get("approval_id") is not None
             }
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await self._append_conversation_messages_for_history(
+                session=session,
+                run=current,
+                history=history,
+            )
             stale_approval_ids = {
                 UUID(value) for value in existing_approvals if value != str(current_approval_id)
             }
@@ -1074,6 +1106,69 @@ class RunWorker:
                 continue
             await events.append(event.model_copy(update={"sequence": sequence}))
             sequence += 1
+
+    @staticmethod
+    async def _append_conversation_messages_for_history(
+        *,
+        session: AsyncSession,
+        run: Run,
+        history: list[PlatformEvent],
+    ) -> None:
+        if run.conversation_id is None:
+            return
+        conversations = SqlAlchemyConversationRepository(session)
+        conversation = await conversations.get(
+            tenant_id=run.tenant_id,
+            conversation_id=run.conversation_id,
+        )
+        if conversation is None:
+            return
+        messages = SqlAlchemyConversationMessageRepository(session)
+        for event in history:
+            role: ConversationMessageRole | None = None
+            content: str | None = None
+            if event.type is EventType.MESSAGE_OUTPUT:
+                role = ConversationMessageRole.ASSISTANT
+                content = limit_conversation_message_content(
+                    RunWorker._message_content(event.payload.get("content"))
+                )
+            elif event.type is EventType.RUN_FAILED:
+                role = ConversationMessageRole.ERROR
+                content = limit_conversation_message_content(
+                    RunWorker._message_content(
+                        event.payload.get("code") or event.payload.get("error_code") or "run_failed"
+                    )
+                )
+            if role is None or content is None:
+                continue
+            if await messages.exists_for_run_event(
+                tenant_id=run.tenant_id,
+                conversation_id=run.conversation_id,
+                run_id=run.id,
+                role=role,
+                content=content,
+            ):
+                continue
+            message = ConversationMessage.create(
+                tenant_id=run.tenant_id,
+                conversation_id=run.conversation_id,
+                sequence=await messages.next_sequence(
+                    tenant_id=run.tenant_id,
+                    conversation_id=run.conversation_id,
+                ),
+                role=role,
+                content=content,
+                run_id=run.id,
+            )
+            await messages.add(message)
+            await conversations.update(conversation.touch(message.created_at))
+            conversation = conversation.touch(message.created_at)
+
+    @staticmethod
+    def _message_content(value: JsonValue | object) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(TypeAdapter(JsonValue).validate_python(value), ensure_ascii=False)
 
     @staticmethod
     async def _settle_approval_commands(
