@@ -73,6 +73,17 @@ from agent_platform.workers.run_worker import (
 from agent_platform.workers.runtime_composition import UntrustedRuntimeDefinition
 
 
+def fail_conversation_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail(**_: object) -> None:
+        raise RuntimeError("conversation projection collision")
+
+    monkeypatch.setattr(
+        RunWorker,
+        "_append_conversation_messages_for_history",
+        staticmethod(fail),
+    )
+
+
 class CompletingRuntime:
     def __init__(self) -> None:
         self.events: list[PlatformEvent] = []
@@ -961,6 +972,87 @@ async def test_worker_bounds_long_message_output_without_blocking_run_completion
 
 
 @pytest.mark.asyncio
+async def test_worker_completion_survives_conversation_projection_failure(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_conversation_projection(monkeypatch)
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="投影失败不阻塞完成",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
+        input_data={"message": "输出"},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={"runtime_type": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(
+            RunQueueDelivery(
+                delivery_id="conversation-projection-fails-after-output",
+                message=RunQueueMessage(
+                    command_id=command.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            )
+        ),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="conversation-projection-failure-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    assert [event.type for event in events] == [
+        EventType.RUN_STARTED,
+        EventType.MESSAGE_OUTPUT,
+        EventType.RUN_COMPLETED,
+    ]
+    assert messages == []
+
+
+@pytest.mark.asyncio
 async def test_worker_observes_cancel_intent_during_blocking_start_and_stops_runtime(
     factory,
 ) -> None:
@@ -1722,6 +1814,84 @@ async def test_permanent_preparation_failure_is_persisted_and_acknowledged(facto
 
 
 @pytest.mark.asyncio
+async def test_preparation_failure_survives_conversation_projection_failure(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_conversation_projection(monkeypatch)
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="准备失败投影异常",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
+        input_data={},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    delivery = RunQueueDelivery(
+        delivery_id="preparation-projection-fails",
+        message=RunQueueMessage(
+            command_id=command.id,
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action="start",
+        ),
+    )
+    queue = OneMessageQueue(delivery)
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=PermanentFailingResolver(),
+        consumer_name="test-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["preparation-projection-fails"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+        ownership = await SqlAlchemyRuntimeOwnershipRepository(session).get(run_id=run.id)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert persisted is not None and persisted.status is RunStatus.FAILED
+    assert persisted.error_code == "invalid_runtime_definition"
+    assert events[-1].payload == {"code": "invalid_runtime_definition"}
+    assert command_processed is True
+    assert ownership is not None and ownership.owner_id is None
+    assert messages == []
+
+
+@pytest.mark.asyncio
 async def test_worker_uses_trusted_run_identity_and_prepared_employee_capabilities(factory) -> None:
     tenant_id = uuid4()
     user_id = uuid4()
@@ -1801,12 +1971,20 @@ async def test_worker_uses_trusted_run_identity_and_prepared_employee_capabiliti
 
 @pytest.mark.asyncio
 async def test_renewal_failure_marks_running_run_failed_and_releases_environment(factory) -> None:
-    run = Run.create(
+    conversation = Conversation.create(
         tenant_id=uuid4(),
         employee_id=uuid4(),
-        employee_version=1,
         created_by=uuid4(),
+        title="续租失败回写",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
         input_data={},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
     )
     command = RunCommand.create(
         run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
@@ -1821,6 +1999,7 @@ async def test_renewal_failure_marks_running_run_failed_and_releases_environment
         published_at=datetime.now(UTC),
     )
     async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
         await SqlAlchemyRunRepository(session).add(run)
         await SqlAlchemyEmployeeVersionRepository(session).add(version)
         await SqlAlchemyRunCommandRepository(session).add(command)
@@ -1860,6 +2039,92 @@ async def test_renewal_failure_marks_running_run_failed_and_releases_environment
         assert "controller-secret" not in repr(persisted)
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert events[-1].payload == {"code": "sandbox_lease_renewal_failed"}
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert [(message.role, message.content, message.run_id) for message in messages] == [
+        (ConversationMessageRole.ERROR, "sandbox_lease_renewal_failed", run.id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_renewal_failure_releases_runtime_when_conversation_projection_fails(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_conversation_projection(monkeypatch)
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="续租失败投影异常",
+    )
+    run = Run.create(
+        tenant_id=conversation.tenant_id,
+        employee_id=conversation.employee_id,
+        employee_version=1,
+        created_by=conversation.created_by,
+        input_data={},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    resolver = Resolver(InteractiveRuntime())
+    worker = RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(
+            RunQueueDelivery(
+                delivery_id="renew-projection-fails",
+                message=RunQueueMessage(
+                    command_id=command.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            )
+        ),
+        runtime_resolver=resolver,
+        consumer_name="test-worker",
+    )
+    await worker.run_once(block_ms=1)
+    assert resolver.prepared is not None
+    resolver.prepared.renew_error = RuntimeError("controller-secret")
+
+    with pytest.raises(RuntimeCleanupError, match="renewal failed"):
+        await worker.renew_active_runtimes()
+
+    assert resolver.prepared.close_calls == 1
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        ownership = await SqlAlchemyRuntimeOwnershipRepository(session).get(run_id=run.id)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert persisted is not None and persisted.status is RunStatus.FAILED
+    assert persisted.error_code == "sandbox_lease_renewal_failed"
+    assert ownership is not None and ownership.owner_id is None
+    assert messages == []
 
 
 @pytest.mark.asyncio
@@ -2494,13 +2759,21 @@ async def test_started_tool_without_advanced_checkpoint_fails_uncertain_without_
     factory,
 ) -> None:
     approval_id = uuid4()
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="孤儿运行失败回写",
+    )
     run = (
         Run.create(
-            tenant_id=uuid4(),
-            employee_id=uuid4(),
+            tenant_id=conversation.tenant_id,
+            employee_id=conversation.employee_id,
             employee_version=1,
-            created_by=uuid4(),
+            created_by=conversation.created_by,
             input_data={},
+            conversation_id=conversation.id,
+            thread_id=conversation.thread_id,
         )
         .transition_to(RunStatus.RUNNING)
         .transition_to(RunStatus.WAITING_FOR_APPROVAL)
@@ -2521,6 +2794,7 @@ async def test_started_tool_without_advanced_checkpoint_fails_uncertain_without_
         payload={"approval_id": str(approval_id)},
     )
     async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
         await SqlAlchemyRunRepository(session).add(run)
         await SqlAlchemyEmployeeVersionRepository(session).add(version)
         await SqlAlchemyRunCommandRepository(session).add(approval_command)
@@ -2569,11 +2843,124 @@ async def test_started_tool_without_advanced_checkpoint_fails_uncertain_without_
         assert persisted is not None and persisted.status is RunStatus.FAILED
         assert persisted.error_code == "tool_execution_uncertain"
         assert await SqlAlchemyRunCommandRepository(session).is_processed(approval_command.id)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert [(message.role, message.content, message.run_id) for message in messages] == [
+        (ConversationMessageRole.ERROR, "tool_execution_uncertain", run.id)
+    ]
     assert resolver.recovery_calls == [(run, version.definition)]
     assert resolver.prepared is not None and resolver.prepared.close_calls == 1
     assert len(runtime.recovered) == 1
     assert runtime.recovered[0][1] is RunStatus.WAITING_FOR_APPROVAL
     assert runtime.approvals == []
+
+
+@pytest.mark.asyncio
+async def test_orphaned_failure_settles_command_when_conversation_projection_fails(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_conversation_projection(monkeypatch)
+    approval_id = uuid4()
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="孤儿运行投影异常",
+    )
+    run = (
+        Run.create(
+            tenant_id=conversation.tenant_id,
+            employee_id=conversation.employee_id,
+            employee_version=1,
+            created_by=conversation.created_by,
+            input_data={},
+            conversation_id=conversation.id,
+            thread_id=conversation.thread_id,
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    approval_command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.APPROVE,
+        payload={"approval_id": str(approval_id)},
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(approval_command)
+        await SqlAlchemyRunEventRepository(session).append(
+            PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=1,
+                event_type=EventType.APPROVAL_REQUIRED,
+                payload={"approval_id": str(approval_id)},
+            )
+        )
+        await session.commit()
+    await SqlAlchemyToolAuditSink(factory).emit(
+        ToolAuditEvent(
+            event_type=AuditEventType.STARTED,
+            occurred_at=datetime.now(UTC),
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            employee_id=run.employee_id,
+            user_id=run.created_by,
+            tool_id=uuid4(),
+            tool_name="external_operation",
+            risk=None,
+            argument_summary=ArgumentSummary(keys=("value",), sha256="a" * 64, size_bytes=1),
+            invocation_id=approval_id,
+        )
+    )
+    runtime = ApprovalRecoverRuntime(approval_id)
+    resolver = RecoveringResolver(runtime)
+
+    assert (
+        await RunWorker(
+            session_factory=factory,
+            queue=MessageQueue([]),
+            runtime_resolver=resolver,
+            consumer_name="replacement",
+        ).recover_incomplete_runs()
+        == 0
+    )
+
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(
+            approval_command.id
+        )
+        ownership = await SqlAlchemyRuntimeOwnershipRepository(session).get(run_id=run.id)
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+    assert persisted is not None and persisted.status is RunStatus.FAILED
+    assert persisted.error_code == "tool_execution_uncertain"
+    assert command_processed is True
+    assert ownership is not None and ownership.owner_id is None
+    assert messages == []
+    assert resolver.prepared is not None and resolver.prepared.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2742,6 +3129,110 @@ async def test_recovered_next_interrupt_settles_old_approval_command(factory) ->
             after_sequence=0,
         )
         assert events[-1].payload["approval_id"] == str(current_approval_id)
+
+
+@pytest.mark.asyncio
+async def test_recovered_snapshot_survives_conversation_projection_failure(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fail_conversation_projection(monkeypatch)
+    old_approval_id = uuid4()
+    current_approval_id = uuid4()
+    conversation = Conversation.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        created_by=uuid4(),
+        title="恢复快照投影异常",
+    )
+    run = (
+        Run.create(
+            tenant_id=conversation.tenant_id,
+            employee_id=conversation.employee_id,
+            employee_version=1,
+            created_by=conversation.created_by,
+            input_data={},
+            conversation_id=conversation.id,
+            thread_id=conversation.thread_id,
+        )
+        .transition_to(RunStatus.RUNNING)
+        .transition_to(RunStatus.WAITING_FOR_APPROVAL)
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    old_command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.APPROVE,
+        payload={"approval_id": str(old_approval_id)},
+    )
+    async with factory() as session:
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(old_command)
+        await SqlAlchemyRunEventRepository(session).append(
+            PlatformEvent.create(
+                tenant_id=run.tenant_id,
+                employee_id=run.employee_id,
+                run_id=run.id,
+                sequence=1,
+                event_type=EventType.APPROVAL_REQUIRED,
+                payload={"approval_id": str(old_approval_id)},
+            )
+        )
+        await session.commit()
+    await SqlAlchemyToolAuditSink(factory).emit(
+        ToolAuditEvent(
+            event_type=AuditEventType.STARTED,
+            occurred_at=datetime.now(UTC),
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            employee_id=run.employee_id,
+            user_id=run.created_by,
+            tool_id=uuid4(),
+            tool_name="external_operation",
+            risk=None,
+            argument_summary=ArgumentSummary(keys=("value",), sha256="a" * 64, size_bytes=1),
+            invocation_id=old_approval_id,
+        )
+    )
+
+    assert (
+        await RunWorker(
+            session_factory=factory,
+            queue=MessageQueue([]),
+            runtime_resolver=RecoveringResolver(ApprovalRecoverRuntime(current_approval_id)),
+            consumer_name="replacement",
+        ).recover_incomplete_runs()
+        == 1
+    )
+
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+        )
+        assert await commands.is_processed(old_command.id)
+    assert persisted is not None and persisted.status is RunStatus.WAITING_FOR_APPROVAL
+    assert events[-1].payload["approval_id"] == str(current_approval_id)
+    assert messages == []
 
 
 @pytest.mark.asyncio

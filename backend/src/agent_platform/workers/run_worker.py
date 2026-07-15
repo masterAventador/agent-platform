@@ -9,6 +9,7 @@ from typing import Protocol, TypeVar
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue, TypeAdapter
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.audit import (
@@ -508,6 +509,7 @@ class RunWorker:
         history: list[PlatformEvent],
         additional_command_ids: tuple[UUID, ...] = (),
     ) -> RunStatus:
+        conversation_projection: tuple[Run, list[PlatformEvent]] | None = None
         async with self._session_factory() as session:
             await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
@@ -556,11 +558,7 @@ class RunWorker:
                 )
             events = SqlAlchemyRunEventRepository(session)
             await self._append_new_history(events=events, run_id=run.id, history=history)
-            await self._append_conversation_messages_for_history(
-                session=session,
-                run=current,
-                history=history,
-            )
+            conversation_projection = (current, history)
             if current.status != state.status:
                 if current.status in {
                     RunStatus.WAITING_FOR_INPUT,
@@ -581,7 +579,12 @@ class RunWorker:
                 if command_id != message_command_id:
                     await commands.mark_processed(command_id)
             await session.commit()
-            return state.status
+        if conversation_projection is not None:
+            await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
+        return state.status
 
     async def _start_cancellable_runtime(
         self,
@@ -766,6 +769,7 @@ class RunWorker:
         message_command_id: UUID,
         error_code: str,
     ) -> None:
+        conversation_projection: tuple[Run, list[PlatformEvent]] | None = None
         async with self._session_factory() as session:
             ownership = self._ownerships.get(run.id)
             await self._assert_owned(session=session, run_id=run.id)
@@ -801,11 +805,7 @@ class RunWorker:
                 payload={"code": error_code},
             )
             await events.append(failed_event)
-            await self._append_conversation_messages_for_history(
-                session=session,
-                run=run,
-                history=[failed_event],
-            )
+            conversation_projection = (run, [failed_event])
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
                 run_id=run.id,
@@ -814,6 +814,11 @@ class RunWorker:
             )
             await session.commit()
         self._ownerships.pop(run.id, None)
+        if conversation_projection is not None:
+            await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
 
     def _required_runtime(self, run_id: UUID) -> EmployeeRuntime:
         try:
@@ -930,6 +935,7 @@ class RunWorker:
                 logger.error("runtime_resolver_shutdown_failed", extra={})
 
     async def _persist_renewal_failure(self, run: Run) -> None:
+        conversation_projection: tuple[Run, list[PlatformEvent]] | None = None
         async with self._session_factory() as session:
             await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
@@ -958,12 +964,13 @@ class RunWorker:
                 payload={"code": error_code},
             )
             await events.append(failed_event)
-            await self._append_conversation_messages_for_history(
-                session=session,
-                run=run,
-                history=[failed_event],
-            )
+            conversation_projection = (run, [failed_event])
             await session.commit()
+        if conversation_projection is not None:
+            await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
 
     async def _persist_orphaned_run_failure(
         self,
@@ -972,6 +979,7 @@ class RunWorker:
         error_code: str,
         settle_approval_id: UUID | None = None,
     ) -> None:
+        conversation_projection: tuple[Run, list[PlatformEvent]] | None = None
         async with self._session_factory() as session:
             await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
@@ -1005,11 +1013,7 @@ class RunWorker:
                 payload={"code": error_code},
             )
             await events.append(failed_event)
-            await self._append_conversation_messages_for_history(
-                session=session,
-                run=run,
-                history=[failed_event],
-            )
+            conversation_projection = (run, [failed_event])
             if settle_approval_id is not None:
                 await self._settle_approval_commands(
                     session=session,
@@ -1024,6 +1028,11 @@ class RunWorker:
             )
             await session.commit()
         self._ownerships.pop(run.id, None)
+        if conversation_projection is not None:
+            await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
 
     async def _persist_recovered_snapshot(
         self,
@@ -1033,6 +1042,7 @@ class RunWorker:
         history: list[PlatformEvent],
         current_approval_id: UUID | None,
     ) -> RunStatus:
+        conversation_projection: tuple[Run, list[PlatformEvent]] | None = None
         async with self._session_factory() as session:
             await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
@@ -1051,11 +1061,7 @@ class RunWorker:
                 and event.payload.get("approval_id") is not None
             }
             await self._append_new_history(events=events, run_id=run.id, history=history)
-            await self._append_conversation_messages_for_history(
-                session=session,
-                run=current,
-                history=history,
-            )
+            conversation_projection = (current, history)
             stale_approval_ids = {
                 UUID(value) for value in existing_approvals if value != str(current_approval_id)
             }
@@ -1078,7 +1084,12 @@ class RunWorker:
                 )
                 await runs.update(current)
             await session.commit()
-            return state.status
+        if conversation_projection is not None:
+            await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
+        return state.status
 
     @staticmethod
     async def _append_new_history(
@@ -1106,6 +1117,51 @@ class RunWorker:
                 continue
             await events.append(event.model_copy(update={"sequence": sequence}))
             sequence += 1
+
+    async def _append_conversation_messages_for_history_safely(
+        self,
+        *,
+        run: Run,
+        history: list[PlatformEvent],
+    ) -> None:
+        if run.conversation_id is None or not history:
+            return
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            async with self._session_factory() as session:
+                try:
+                    await self._append_conversation_messages_for_history(
+                        session=session,
+                        run=run,
+                        history=history,
+                    )
+                    await session.commit()
+                    return
+                except IntegrityError as error:
+                    await session.rollback()
+                    log_extra = {
+                        "run_id": str(run.id),
+                        "conversation_id": str(run.conversation_id),
+                        "attempt": attempt,
+                        "error_type": type(error).__name__,
+                    }
+                    if attempt < max_attempts:
+                        logger.warning("conversation_projection_retry", extra=log_extra)
+                        continue
+                    logger.error("conversation_projection_failed", extra=log_extra)
+                    return
+                except Exception as error:
+                    await session.rollback()
+                    logger.error(
+                        "conversation_projection_failed",
+                        extra={
+                            "run_id": str(run.id),
+                            "conversation_id": str(run.conversation_id),
+                            "attempt": attempt,
+                            "error_type": type(error).__name__,
+                        },
+                    )
+                    return
 
     @staticmethod
     async def _append_conversation_messages_for_history(
