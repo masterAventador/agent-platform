@@ -1,6 +1,8 @@
+pub mod browser_session;
 pub mod credentials;
 pub mod local_executor;
 pub mod remembered_login;
+pub mod sidecar_package;
 
 use serde::Serialize;
 

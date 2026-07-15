@@ -1,6 +1,6 @@
 # Social Operations 本地执行器协议 v1
 
-此协议定义平台后端与 Tauri 受认证 Sidecar 之间的供应商无关消息格式。B01 已实现无固定端口的 Tauri stdio Sidecar 传输、随机会话认证和生命周期桥接；它只返回无业务副作用的版本化接收确认。设备注册、任务领取与持久化、浏览器自动化、平台账号和生产执行仍属于 B02 及后续任务。
+此协议定义平台后端与 Tauri 受认证 Sidecar 之间的供应商无关消息格式。B01 已实现无固定端口的 Tauri stdio Sidecar 传输、随机会话认证和生命周期桥接；它只返回无业务副作用的版本化接收确认。B02 已在能力包隔离层建立设备、任务领取、账号状态和安全 Sidecar 包管理，但协议的生产执行副作用仍属于 B03 及后续任务。
 
 ## 单一来源与边界
 
@@ -9,7 +9,9 @@
 - 10 个有效与 25 个无效回放样例：`contracts/fixtures/capabilities/social-operations/local-executor-v1/`；
 - `task_id`、`tenant_id`、`approval_id`、`audit_correlation_id` 和 `artifact_id` 都是 Core 资源的稳定引用，本协议不复制 Core Run、Approval、Audit 或 Artifact 领域模型；
 - B01 传输层由 Tauri 父进程通过匿名管道启动同源 Sidecar，256 位随机会话令牌只经 stdin bootstrap 传递，不进入参数、环境变量、日志或响应；每个后续 envelope 都必须携带该令牌，且不开放 TCP 监听；
-- 租户/设备授权、Entitlement、设备注册、任务持久化、完整 Schema/语义回放与审计接入仍由后续 Core/业务任务实现，B01 的传输认证和 Schema 校验都不能替代这些安全检查。
+- B02 能力服务对设备、账号和本地任务执行租户、所有者及权限校验，并提供 SQLite 隔离持久化适配器；生产 PostgreSQL、Entitlement、Core Audit 和能力宿主注册分别等待 Core 迁移、C17/C14 等主线门禁，不能把隔离适配器视为平台事实源；
+- B02 Sidecar 包只接受 HTTPS（测试可用 loopback HTTP）、Ed25519 有效签名、受限包大小和安全版本号，校验成功后才写入 App 私有目录；符号链接目录、无效签名、超限包和公共 HTTP 必须在落盘前拒绝；
+- Tauri 父进程对意外退出最多自动重启两次，显式停止不重启；成功业务往返后才重置崩溃计数，避免无限崩溃循环；诊断文本进入日志前必须移除 Bearer、Cookie、Token、密码和私有路径。
 
 跨语言消费者必须按以下顺序校验，禁止只生成类型后直接执行任务：
 

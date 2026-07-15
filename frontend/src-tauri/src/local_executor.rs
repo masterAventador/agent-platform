@@ -1,3 +1,4 @@
+use crate::sidecar_package::{CrashRecoveryAction, CrashRecoveryPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -45,9 +46,20 @@ struct RunningSidecar {
     session_token: String,
 }
 
-#[derive(Default)]
 pub struct LocalExecutorManager {
     sidecar: Option<RunningSidecar>,
+    desired_running: bool,
+    recovery_policy: CrashRecoveryPolicy,
+}
+
+impl Default for LocalExecutorManager {
+    fn default() -> Self {
+        Self {
+            sidecar: None,
+            desired_running: false,
+            recovery_policy: CrashRecoveryPolicy::new(2),
+        }
+    }
 }
 
 impl Drop for LocalExecutorManager {
@@ -68,6 +80,17 @@ impl LocalExecutorManager {
         };
         if exited {
             self.sidecar = None;
+            if self.desired_running {
+                match self.recovery_policy.on_unexpected_exit() {
+                    CrashRecoveryAction::Restart => {
+                        if let Err(error) = self.spawn_sidecar() {
+                            self.desired_running = false;
+                            return Err(error);
+                        }
+                    }
+                    CrashRecoveryAction::Stop => self.desired_running = false,
+                }
+            }
         }
         Ok(())
     }
@@ -86,6 +109,16 @@ impl LocalExecutorManager {
         if self.sidecar.is_some() {
             return Err(LocalExecutorError::AlreadyRunning);
         }
+        self.recovery_policy.reset_after_stable_start();
+        self.desired_running = true;
+        if let Err(error) = self.spawn_sidecar() {
+            self.desired_running = false;
+            return Err(error);
+        }
+        self.status()
+    }
+
+    fn spawn_sidecar(&mut self) -> Result<(), LocalExecutorError> {
         let session_token = new_session_token()?;
         let executable =
             std::env::current_exe().map_err(|_| LocalExecutorError::ProcessUnavailable)?;
@@ -114,7 +147,7 @@ impl LocalExecutorManager {
             stdout: BufReader::new(stdout),
             session_token,
         });
-        self.status()
+        Ok(())
     }
 
     fn invoke(&mut self, request: Value) -> Result<Value, LocalExecutorError> {
@@ -146,10 +179,15 @@ impl LocalExecutorManager {
         if response.is_empty() || response.len() > MAX_MESSAGE_BYTES {
             return Err(LocalExecutorError::IpcUnavailable);
         }
-        serde_json::from_str(&response).map_err(|_| LocalExecutorError::IpcUnavailable)
+        let response =
+            serde_json::from_str(&response).map_err(|_| LocalExecutorError::IpcUnavailable)?;
+        self.recovery_policy.reset_after_stable_start();
+        Ok(response)
     }
 
     fn stop(&mut self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        self.desired_running = false;
+        let _ = self.recovery_policy.on_clean_stop();
         if let Some(mut sidecar) = self.sidecar.take() {
             sidecar
                 .child

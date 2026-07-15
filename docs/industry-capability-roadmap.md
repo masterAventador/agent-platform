@@ -2,7 +2,7 @@
 
 > 文档性质：行业能力包功能清单、依赖实施顺序与完成状态的唯一执行台账
 > 建立日期：2026-07-14
-> 当前阶段：允许与 AI 中台 Core 隔离并行；B01 已完成，下一项为 B02
+> 当前阶段：允许与 AI 中台 Core 隔离并行；B02 待集成
 > 适用范围：`video-studio`、`social-operations` 及两者的组合工作流
 > 主要证据：[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md)
 
@@ -248,7 +248,9 @@ deployment_installed && tenant_entitled && user_permitted
 
 **所属：Social Operations 公共层**
 
-**状态：`⬜ 未开始`**
+**状态：`🧪 待集成`**
+
+**开始日期：2026-07-15**
 
 完成定义：
 
@@ -258,6 +260,8 @@ deployment_installed && tenant_entitled && user_permitted
 - 平台账号绑定企业、用户和设备，具备权限、审计和熔断状态；
 - 验证码或风控明确进入人工接管，不尝试绕过；
 - macOS/Windows 设备和受控测试账号 E2E 通过。
+
+隔离实现证据：设备注册/心跳/在线状态、租户与所有者权限、任务互斥领取/租约恢复/紧急停止、账号绑定/熔断/人工接管/注销已由能力服务、独立 API Router 与 SQLite 隔离适配器覆盖；Tauri 已覆盖 Ed25519 签名后安装、HTTPS/包大小/路径门禁、有界崩溃恢复、日志脱敏、App 私有浏览器目录和账户绑定 Cookie 加密。当前不能升级为完成：Core PostgreSQL/C14 Audit/C17 宿主与 Entitlement 尚未接入，真实签名发布链尚未提供，Windows 真实 App/Sidecar 与 macOS/Windows 受控真实账号 E2E 均未完成。
 
 ### B03 抖音单平台视频发布闭环
 
@@ -492,7 +496,7 @@ deployment_installed && tenant_entitled && user_permitted
 | 项目 | 当前结果 |
 | --- | --- |
 | `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；业务实现尚未开始 |
-| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest、本地执行器 v1 协议及 Tauri 无固定端口认证 stdio Sidecar；协议覆盖任务、步骤进度、人工接管和脱敏诊断事件及 Mock Host 严格回放；设备、账号和生产 RPA 实现留在 B02 及后续任务 |
+| `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest、本地执行器 v1 协议及 Tauri 无固定端口认证 stdio Sidecar；B02 隔离层补齐设备/账号/任务 API、SQLite 快照、签名包安装、有界崩溃恢复、私有浏览器 Profile 与 Cookie 加密；生产 PostgreSQL、Core Audit/Entitlement、真实签名发布和真实账号 RPA 仍待集成 |
 | Core 前置条件 | C01-C02 已完成；C03-C20 继续串行，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
@@ -504,6 +508,7 @@ deployment_installed && tenant_entitled && user_permitted
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 平台/版本 | 验证证据 |
 | --- | --- | --- | --- | --- | --- | --- |
 | B01 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | Mock Host / JSON Schema / macOS Tauri | 两个版本化 Manifest 已覆盖路由、Worker、权限、事件、前端、迁移、健康与桌面声明；Mock Host 四组合隔离及关闭门禁通过。本地执行器 v1 以 Pydantic 为单一来源导出 Draft 2020-12 Schema，10 个有效/25 个无效样例覆盖任务、取消、步骤进度、人工接管、诊断、身份、幂等、截止时间、治理引用、严格状态与脱敏语义。Tauri 现通过匿名 stdin/stdout 管道管理同源 Sidecar，使用 256 位随机会话令牌逐消息认证，不经参数/环境变量泄露且不监听 TCP；Rust 单元/stdio 回放 3 项与隐藏、无 Dock 的 macOS 真实桌面启动、调用、状态、停止生命周期 E2E 通过，完整原生套件 3 项通过。B01 只提供无业务副作用的版本化接收确认；设备注册、任务持久化、Sidecar 下载/签名/崩溃恢复、账号与 RPA 属于 B02，真实四组合回归按定义属于 B17。 |
-| B02-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
+| B02 | 待集成 | 2026-07-15 | — | 本任务提交 | Python / Rust 隔离测试 | 设备、任务、账号、持久化和独立 API 自动化通过；Sidecar 签名安装、包大小/HTTPS/符号链接门禁、最多两次崩溃恢复、日志脱敏、浏览器 Profile/Cookie 密文与人工接管状态测试通过。缺失门禁：Core PostgreSQL、C14 Audit、C17 宿主/Entitlement、真实签名发布链、Windows 真实 App/Sidecar 及 macOS/Windows 受控真实账号 E2E，因此严格保持 `🧪 待集成`。 |
+| B03-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。
