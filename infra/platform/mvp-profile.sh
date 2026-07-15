@@ -798,6 +798,7 @@ start_profile() {
   litellm_compose config --quiet
   app_compose config --quiet
   app_compose build migrate frontend
+  litellm_compose build litellm
   if [[ "${CORE_HAD_PREEXISTING_CONTAINERS}" != "true" ]]; then
     validate_host_ports_available \
       POSTGRES_PORT "${POSTGRES_PORT}" \

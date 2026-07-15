@@ -1,14 +1,18 @@
+from collections.abc import Callable
 from functools import partial
 from io import BytesIO
 from typing import Protocol, cast
 
 from anyio import to_thread
+from minio import Minio
 from minio.error import S3Error
 
+from agent_platform.config import AppSettings
 from agent_platform.infrastructure.object_storage.minio import (
     BUCKET_CREATION_RACE_ERROR_CODES,
     MinioClient,
 )
+from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 
 
 class MinioArtifactStorageProvider:
@@ -102,3 +106,61 @@ class TencentCosArtifactProvider:
             return body.read()
         finally:
             body.close()
+
+
+CosClientFactory = Callable[..., TencentCosClient]
+
+
+def _create_tencent_cos_client(
+    *,
+    region: str,
+    secret_id: str,
+    secret_key: str,
+    token: str | None,
+    scheme: str,
+) -> TencentCosClient:
+    from qcloud_cos import CosConfig, CosS3Client  # type: ignore[import-untyped]
+
+    config = CosConfig(
+        Region=region,
+        SecretId=secret_id,
+        SecretKey=secret_key,
+        Token=token,
+        Scheme=scheme,
+    )
+    return cast(TencentCosClient, CosS3Client(config))
+
+
+def create_artifact_storage_provider(
+    *,
+    settings: AppSettings,
+    minio_client: MinioClient | None = None,
+    cos_client_factory: CosClientFactory | None = None,
+) -> ArtifactStorageProvider:
+    if settings.artifact_storage_provider == "minio":
+        minio_storage_client = minio_client or cast(
+            MinioClient,
+            Minio(
+                settings.minio_endpoint,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=settings.minio_secure,
+            ),
+        )
+        return MinioArtifactStorageProvider(
+            client=minio_storage_client,
+            bucket=settings.artifact_storage_bucket,
+        )
+
+    factory = cos_client_factory or _create_tencent_cos_client
+    cos_client = factory(
+        region=cast(str, settings.cos_region),
+        secret_id=settings.cos_secret_id.get_secret_value(),
+        secret_key=settings.cos_secret_key.get_secret_value(),
+        token=settings.cos_token.get_secret_value() or None,
+        scheme=settings.cos_scheme,
+    )
+    return TencentCosArtifactProvider(
+        client=cos_client,
+        bucket=settings.artifact_storage_bucket,
+    )

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -16,9 +17,13 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
 )
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.employees import EmployeeRecord
-from agent_platform.infrastructure.database.repositories.runs import RunRecord
+from agent_platform.infrastructure.database.repositories.runs import (
+    RunRecord,
+    SqlAlchemyRunEventRepository,
+)
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
 from agent_platform.platform.artifacts.entities import Artifact, File, TaskAttachment
+from agent_platform.platform.runs.events import EventType, PlatformEvent
 
 
 @pytest.mark.asyncio
@@ -66,13 +71,9 @@ async def test_artifact_repositories_keep_tenant_and_run_boundaries() -> None:
         assert await files.get(tenant_id=tenant_id, file_id=file.id) == file
         assert await files.get(tenant_id=other_tenant_id, file_id=file.id) is None
         assert await attachments.list_for_run(tenant_id=tenant_id, run_id=run_id) == [attachment]
-        assert await attachments.list_for_run(
-            tenant_id=other_tenant_id, run_id=run_id
-        ) == []
+        assert await attachments.list_for_run(tenant_id=other_tenant_id, run_id=run_id) == []
         assert await artifacts.list_for_run(tenant_id=tenant_id, run_id=run_id) == [artifact]
-        assert await artifacts.get(
-            tenant_id=other_tenant_id, artifact_id=artifact.id
-        ) is None
+        assert await artifacts.get(tenant_id=other_tenant_id, artifact_id=artifact.id) is None
 
     await engine.dispose()
 
@@ -115,27 +116,29 @@ async def test_real_postgres_artifact_repositories_enforce_composite_tenant_boun
 
     try:
         async with sessions() as session:
-            session.add_all([
-                TenantRecord(
-                    id=tenant_id,
-                    name="产物租户",
-                    slug=f"artifacts-{tenant_id}",
-                    created_at=now,
-                ),
-                TenantRecord(
-                    id=other_tenant_id,
-                    name="其他租户",
-                    slug=f"artifacts-{other_tenant_id}",
-                    created_at=now,
-                ),
-                UserRecord(
-                    id=user_id,
-                    email=f"artifacts-{user_id}@example.com",
-                    password_hash="hash",
-                    email_verified=True,
-                    created_at=now,
-                ),
-            ])
+            session.add_all(
+                [
+                    TenantRecord(
+                        id=tenant_id,
+                        name="产物租户",
+                        slug=f"artifacts-{tenant_id}",
+                        created_at=now,
+                    ),
+                    TenantRecord(
+                        id=other_tenant_id,
+                        name="其他租户",
+                        slug=f"artifacts-{other_tenant_id}",
+                        created_at=now,
+                    ),
+                    UserRecord(
+                        id=user_id,
+                        email=f"artifacts-{user_id}@example.com",
+                        password_hash="hash",
+                        email_verified=True,
+                        created_at=now,
+                    ),
+                ]
+            )
             await session.flush()
             session.add(
                 EmployeeRecord(
@@ -191,12 +194,30 @@ async def test_real_postgres_artifact_repositories_enforce_composite_tenant_boun
             await artifacts.add(artifact)
             await session.commit()
 
-            assert await attachments.list_for_run(
-                tenant_id=tenant_id, run_id=run_id
-            ) == [attachment]
-            assert await artifacts.list_for_run(
-                tenant_id=tenant_id, run_id=run_id
-            ) == [artifact]
+            assert await attachments.list_for_run(tenant_id=tenant_id, run_id=run_id) == [
+                attachment
+            ]
+            assert await artifacts.list_for_run(tenant_id=tenant_id, run_id=run_id) == [artifact]
+
+            async def append_event(index: int) -> int:
+                async with sessions() as event_session:
+                    events = SqlAlchemyRunEventRepository(event_session)
+                    sequence = await events.next_sequence(run_id=run_id)
+                    await events.append(
+                        PlatformEvent.create(
+                            tenant_id=tenant_id,
+                            employee_id=employee_id,
+                            run_id=run_id,
+                            sequence=sequence,
+                            event_type=EventType.RUN_PROGRESS,
+                            payload={"index": index},
+                        )
+                    )
+                    await event_session.commit()
+                    return sequence
+
+            sequences = await asyncio.gather(*(append_event(index) for index in range(8)))
+            assert sorted(sequences) == list(range(1, 9))
 
             duplicate_path = TaskAttachment.create(
                 tenant_id=tenant_id,

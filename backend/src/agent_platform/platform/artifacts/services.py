@@ -4,12 +4,13 @@ from collections.abc import Awaitable, Callable
 from hashlib import sha256
 from uuid import UUID
 
-from agent_platform.platform.artifacts.entities import Artifact, File
+from agent_platform.platform.artifacts.entities import Artifact, File, StorageOperation
 from agent_platform.platform.artifacts.ports import (
     ArtifactRepository,
     ArtifactStorageProvider,
     ArtifactWorkspace,
     FileRepository,
+    StorageOperationRepository,
     TaskAttachmentRepository,
 )
 
@@ -22,10 +23,12 @@ class ArtifactService:
         *,
         file_repository: FileRepository,
         artifact_repository: ArtifactRepository | None = None,
+        operation_repository: StorageOperationRepository | None = None,
         storage: ArtifactStorageProvider,
     ) -> None:
         self._files = file_repository
         self._artifacts = artifact_repository
+        self._operations = operation_repository
         self._storage = storage
 
     async def upload_file(
@@ -45,6 +48,30 @@ class ArtifactService:
             media_type=media_type,
             content=content,
         )
+        if self._operations is not None and commit is not None:
+            operation = StorageOperation.pending(
+                tenant_id=file.tenant_id,
+                action="put",
+                entity_kind="file",
+                entity_id=file.id,
+                storage_key=file.storage_key,
+            )
+            await self._operations.add(operation)
+            await commit()
+            await self._await_storage(
+                self._storage.put(
+                    key=file.storage_key,
+                    content=content,
+                    media_type=file.media_type,
+                )
+            )
+            await self._files.add(file)
+            await self._operations.mark_status(
+                operation_id=operation.id,
+                status="completed",
+            )
+            await commit()
+            return file
         await self._storage.put(
             key=file.storage_key,
             content=content,
@@ -90,6 +117,32 @@ class ArtifactService:
             media_type=media_type,
             content=content,
         )
+        if self._operations is not None and commit is not None:
+            operation = StorageOperation.pending(
+                tenant_id=artifact.tenant_id,
+                action="put",
+                entity_kind="artifact",
+                entity_id=artifact.id,
+                storage_key=artifact.storage_key,
+            )
+            await self._operations.add(operation)
+            await commit()
+            await self._await_storage(
+                self._storage.put(
+                    key=artifact.storage_key,
+                    content=content,
+                    media_type=artifact.media_type,
+                )
+            )
+            await repository.add(artifact)
+            if before_commit is not None:
+                await before_commit(artifact)
+            await self._operations.mark_status(
+                operation_id=operation.id,
+                status="completed",
+            )
+            await commit()
+            return artifact
         await self._storage.put(
             key=artifact.storage_key,
             content=content,
@@ -125,6 +178,29 @@ class ArtifactService:
         commit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         repository = self._required_artifact_repository()
+        if self._operations is not None and commit is not None:
+            operation = StorageOperation.pending(
+                tenant_id=artifact.tenant_id,
+                action="delete",
+                entity_kind="artifact",
+                entity_id=artifact.id,
+                storage_key=artifact.storage_key,
+            )
+            await self._operations.add(operation)
+            deleted = await repository.delete(
+                tenant_id=artifact.tenant_id,
+                artifact_id=artifact.id,
+            )
+            if not deleted:
+                raise RuntimeError("artifact metadata disappeared during delete")
+            await commit()
+            await self._await_storage(self._storage.delete(key=artifact.storage_key))
+            await self._operations.mark_status(
+                operation_id=operation.id,
+                status="completed",
+            )
+            await commit()
+            return
         content = await self.read_artifact(artifact)
         await self._storage.delete(key=artifact.storage_key)
         try:
@@ -150,6 +226,66 @@ class ArtifactService:
                     "artifact_delete_compensation_failed",
                     extra={"artifact_id": str(artifact.id)},
                 )
+            raise
+
+    async def reconcile_pending(
+        self,
+        *,
+        commit: Callable[[], Awaitable[None]],
+        limit: int = 100,
+    ) -> int:
+        if self._operations is None:
+            return 0
+        reconciled = 0
+        for operation in await self._operations.list_pending(limit=limit):
+            if operation.action == "put":
+                exists = await self._entity_exists(operation)
+                if exists:
+                    status = "completed"
+                else:
+                    await self._await_storage(
+                        self._storage.delete(key=operation.storage_key)
+                    )
+                    status = "compensated"
+            else:
+                await self._await_storage(self._storage.delete(key=operation.storage_key))
+                status = "completed"
+            await self._operations.mark_status(
+                operation_id=operation.id,
+                status=status,
+            )
+            await commit()
+            reconciled += 1
+        return reconciled
+
+    async def _entity_exists(self, operation: StorageOperation) -> bool:
+        if operation.entity_kind == "file":
+            return (
+                await self._files.get(
+                    tenant_id=operation.tenant_id,
+                    file_id=operation.entity_id,
+                )
+                is not None
+            )
+        repository = self._required_artifact_repository()
+        return (
+            await repository.get(
+                tenant_id=operation.tenant_id,
+                artifact_id=operation.entity_id,
+            )
+            is not None
+        )
+
+    @staticmethod
+    async def _await_storage(operation: Awaitable[None]) -> None:
+        task: asyncio.Future[None] = asyncio.ensure_future(operation)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                logger.exception("artifact_storage_operation_failed_after_cancellation")
             raise
 
     async def _cleanup_object(self, key: str) -> None:

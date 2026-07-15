@@ -353,7 +353,7 @@ skill-name/
 
 文件与产物采用“PostgreSQL 权限元数据 + 对象存储字节”的单一事实边界：`files`、`task_attachments`、`artifacts` 都通过 `tenant_id` 与所属资源建立复合外键，存储 Key 只能由服务端生成。任务启动前，Worker 只把已授权且摘要、大小校验通过的附件写入本次运行的同一沙箱工作区；Agent 通过受控 `create_artifact` 工具读取该工作区并持久化产物。`artifact.created`、产物 API 与 `EmployeeRuntime.get_artifacts()` 均读取同一份持久目录，不依赖进程内缓存。
 
-对象存储由 `ArtifactStorageProvider` 隔离，开发环境使用 MinIO，LighthouseCOS/腾讯云环境使用 COS 实现。同步 SDK 调用必须移出事件循环；上传元数据提交失败或取消时清理对象，删除元数据失败时恢复对象，避免静默形成孤儿或丢失已登记内容。
+对象存储由 `ArtifactStorageProvider` 隔离，开发环境使用 MinIO，LighthouseCOS/腾讯云环境使用官方 COS SDK 实现。同步 SDK 调用必须移出事件循环。跨 PostgreSQL 与对象存储的写入和删除使用持久 `artifact_storage_operations` 操作日志：先提交操作意图，再执行对象存储，最后提交元数据与完成状态；API 后台协调器会重放未完成操作。请求取消会等待已经发出的存储调用归并到可恢复状态，进程崩溃或存储瞬时失败则由协调器继续补偿或完成，不能依赖进程内 best-effort 清理。
 
 ## 9. 基础设施
 

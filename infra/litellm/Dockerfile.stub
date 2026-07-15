@@ -1,0 +1,6 @@
+FROM ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb
+
+COPY --chown=65534:65534 openai_stub.py /stub/openai_stub.py
+COPY --chown=65534:65534 config.stub.yaml /app/config.stub.yaml
+COPY --chown=65534:65534 bootstrap_key.py /bootstrap/bootstrap_key.py
+COPY --chown=65534:65534 seed_legacy_key.py /seed/seed_legacy_key.py

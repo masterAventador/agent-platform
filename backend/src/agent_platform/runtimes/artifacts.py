@@ -10,7 +10,7 @@ from agent_platform.runtimes.base import (
 )
 
 ArtifactCatalog = Callable[[UUID], Awaitable[list[ArtifactReference]]]
-ArtifactEvents = Callable[[], list[PlatformEvent]]
+EventHistory = Callable[[UUID], Awaitable[list[PlatformEvent]]]
 
 
 class ArtifactBackedRuntime:
@@ -21,11 +21,11 @@ class ArtifactBackedRuntime:
         *,
         runtime: EmployeeRuntime,
         artifact_catalog: ArtifactCatalog,
-        artifact_events: ArtifactEvents | None = None,
+        event_history: EventHistory | None = None,
     ) -> None:
         self._runtime = runtime
         self._artifact_catalog = artifact_catalog
-        self._artifact_events = artifact_events or list
+        self._event_history = event_history
 
     async def start(self, request: RuntimeStartRequest) -> RuntimeState:
         return await self._runtime.start(request)
@@ -62,23 +62,9 @@ class ArtifactBackedRuntime:
         return await self._runtime.get_state(run_id)
 
     async def get_history(self, run_id: UUID) -> list[PlatformEvent]:
-        history = await self._runtime.get_history(run_id)
-        events = self._artifact_events()
-        if not events:
-            return history
-        terminal_index = next(
-            (
-                index
-                for index, event in enumerate(history)
-                if event.type.value in {"run.completed", "run.failed", "run.cancelled"}
-            ),
-            len(history),
-        )
-        merged = [*history[:terminal_index], *events, *history[terminal_index:]]
-        return [
-            event.model_copy(update={"sequence": sequence})
-            for sequence, event in enumerate(merged, start=1)
-        ]
+        if self._event_history is not None:
+            return await self._event_history(run_id)
+        return await self._runtime.get_history(run_id)
 
     async def get_artifacts(self, run_id: UUID) -> list[ArtifactReference]:
         return await self._artifact_catalog(run_id)

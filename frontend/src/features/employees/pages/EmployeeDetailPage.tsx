@@ -34,6 +34,7 @@ export function EmployeeDetailPage({
   const [task, setTask] = useState('')
   const [selectedFile, setSelectedFile] = useState<PlatformFile | null>(null)
   const [selectingFile, setSelectingFile] = useState(false)
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
 
   if (employee.isPending) {
     return <Flex className="employee-loading" justify="center"><Spin /></Flex>
@@ -58,7 +59,10 @@ export function EmployeeDetailPage({
         </div>
         <Space>
           {canExecuteRuns && published && configurationAvailable && (
-            <Button onClick={() => setRunModalOpen(true)}>发起任务</Button>
+            <Button onClick={() => {
+              setAttachmentError(null)
+              setRunModalOpen(true)
+            }}>发起任务</Button>
           )}
           {canManageEmployees && (
             <>
@@ -129,13 +133,21 @@ export function EmployeeDetailPage({
           setRunModalOpen(false)
           setTask('')
           setSelectedFile(null)
+          setAttachmentError(null)
           createRun.reset()
         }}
         onOk={async () => {
+          let attachmentIds: string[] = []
+          if (selectedFile) {
+            try {
+              setAttachmentError(null)
+              attachmentIds = [(await uploadFile(data.tenant_id, selectedFile)).id]
+            } catch {
+              setAttachmentError('附件上传失败，请检查文件类型、大小或网络后重试')
+              return
+            }
+          }
           try {
-            const attachmentIds = selectedFile
-              ? [(await uploadFile(data.tenant_id, selectedFile)).id]
-              : []
             const run = await createRun.mutateAsync({
               input: { message: task.trim() },
               attachmentIds,
@@ -157,6 +169,14 @@ export function EmployeeDetailPage({
             title={getEmployeeApiErrorMessage(createRun.error, '任务发起失败，请稍后重试')}
           />
         )}
+        {attachmentError && (
+          <Alert
+            className="employee-form-error"
+            type="error"
+            showIcon
+            title={attachmentError}
+          />
+        )}
         <Typography.Paragraph type="secondary">
           输入希望数字员工完成的任务，本次执行将固定使用已发布版本。
         </Typography.Paragraph>
@@ -174,10 +194,13 @@ export function EmployeeDetailPage({
               onClick={async () => {
                 setSelectingFile(true)
                 try {
+                  setAttachmentError(null)
                   const file = await getPlatformAdapter().selectFile({
                     extensions: ['txt', 'md', 'json', 'csv', 'pdf', 'png', 'jpg', 'jpeg', 'docx'],
                   })
                   if (file) setSelectedFile(file)
+                } catch {
+                  setAttachmentError('无法读取所选文件，请重新选择或检查文件访问权限')
                 } finally {
                   setSelectingFile(false)
                 }

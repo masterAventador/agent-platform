@@ -171,6 +171,8 @@ C04 实施时必须：
 5. 页面、API、员工和工作流只使用稳定 Artifact ID，不直接依赖 COS 对象键；
 6. 验证租户隔离、STS、签名 URL、生命周期、失败清理和 Provider 切换。
 
+C04 已完成 Provider 抽象、MinIO 真实闭环、腾讯云官方 COS SDK 适配、租户隔离和持久失败恢复；真实 LighthouseCOS/COS 桶仍必须通过显式 `TEST_COS_REGION`、`TEST_COS_SECRET_ID`、`TEST_COS_SECRET_KEY`、`TEST_COS_BUCKET` 门禁验证。STS、客户端直传、签名 URL 和生命周期策略属于后续云端/大文件链路，未提供真实云资源前不得标记为通过。
+
 ## 7. RAGFlow 延后采购方案
 
 当前 MVP 不部署 RAGFlow，因此知识库解析、切片、检索和引用链路暂不作为演示门禁。
@@ -265,7 +267,7 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - [x] 阿里云百炼通过 LiteLLM 完成最小真实请求（2026-07-15，`qwen-plus`，23 Token）；
 - [ ] 创建北京私有 LighthouseCOS 存储桶；
 - [ ] 完成服务端 STS、Tauri 直传和签名下载；
-- [ ] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界；
+- [x] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界（2026-07-15：MinIO 真实全链路及 COS 官方 SDK 契约通过；真实 COS 桶凭据门禁仍待执行）；
 - [ ] MPS 从 LighthouseCOS/COS 读取素材并将成片写回；
 - [ ] 完成单用户、单 Worker、单 Sandbox 的资源压力检查；
 - [ ] 验证服务器重启后容器恢复；

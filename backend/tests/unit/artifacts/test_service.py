@@ -1,9 +1,15 @@
 import asyncio
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 
-from agent_platform.platform.artifacts.entities import Artifact, File, TaskAttachment
+from agent_platform.platform.artifacts.entities import (
+    Artifact,
+    File,
+    StorageOperation,
+    TaskAttachment,
+)
 from agent_platform.platform.artifacts.services import ArtifactService, TaskAttachmentService
 
 
@@ -20,6 +26,46 @@ class MemoryStorage:
 
     async def delete(self, *, key: str) -> None:
         self.objects.pop(key, None)
+
+
+class FailableStorage(MemoryStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_put = False
+        self.fail_delete = False
+        self.put_started = asyncio.Event()
+        self.release_put = asyncio.Event()
+        self.block_put = False
+
+    async def put(self, *, key: str, content: bytes, media_type: str) -> None:
+        self.put_started.set()
+        if self.block_put:
+            await self.release_put.wait()
+        if self.fail_put:
+            raise RuntimeError("object put failed")
+        await super().put(key=key, content=content, media_type=media_type)
+
+    async def delete(self, *, key: str) -> None:
+        if self.fail_delete:
+            raise RuntimeError("object delete failed")
+        await super().delete(key=key)
+
+
+class MemoryOperationRepository:
+    def __init__(self) -> None:
+        self.operations: dict[UUID, StorageOperation] = {}
+
+    async def add(self, operation: StorageOperation) -> None:
+        self.operations[operation.id] = operation
+
+    async def mark_status(self, *, operation_id: UUID, status: str) -> None:
+        operation = self.operations[operation_id]
+        self.operations[operation_id] = replace(operation, status=status)
+
+    async def list_pending(self, *, limit: int) -> list[StorageOperation]:
+        return [
+            operation for operation in self.operations.values() if operation.status == "pending"
+        ][:limit]
 
 
 class FailingFileRepository:
@@ -86,7 +132,8 @@ class MemoryArtifactRepository:
 
     async def list_for_run(self, *, tenant_id: UUID, run_id: UUID) -> list[Artifact]:
         return [
-            artifact for artifact in self.artifacts.values()
+            artifact
+            for artifact in self.artifacts.values()
             if artifact.tenant_id == tenant_id and artifact.run_id == run_id
         ]
 
@@ -311,3 +358,126 @@ async def test_artifact_delete_restores_object_when_transaction_commit_fails() -
         await service.delete_artifact(artifact, commit=fail_commit)
 
     assert storage.objects[artifact.storage_key] == b"done"
+
+
+@pytest.mark.asyncio
+async def test_durable_create_reconciles_a_failed_object_put_without_dangling_metadata() -> None:
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    storage.fail_put = True
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+    )
+
+    async def commit() -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="object put failed"):
+        await service.create_artifact(
+            tenant_id=uuid4(),
+            run_id=uuid4(),
+            created_by=uuid4(),
+            name="result.txt",
+            media_type="text/plain",
+            content=b"done",
+            commit=commit,
+        )
+
+    pending = await operations.list_pending(limit=10)
+    assert len(pending) == 1
+    assert repository.artifacts == {}
+
+    storage.fail_put = False
+    assert await service.reconcile_pending(commit=commit) == 1
+    assert operations.operations[pending[0].id].status == "compensated"
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_durable_create_does_not_swallow_cancellation_after_object_store_applies() -> None:
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    storage.block_put = True
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+    )
+
+    async def commit() -> None:
+        return None
+
+    task = asyncio.create_task(
+        service.create_artifact(
+            tenant_id=uuid4(),
+            run_id=uuid4(),
+            created_by=uuid4(),
+            name="result.txt",
+            media_type="text/plain",
+            content=b"done",
+            commit=commit,
+        )
+    )
+    await storage.put_started.wait()
+    task.cancel()
+    storage.release_put.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    pending = await operations.list_pending(limit=10)
+    assert len(pending) == 1
+    assert storage.objects[pending[0].storage_key] == b"done"
+    assert repository.artifacts == {}
+
+    assert await service.reconcile_pending(commit=commit) == 1
+    assert operations.operations[pending[0].id].status == "compensated"
+    assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_durable_delete_retries_object_failure_from_persisted_intent() -> None:
+    tenant_id, run_id, creator_id = uuid4(), uuid4(), uuid4()
+    repository = MemoryArtifactRepository()
+    operations = MemoryOperationRepository()
+    storage = FailableStorage()
+    service = ArtifactService(
+        file_repository=FailingFileRepository(),
+        artifact_repository=repository,
+        operation_repository=operations,
+        storage=storage,
+    )
+
+    async def commit() -> None:
+        return None
+
+    artifact = await service.create_artifact(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        created_by=creator_id,
+        name="result.txt",
+        media_type="text/plain",
+        content=b"done",
+        commit=commit,
+    )
+    storage.fail_delete = True
+
+    with pytest.raises(RuntimeError, match="object delete failed"):
+        await service.delete_artifact(artifact, commit=commit)
+
+    pending = await operations.list_pending(limit=10)
+    assert len(pending) == 1
+    assert pending[0].action == "delete"
+    assert repository.artifacts == {}
+    assert storage.objects[artifact.storage_key] == b"done"
+
+    storage.fail_delete = False
+    assert await service.reconcile_pending(commit=commit) == 1
+    assert operations.operations[pending[0].id].status == "completed"
+    assert storage.objects == {}

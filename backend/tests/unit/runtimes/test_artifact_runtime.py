@@ -90,7 +90,7 @@ async def test_get_artifacts_uses_persistent_catalog_instead_of_runtime_memory()
 
 
 @pytest.mark.asyncio
-async def test_artifact_event_is_visible_before_terminal_event() -> None:
+async def test_history_uses_persistent_event_reader_without_resequencing() -> None:
     tenant_id, employee_id, run_id = uuid4(), uuid4(), uuid4()
     request = RuntimeStartRequest(
         run_id=run_id,
@@ -121,14 +121,18 @@ async def test_artifact_event_is_visible_before_terminal_event() -> None:
         tenant_id=tenant_id,
         employee_id=employee_id,
         run_id=run_id,
-        sequence=1,
+        sequence=2,
         event_type=EventType.ARTIFACT_CREATED,
         payload={"artifact_id": str(uuid4()), "name": "result.txt"},
     )
+    async def persisted_history(requested_run_id: UUID) -> list[PlatformEvent]:
+        assert requested_run_id == run_id
+        return [started, artifact_created, completed]
+
     runtime = ArtifactBackedRuntime(
         runtime=FakeRuntime(request, history=[started, completed]),
         artifact_catalog=lambda _: _empty_catalog(),
-        artifact_events=lambda: [artifact_created],
+        event_history=persisted_history,
     )
 
     history = await runtime.get_history(run_id)

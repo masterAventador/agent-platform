@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -18,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agent_platform.infrastructure.database.base import Base
-from agent_platform.platform.artifacts.entities import Artifact, File, TaskAttachment
+from agent_platform.platform.artifacts.entities import (
+    Artifact,
+    File,
+    StorageOperation,
+    TaskAttachment,
+)
 
 
 class FileRecord(Base):
@@ -85,6 +91,34 @@ class ArtifactRecord(Base):
     __table_args__ = (
         ForeignKeyConstraint(
             ["tenant_id", "run_id"], ["runs.tenant_id", "runs.id"], ondelete="CASCADE"
+        ),
+    )
+
+
+class ArtifactStorageOperationRecord(Base):
+    __tablename__ = "artifact_storage_operations"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(16))
+    entity_kind: Mapped[str] = mapped_column(String(16))
+    entity_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    storage_key: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("action IN ('put', 'delete')", name="ck_artifact_storage_action"),
+        CheckConstraint(
+            "entity_kind IN ('file', 'artifact')",
+            name="ck_artifact_storage_entity_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'compensated')",
+            name="ck_artifact_storage_status",
         ),
     )
 
@@ -219,3 +253,48 @@ class SqlAlchemyArtifactRepository:
             storage_key=record.storage_key,
             created_at=_utc(record.created_at),
         )
+
+
+class SqlAlchemyArtifactStorageOperationRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, operation: StorageOperation) -> None:
+        self._session.add(ArtifactStorageOperationRecord(**asdict(operation)))
+        await self._session.flush()
+
+    async def mark_status(self, *, operation_id: UUID, status: str) -> None:
+        record = await self._session.get(ArtifactStorageOperationRecord, operation_id)
+        if record is None:
+            raise RuntimeError("artifact storage operation disappeared")
+        record.status = status
+        record.updated_at = datetime.now(UTC)
+        await self._session.flush()
+
+    async def list_pending(self, *, limit: int = 100) -> list[StorageOperation]:
+        records = (
+            await self._session.execute(
+                select(ArtifactStorageOperationRecord)
+                .where(ArtifactStorageOperationRecord.status == "pending")
+                .order_by(
+                    ArtifactStorageOperationRecord.created_at,
+                    ArtifactStorageOperationRecord.id,
+                )
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars()
+        return [
+            StorageOperation(
+                id=record.id,
+                tenant_id=record.tenant_id,
+                action=record.action,
+                entity_kind=record.entity_kind,
+                entity_id=record.entity_id,
+                storage_key=record.storage_key,
+                status=record.status,
+                created_at=_utc(record.created_at),
+                updated_at=_utc(record.updated_at),
+            )
+            for record in records
+        ]

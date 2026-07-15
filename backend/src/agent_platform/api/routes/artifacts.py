@@ -1,4 +1,7 @@
+from pathlib import PurePosixPath
 from typing import Annotated
+from unicodedata import normalize
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, UploadFile, status
@@ -10,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
 )
@@ -28,6 +32,21 @@ from agent_platform.platform.users.entities import User
 
 router = APIRouter(prefix="/api/v1", tags=["artifacts"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
+
+
+def content_disposition(disposition: str, filename: str) -> str:
+    """Build an RFC 6266 header without allowing filename header injection."""
+    normalized = normalize("NFC", filename)
+    suffix = PurePosixPath(normalized).suffix
+    ascii_name = "".join(
+        character
+        for character in normalized
+        if ord(character) < 128 and (character.isalnum() or character in {" ", ".", "-", "_"})
+    ).strip(" .")
+    if not ascii_name or ascii_name == suffix.lstrip("."):
+        ascii_name = f"download{suffix if suffix.isascii() else ''}"
+    encoded = quote(normalized, safe="")
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
 
 
 class FileResponse(BaseModel):
@@ -86,9 +105,7 @@ async def _authorized_run(
         tenant_id=tenant_id,
         required_permission=TenantPermission.RUNS_EXECUTE,
     )
-    run = await SqlAlchemyRunRepository(session).get(
-        tenant_id=access.tenant.id, run_id=run_id
-    )
+    run = await SqlAlchemyRunRepository(session).get(tenant_id=access.tenant.id, run_id=run_id)
     if run is None or (
         run.created_by != user.id
         and not role_has_permission(role=access.role, permission=TenantPermission.RUNS_MANAGE)
@@ -113,6 +130,7 @@ async def upload_file(
         content = await file.read(MAX_FILE_SIZE_BYTES + 1)
         service = ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
         )
         try:
@@ -155,12 +173,13 @@ async def download_file(
             raise _not_found()
         content = await ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
         ).read_file(file)
     return Response(
         content=content,
         media_type=file.media_type,
-        headers={"Content-Disposition": f'inline; filename="{file.name}"'},
+        headers={"Content-Disposition": content_disposition("inline", file.name)},
     )
 
 
@@ -232,12 +251,13 @@ async def download_artifact(
         content = await ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
             artifact_repository=SqlAlchemyArtifactRepository(session),
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
         ).read_artifact(artifact)
     return Response(
         content=content,
         media_type=artifact.media_type,
-        headers={"Content-Disposition": f'attachment; filename="{artifact.name}"'},
+        headers={"Content-Disposition": content_disposition("attachment", artifact.name)},
     )
 
 
@@ -267,6 +287,7 @@ async def delete_artifact(
         await ArtifactService(
             file_repository=SqlAlchemyFileRepository(session),
             artifact_repository=repository,
+            operation_repository=SqlAlchemyArtifactStorageOperationRepository(session),
             storage=request.app.state.artifact_storage,
         ).delete_artifact(artifact, commit=session.commit)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

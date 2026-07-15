@@ -90,6 +90,36 @@ class OpenAiStubProtocolTest(unittest.TestCase):
         self.assertEqual(choice["finish_reason"], "tool_calls")
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "get_status")
 
+    def test_artifact_flow_writes_then_publishes_the_same_sandbox_file(self) -> None:
+        messages: list[dict[str, object]] = [
+            {"role": "user", "content": json.dumps({"message": "mvp-artifact-flow"})}
+        ]
+        first = self.post_completion({"model": "primary-test", "messages": messages})
+        first_call = first["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(first_call["function"]["name"], "write_file")
+        self.assertEqual(
+            json.loads(first_call["function"]["arguments"])["file_path"],
+            "/workspace/result.txt",
+        )
+
+        messages.extend(
+            [
+                first["choices"][0]["message"],
+                {
+                    "role": "tool",
+                    "tool_call_id": first_call["id"],
+                    "content": "Updated file /workspace/result.txt",
+                },
+            ]
+        )
+        second = self.post_completion({"model": "primary-test", "messages": messages})
+        second_call = second["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(second_call["function"]["name"], "create_artifact")
+        self.assertEqual(
+            json.loads(second_call["function"]["arguments"])["workspace_path"],
+            "result.txt",
+        )
+
     def test_generic_request_never_calls_a_tool_that_was_not_declared(self) -> None:
         response = self.post_completion(
             {

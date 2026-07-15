@@ -77,9 +77,59 @@ def upgrade() -> None:
     )
     op.create_index("ix_artifacts_tenant_id", "artifacts", ["tenant_id"])
     op.create_index("ix_artifacts_run_id", "artifacts", ["run_id"])
+    op.create_table(
+        "artifact_storage_operations",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("tenant_id", sa.Uuid(), nullable=False),
+        sa.Column("action", sa.String(length=16), nullable=False),
+        sa.Column("entity_kind", sa.String(length=16), nullable=False),
+        sa.Column("entity_id", sa.Uuid(), nullable=False),
+        sa.Column("storage_key", sa.String(length=500), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("action IN ('put', 'delete')", name="ck_artifact_storage_action"),
+        sa.CheckConstraint(
+            "entity_kind IN ('file', 'artifact')", name="ck_artifact_storage_entity_kind"
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending', 'completed', 'compensated')",
+            name="ck_artifact_storage_status",
+        ),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_artifact_storage_operations_tenant_id",
+        "artifact_storage_operations",
+        ["tenant_id"],
+    )
+    op.create_index(
+        "ix_artifact_storage_operations_entity_id",
+        "artifact_storage_operations",
+        ["entity_id"],
+    )
+    op.create_index(
+        "ix_artifact_storage_operations_status",
+        "artifact_storage_operations",
+        ["status"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_artifact_storage_operations_status",
+        table_name="artifact_storage_operations",
+    )
+    op.drop_index(
+        "ix_artifact_storage_operations_entity_id",
+        table_name="artifact_storage_operations",
+    )
+    op.drop_index(
+        "ix_artifact_storage_operations_tenant_id",
+        table_name="artifact_storage_operations",
+    )
+    op.drop_table("artifact_storage_operations")
     op.drop_index("ix_artifacts_run_id", table_name="artifacts")
     op.drop_index("ix_artifacts_tenant_id", table_name="artifacts")
     op.drop_table("artifacts")

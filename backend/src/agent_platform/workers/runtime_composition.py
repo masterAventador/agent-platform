@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
+    EventSequenceConflict,
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
@@ -446,7 +448,6 @@ class ComposedRuntimeResolver:
         delete_on_error: bool,
     ) -> PreparedRuntimeResult:
         try:
-            artifact_events: list[PlatformEvent] = []
             async with self._session_factory() as session:
                 if self._artifact_storage is not None:
                     await TaskAttachmentService(
@@ -515,33 +516,38 @@ class ComposedRuntimeResolver:
                     """Publish a file from /workspace as a task artifact."""
 
                     safe_path = validate_workspace_path(workspace_path)
-                    content = await environment.workspace.read_file(
-                        path=f"/workspace/{safe_path}"
-                    )
+                    content = await environment.workspace.read_file(path=f"/workspace/{safe_path}")
                     async with self._session_factory() as artifact_session:
-                        created_event: PlatformEvent | None = None
 
                         async def persist_created_event(artifact: Artifact) -> None:
-                            nonlocal created_event
                             events = SqlAlchemyRunEventRepository(artifact_session)
-                            created_event = PlatformEvent.create(
-                                tenant_id=run.tenant_id,
-                                employee_id=run.employee_id,
-                                run_id=run.id,
-                                sequence=await events.next_sequence(run_id=run.id),
-                                event_type=EventType.ARTIFACT_CREATED,
-                                payload={
-                                    "artifact_id": str(artifact.id),
-                                    "name": artifact.name,
-                                    "media_type": artifact.media_type,
-                                    "size_bytes": artifact.size_bytes,
-                                },
-                            )
-                            await events.append(created_event)
+                            for attempt in range(3):
+                                created_event = PlatformEvent.create(
+                                    tenant_id=run.tenant_id,
+                                    employee_id=run.employee_id,
+                                    run_id=run.id,
+                                    sequence=await events.next_sequence(run_id=run.id),
+                                    event_type=EventType.ARTIFACT_CREATED,
+                                    payload={
+                                        "artifact_id": str(artifact.id),
+                                        "name": artifact.name,
+                                        "media_type": artifact.media_type,
+                                        "size_bytes": artifact.size_bytes,
+                                    },
+                                )
+                                try:
+                                    await events.append(created_event)
+                                    return
+                                except EventSequenceConflict:
+                                    if attempt == 2:
+                                        raise
 
                         artifact = await ArtifactService(
                             file_repository=SqlAlchemyFileRepository(artifact_session),
                             artifact_repository=SqlAlchemyArtifactRepository(artifact_session),
+                            operation_repository=(
+                                SqlAlchemyArtifactStorageOperationRepository(artifact_session)
+                            ),
                             storage=artifact_storage,
                         ).create_artifact(
                             tenant_id=run.tenant_id,
@@ -553,9 +559,6 @@ class ComposedRuntimeResolver:
                             before_commit=persist_created_event,
                             commit=artifact_session.commit,
                         )
-                    if created_event is None:
-                        raise RuntimeError("artifact event was not persisted")
-                    artifact_events.append(created_event)
                     return str(artifact.id)
 
                 tools.append(
@@ -594,10 +597,19 @@ class ComposedRuntimeResolver:
                         for artifact in artifacts
                     ]
 
+                async def event_history(run_id: UUID) -> list[PlatformEvent]:
+                    if run_id != run.id:
+                        return []
+                    async with self._session_factory() as event_session:
+                        return await SqlAlchemyRunEventRepository(event_session).list(
+                            run_id=run.id,
+                            after_sequence=0,
+                        )
+
                 runtime = ArtifactBackedRuntime(
                     runtime=runtime,
                     artifact_catalog=artifact_catalog,
-                    artifact_events=lambda: list(artifact_events),
+                    event_history=event_history,
                 )
         except PermanentRuntimePreparationError as error:
 

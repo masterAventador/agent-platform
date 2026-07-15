@@ -178,7 +178,8 @@
 - 员工任务支持文件输入，沙箱可在授权范围读取，Agent 可创建产物；
 - `EmployeeRuntime.get_artifacts()` 返回真实数据；
 - 客户端支持选择、上传、预览、下载、定位和删除；
-- 覆盖租户隔离、大小/类型限制、失败清理、恶意路径和权限 E2E。
+- 跨数据库与对象存储变更通过持久操作日志、协调器重放和取消归并形成可恢复 Saga；
+- 覆盖租户隔离、大小/类型/内容限制、并发事件序号、失败恢复、恶意路径和权限 E2E。
 
 ### C05 多轮会话与追加输入
 
@@ -417,10 +418,10 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | --- | --- |
 | 后端 Pytest | 默认环境收集 913 项：876 通过、37 跳过、0 失败；跳过项均明确标注缺少 PostgreSQL、Redis、MinIO 或破坏性本地 Docker 依赖，不计作真实依赖验收通过 |
 | 后端 Unit + Contract | 739 项通过；包含 Core API route manifest、文件/产物契约、连接池复用健康探测与工作台严格响应契约 |
-| C04 真实依赖专项 | 独立随机端口验收栈从空 PostgreSQL 升级至 `20260715_0018`；显式注入 `TEST_DATABASE_URL`、`TEST_REDIS_URL`、`TEST_MINIO_*` 后 38 项通过、0 跳过，覆盖 PostgreSQL 复合租户外键/任务路径唯一约束、MinIO Artifact 字节往返与删除、附件物化和恶意路径拒绝；验收容器、网络、Volume 已销毁 |
+| C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web；真实 Agent 在同一沙箱写文件并调用 `create_artifact`，随后经持久操作日志、对象存储、数据库事件、API 和无头 Playwright 完成预览、下载、刷新恢复、定位、删除及对象清理；真实 PostgreSQL 并发事件序号测试通过；容器、网络、Volume 已销毁。COS 工厂/官方 SDK 契约 3 项通过，真实 COS 桶测试因未提供显式 `TEST_COS_*` 凭据跳过，不冒充线上桶验收通过 |
 | Ruff | 通过 |
 | Mypy | 169 个源码文件通过 |
-| 前端 Vitest | 27 个测试文件、113 项测试通过；含附件上传、产物查询/页面、PlatformAdapter、工作台与架构边界测试 |
+| 前端 Vitest | 27 个测试文件、115 项测试通过；含附件选择/上传失败反馈、产物查询/页面、PlatformAdapter、工作台与架构边界测试 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过，存在单个 500KB 以上分包警告 |
@@ -443,7 +444,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
-| C04 | 已完成 | 2026-07-15 | 2026-07-15 | 本任务提交 | 文件、附件、产物领域/迁移/仓储/API、MinIO/COS 端口、同沙箱物化、`create_artifact` 工具、持久 `get_artifacts()` 与 `artifact.created` 已闭环；默认 `uv run pytest -ra` 收集 913 项（876 通过、37 项因缺显式真实依赖跳过），`uv run pytest tests/unit tests/contract -q` 739 项通过；独立随机端口 PostgreSQL/Redis/MinIO 验收栈显式注入全部 `TEST_*` 后 C04 专项 38 项通过、0 跳过，并验证空库迁移、真实复合外键/唯一约束、MinIO Artifact 往返删除、附件物化与恶意路径；Ruff、Mypy（169 个源码文件）、前端 Vitest（113 项）、Lint、Typecheck、Build 全通过；正式 Playwright 15 项完整回归通过，真实上传并校验任务附件绑定，覆盖产物预览、下载、事件定位和删除，隔离容器/网络/Volume 自动清理 |
+| C04 | 已完成 | 2026-07-15 | 2026-07-15 | 本任务提交 | 文件、附件、产物领域/迁移/仓储/API、MinIO/COS Provider、同沙箱物化、`create_artifact`、持久 `get_artifacts()` 与 `artifact.created` 已闭环；持久 `artifact_storage_operations` 操作日志、后台协调器、取消归并和失败注入测试覆盖上传/删除的跨存储恢复；大小、扩展名、MIME 与内容魔数共同校验，下载头安全编码；租户 owner/member/admin/cross-tenant 权限矩阵、真实 PostgreSQL 并发事件序号和幂等 Seed 均通过。后端 Core 回归 772 项、Ruff、Mypy（169 个源码文件）、前端 Vitest（115 项）、Lint、Typecheck、Build 全通过；`bash infra/platform/test-c04-artifacts.sh` 的正式无头 Playwright 以真实 Worker/Agent/同一 Sandbox/MinIO/数据库/API/UI 完成产物预览、下载、刷新恢复、定位、删除和对象清理并自动销毁隔离资源。COS 官方 SDK 契约通过；真实 COS 桶烟测保留为显式 `TEST_COS_*` 外部门禁，本轮无凭据故跳过 |
 | C05-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 后续每完成一项，将其拆成独立行记录，禁止只修改第 4 节状态而不留下提交标识和验证证据。

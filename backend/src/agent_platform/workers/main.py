@@ -34,7 +34,9 @@ from agent_platform.infrastructure.llm.litellm import (
 )
 from agent_platform.infrastructure.mcp.executor import MCPToolExecutor
 from agent_platform.infrastructure.mcp.resolver import DatabaseMCPClientResolver
-from agent_platform.infrastructure.object_storage.artifacts import MinioArtifactStorageProvider
+from agent_platform.infrastructure.object_storage.artifacts import (
+    create_artifact_storage_provider,
+)
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -366,9 +368,9 @@ def _build_runtime_resolver(
             client=cast(MinioClient, minio),
             bucket=settings.skill_storage_bucket,
         ),
-        artifact_storage=MinioArtifactStorageProvider(
-            client=cast(MinioClient, minio),
-            bucket=settings.artifact_storage_bucket,
+        artifact_storage=create_artifact_storage_provider(
+            settings=settings,
+            minio_client=cast(MinioClient, minio),
         ),
         sandbox_manager=adapters.sandbox_manager,
         gateway=gateway,

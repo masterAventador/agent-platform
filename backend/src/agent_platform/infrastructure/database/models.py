@@ -1,6 +1,7 @@
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
+    ArtifactStorageOperationRecord,
     FileRecord,
     TaskAttachmentRecord,
 )
@@ -62,6 +63,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     FileRecord,
     TaskAttachmentRecord,
     ArtifactRecord,
+    ArtifactStorageOperationRecord,
 )
 
 

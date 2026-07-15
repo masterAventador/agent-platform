@@ -244,23 +244,23 @@ class SqlAlchemyRunEventRepository:
         self._session = session
 
     async def append(self, event: PlatformEvent) -> None:
-        self._session.add(
-            RunEventRecord(
-                event_id=event.event_id,
-                event_version=event.event_version,
-                tenant_id=event.tenant_id,
-                employee_id=event.employee_id,
-                run_id=event.run_id,
-                sequence=event.sequence,
-                event_type=event.type.value,
-                occurred_at=event.occurred_at,
-                payload=event.payload,
-            )
-        )
         try:
-            await self._session.flush()
+            async with self._session.begin_nested():
+                self._session.add(
+                    RunEventRecord(
+                        event_id=event.event_id,
+                        event_version=event.event_version,
+                        tenant_id=event.tenant_id,
+                        employee_id=event.employee_id,
+                        run_id=event.run_id,
+                        sequence=event.sequence,
+                        event_type=event.type.value,
+                        occurred_at=event.occurred_at,
+                        payload=event.payload,
+                    )
+                )
+                await self._session.flush()
         except IntegrityError as error:
-            await self._session.rollback()
             raise EventSequenceConflict from error
 
     async def list(self, *, run_id: UUID, after_sequence: int) -> list[PlatformEvent]:
@@ -288,6 +288,11 @@ class SqlAlchemyRunEventRepository:
         ]
 
     async def next_sequence(self, *, run_id: UUID) -> int:
+        locked_run = await self._session.execute(
+            select(RunRecord.id).where(RunRecord.id == run_id).with_for_update()
+        )
+        if locked_run.scalar_one_or_none() is None:
+            raise LookupError("run not found while allocating event sequence")
         result = await self._session.execute(
             select(func.coalesce(func.max(RunEventRecord.sequence), 0)).where(
                 RunEventRecord.run_id == run_id

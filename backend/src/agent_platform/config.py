@@ -46,6 +46,12 @@ class AppSettings(BaseSettings):
     minio_secure: bool = False
     skill_storage_bucket: str = "agent-platform-skills"
     artifact_storage_bucket: str = "agent-platform-artifacts"
+    artifact_storage_provider: Literal["minio", "tencent-cos"] = "minio"
+    cos_region: str | None = None
+    cos_secret_id: SecretStr = SecretStr("")
+    cos_secret_key: SecretStr = SecretStr("")
+    cos_token: SecretStr = SecretStr("")
+    cos_scheme: Literal["http", "https"] = "https"
     local_credentials_file: str | None = None
     local_credentials_repository_root: str | None = None
     sandbox_provider: Literal["local-controller"] = "local-controller"
@@ -104,4 +110,10 @@ class AppSettings(BaseSettings):
             )
         if "*" in self.cors_allowed_origins:
             raise ValueError("credentialed CORS must use exact origins")
+        if self.artifact_storage_provider == "tencent-cos" and (
+            not self.cos_region
+            or not self.cos_secret_id.get_secret_value()
+            or not self.cos_secret_key.get_secret_value()
+        ):
+            raise ValueError("Tencent COS requires region and credentials")
         return self

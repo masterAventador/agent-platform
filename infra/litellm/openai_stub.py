@@ -54,6 +54,22 @@ class Handler(BaseHTTPRequestHandler):
                     structured_scenario.get("message"), str
                 ):
                     scenario = structured_scenario["message"]
+            for candidate in messages:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_content = candidate.get("content")
+                if not isinstance(candidate_content, str):
+                    continue
+                try:
+                    candidate_scenario = json.loads(candidate_content)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(candidate_scenario, dict)
+                    and candidate_scenario.get("message") == "mvp-artifact-flow"
+                ):
+                    scenario = "mvp-artifact-flow"
+                    break
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             self._send_json(400, {"error": str(exc)})
             return
@@ -106,6 +122,60 @@ class Handler(BaseHTTPRequestHandler):
         finish_reason = "stop"
         if scenario == "mvp-web-flow":
             message = {"role": "assistant", "content": "local stub completion"}
+        elif scenario == "mvp-artifact-flow":
+            completed_tool_calls = sum(
+                1
+                for candidate in messages
+                if isinstance(candidate, dict) and candidate.get("role") == "tool"
+            )
+            if completed_tool_calls == 0:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-write-artifact",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json.dumps(
+                                    {
+                                        "file_path": "/workspace/result.txt",
+                                        "content": "artifact content from real sandbox",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+                finish_reason = "tool_calls"
+            elif completed_tool_calls == 1:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-create-artifact",
+                            "type": "function",
+                            "function": {
+                                "name": "create_artifact",
+                                "arguments": json.dumps(
+                                    {
+                                        "name": "result.txt",
+                                        "media_type": "text/plain",
+                                        "workspace_path": "result.txt",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+                finish_reason = "tool_calls"
+            else:
+                message = {
+                    "role": "assistant",
+                    "content": "artifact published from the real sandbox",
+                }
         elif any(
             isinstance(tool, dict)
             and isinstance(tool.get("function"), dict)

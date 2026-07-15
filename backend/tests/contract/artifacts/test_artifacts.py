@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -14,6 +15,9 @@ from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
+)
+from agent_platform.infrastructure.database.repositories.tenants import (
+    TenantMembershipRecord,
 )
 from agent_platform.platform.artifacts.entities import Artifact
 
@@ -147,14 +151,10 @@ async def test_upload_attach_and_download_are_tenant_and_owner_scoped(
     outsider_user = await register(outsider, "artifact-outsider@example.com")
     outsider_headers = {"X-Tenant-ID": outsider_user["workspaces"][0]["id"]}
     assert (
-        await outsider.get(
-            f"/api/v1/files/{stored_file['id']}/content", headers=outsider_headers
-        )
+        await outsider.get(f"/api/v1/files/{stored_file['id']}/content", headers=outsider_headers)
     ).status_code == 404
     assert (
-        await outsider.get(
-            f"/api/v1/runs/{run['id']}/attachments", headers=outsider_headers
-        )
+        await outsider.get(f"/api/v1/runs/{run['id']}/attachments", headers=outsider_headers)
     ).status_code == 404
 
     async with sessions() as session:
@@ -207,3 +207,93 @@ async def test_upload_rejects_type_and_size_before_object_storage(
     assert executable.status_code == 422
     assert executable.json()["detail"]["code"] == "invalid_artifact_input"
     assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_artifact_permissions_cover_owner_member_admin_and_cross_tenant(
+    artifact_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        MemoryArtifactStorage,
+    ],
+) -> None:
+    app, sessions, owner, outsider, storage = artifact_api
+    owner_user = await register(owner, "artifact-matrix-owner@example.com")
+    tenant_id = owner_user["workspaces"][0]["id"]
+    stored_file, run = await create_file_run(owner, tenant_id)
+    headers = {"X-Tenant-ID": tenant_id}
+    transport = ASGITransport(app=app)
+
+    async with (
+        AsyncClient(transport=transport, base_url="http://testserver") as member,
+        AsyncClient(transport=transport, base_url="http://testserver") as admin,
+    ):
+        member_user = await register(member, "artifact-matrix-member@example.com")
+        admin_user = await register(admin, "artifact-matrix-admin@example.com")
+        outsider_user = await register(outsider, "artifact-matrix-outsider@example.com")
+        async with sessions() as session:
+            session.add_all(
+                [
+                    TenantMembershipRecord(
+                        id=uuid4(),
+                        tenant_id=UUID(tenant_id),
+                        user_id=UUID(member_user["id"]),
+                        role="member",
+                        created_at=datetime.now(UTC),
+                    ),
+                    TenantMembershipRecord(
+                        id=uuid4(),
+                        tenant_id=UUID(tenant_id),
+                        user_id=UUID(admin_user["id"]),
+                        role="admin",
+                        created_at=datetime.now(UTC),
+                    ),
+                ]
+            )
+            artifact = Artifact.create(
+                tenant_id=UUID(tenant_id),
+                run_id=UUID(run["id"]),
+                created_by=UUID(owner_user["id"]),
+                name="matrix-result.txt",
+                media_type="text/plain",
+                content=b"matrix result",
+            )
+            await SqlAlchemyArtifactRepository(session).add(artifact)
+            await session.commit()
+        await storage.put(
+            key=artifact.storage_key,
+            content=b"matrix result",
+            media_type=artifact.media_type,
+        )
+
+        member_requests = [
+            await member.get(f"/api/v1/runs/{run['id']}/attachments", headers=headers),
+            await member.get(f"/api/v1/runs/{run['id']}/artifacts", headers=headers),
+            await member.get(f"/api/v1/files/{stored_file['id']}/content", headers=headers),
+            await member.get(f"/api/v1/artifacts/{artifact.id}/content", headers=headers),
+            await member.delete(f"/api/v1/artifacts/{artifact.id}", headers=headers),
+        ]
+        assert [response.status_code for response in member_requests] == [404] * 5
+
+        outsider_headers = {"X-Tenant-ID": outsider_user["workspaces"][0]["id"]}
+        assert (
+            await outsider.get(f"/api/v1/artifacts/{artifact.id}/content", headers=outsider_headers)
+        ).status_code == 404
+
+        assert (
+            await admin.get(f"/api/v1/runs/{run['id']}/attachments", headers=headers)
+        ).status_code == 200
+        assert (
+            await admin.get(f"/api/v1/runs/{run['id']}/artifacts", headers=headers)
+        ).status_code == 200
+        assert (
+            await admin.get(f"/api/v1/files/{stored_file['id']}/content", headers=headers)
+        ).content == b"brief"
+        assert (
+            await admin.get(f"/api/v1/artifacts/{artifact.id}/content", headers=headers)
+        ).content == b"matrix result"
+        assert (
+            await admin.delete(f"/api/v1/artifacts/{artifact.id}", headers=headers)
+        ).status_code == 204

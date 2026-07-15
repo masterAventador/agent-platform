@@ -1,5 +1,7 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import cast
 
 from fastapi import FastAPI, Request, status
@@ -22,7 +24,14 @@ from agent_platform.api.routes.workbench import router as workbench_router
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.database.engine import create_database_engine
-from agent_platform.infrastructure.object_storage.artifacts import MinioArtifactStorageProvider
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyArtifactRepository,
+    SqlAlchemyArtifactStorageOperationRepository,
+    SqlAlchemyFileRepository,
+)
+from agent_platform.infrastructure.object_storage.artifacts import (
+    create_artifact_storage_provider,
+)
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
@@ -33,6 +42,7 @@ from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
 from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
+from agent_platform.platform.artifacts.services import ArtifactService
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
@@ -41,6 +51,8 @@ from agent_platform.platform.knowledge.errors import (
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.skills.ports import SkillStorage
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -92,15 +104,40 @@ def create_app(
             client=cast(MinioClient, minio_client), bucket=app_settings.skill_storage_bucket
         )
     if artifact_storage is None:
-        artifact_storage = MinioArtifactStorageProvider(
-            client=cast(MinioClient, minio_client), bucket=app_settings.artifact_storage_bucket
+        artifact_storage = create_artifact_storage_provider(
+            settings=app_settings,
+            minio_client=cast(MinioClient, minio_client) if minio_client is not None else None,
         )
+    configured_session_factory = session_factory
+    configured_artifact_storage = artifact_storage
+
+    async def reconcile_artifact_storage() -> None:
+        while True:
+            try:
+                async with configured_session_factory() as session:
+                    await ArtifactService(
+                        file_repository=SqlAlchemyFileRepository(session),
+                        artifact_repository=SqlAlchemyArtifactRepository(session),
+                        operation_repository=(
+                            SqlAlchemyArtifactStorageOperationRepository(session)
+                        ),
+                        storage=configured_artifact_storage,
+                    ).reconcile_pending(commit=session.commit)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("artifact_storage_reconciliation_failed")
+            await asyncio.sleep(5)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
         try:
             yield
         finally:
+            reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconciliation_task
             try:
                 if owned_engine is not None:
                     await owned_engine.dispose()

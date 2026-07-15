@@ -1,5 +1,10 @@
 services:
   litellm:
+    build:
+      context: ../litellm
+      dockerfile: Dockerfile.stub
+    image: agent-platform-litellm-stub:local
+    command: ["--config", "/app/config.stub.yaml", "--port", "4000"]
     environment:
       LITELLM_UPSTREAM_MODEL: openai/local-test
       LITELLM_UPSTREAM_API_KEY: stub-not-a-provider-key
@@ -7,17 +12,15 @@ services:
     depends_on:
       openai-stub:
         condition: service_healthy
-    volumes:
-      - ../litellm/config.stub.yaml:/app/config.yaml:ro
+    volumes: !reset []
 
   openai-stub:
-    image: ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb
+    image: agent-platform-litellm-stub:local
+    pull_policy: never
     entrypoint: ["python3"]
     command: ["/stub/openai_stub.py"]
     expose:
       - "4010"
-    volumes:
-      - ../litellm/openai_stub.py:/stub/openai_stub.py:ro
     healthcheck:
       test:
         - CMD
@@ -38,17 +41,22 @@ services:
     networks: [database]
     restart: "no"
 
+  worker-key-bootstrap:
+    image: agent-platform-litellm-stub:local
+    pull_policy: never
+    volumes: !reset []
+
   legacy-worker-key-seed:
     profiles: ["worker-e2e"]
-    image: ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb
+    image: agent-platform-litellm-stub:local
+    pull_policy: never
     entrypoint: ["python3"]
     command: ["/seed/seed_legacy_key.py"]
     environment:
       LITELLM_BOOTSTRAP_URL: http://litellm:4000
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
       LITELLM_WORKER_API_KEY: ${LITELLM_WORKER_API_KEY:?set LITELLM_WORKER_API_KEY}
-    volumes:
-      - ../litellm/seed_legacy_key.py:/seed/seed_legacy_key.py:ro
+    volumes: !reset []
     networks: [database]
     depends_on:
       litellm:

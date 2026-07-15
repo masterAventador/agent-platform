@@ -10,11 +10,16 @@ from agent_platform.bootstrap.demo_seed import (
     DEMO_ADMIN_EMAIL,
     DEMO_ADMIN_MEMBERSHIP_ID,
     DEMO_ADMIN_USER_ID,
+    DEMO_ARTIFACT_CONTENT,
+    DEMO_ARTIFACT_ID,
+    DEMO_ATTACHMENT_ID,
     DEMO_COMPLETED_RUN_ID,
     DEMO_DEAD_LETTER_ID,
     DEMO_DRAFT_EMPLOYEE_ID,
     DEMO_EMAIL,
     DEMO_EMPLOYEE_ID,
+    DEMO_FILE_CONTENT,
+    DEMO_FILE_ID,
     DEMO_MCP_SERVER_ID,
     DEMO_MEMBER_EMAIL,
     DEMO_MEMBER_MEMBERSHIP_ID,
@@ -31,6 +36,11 @@ from agent_platform.bootstrap.demo_seed import (
 )
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    ArtifactRecord,
+    FileRecord,
+    TaskAttachmentRecord,
+)
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.dead_letters import RunDeadLetterRecord
 from agent_platform.infrastructure.database.repositories.employees import (
@@ -48,9 +58,22 @@ from agent_platform.infrastructure.database.repositories.tools import McpServerR
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.platform.runs.entities import RunStatus
 
-ALLOWED_DEMO_DATABASE_URL = (
-    "postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform_demo"
-)
+ALLOWED_DEMO_DATABASE_URL = "postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform_demo"
+
+
+class MemoryArtifactStorage:
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    async def put(self, *, key: str, content: bytes, media_type: str) -> None:
+        del media_type
+        self.objects[key] = content
+
+    async def get(self, *, key: str) -> bytes:
+        return self.objects[key]
+
+    async def delete(self, *, key: str) -> None:
+        self.objects.pop(key, None)
 
 
 def test_demo_credentials_are_accepted_by_the_login_contract() -> None:
@@ -87,10 +110,7 @@ def test_demo_seed_allows_only_explicit_local_demo_databases(database_url: str) 
     "database_url",
     [
         "postgresql+asyncpg://demo:secret@database.internal:5432/agent_platform_demo",
-        (
-            "postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform"
-            "?host=database.internal"
-        ),
+        ("postgresql+asyncpg://demo:secret@127.0.0.1:5432/agent_platform?host=database.internal"),
         "postgresql+asyncpg://demo:secret@localhost:5432/postgres",
         "postgresql+asyncpg://demo:secret@127.0.0.1:5432/template1",
         "sqlite+aiosqlite:///agent_platform_demo.db",
@@ -111,15 +131,18 @@ def test_demo_seed_refuses_non_development_environments(environment: str) -> Non
 async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_dangling_data(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    storage = MemoryArtifactStorage()
     first = await seed_demo_data(
         session_factory=session_factory,
         database_url=ALLOWED_DEMO_DATABASE_URL,
         environment="development",
+        artifact_storage=storage,
     )
     second = await seed_demo_data(
         session_factory=session_factory,
         database_url=ALLOWED_DEMO_DATABASE_URL,
         environment="development",
+        artifact_storage=storage,
     )
 
     assert first.created > 0
@@ -139,7 +162,10 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert await _count(session, EmployeeRecord) == 2
         assert await _count(session, EmployeeVersionRecord) == 1
         assert await _count(session, RunRecord) == 2
-        assert await _count(session, RunEventRecord) == 6
+        assert await _count(session, RunEventRecord) == 7
+        assert await _count(session, FileRecord) == 1
+        assert await _count(session, TaskAttachmentRecord) == 1
+        assert await _count(session, ArtifactRecord) == 1
         assert await _count(session, McpServerRecord) == 1
         assert await _count(session, ToolRecord) == 1
         assert await _count(session, RunDeadLetterRecord) == 1
@@ -150,12 +176,8 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         admin = await session.get(UserRecord, DEMO_ADMIN_USER_ID)
         member = await session.get(UserRecord, DEMO_MEMBER_USER_ID)
         owner_membership = await session.get(TenantMembershipRecord, DEMO_MEMBERSHIP_ID)
-        admin_membership = await session.get(
-            TenantMembershipRecord, DEMO_ADMIN_MEMBERSHIP_ID
-        )
-        member_membership = await session.get(
-            TenantMembershipRecord, DEMO_MEMBER_MEMBERSHIP_ID
-        )
+        admin_membership = await session.get(TenantMembershipRecord, DEMO_ADMIN_MEMBERSHIP_ID)
+        member_membership = await session.get(TenantMembershipRecord, DEMO_MEMBER_MEMBERSHIP_ID)
         tenant = await session.get(TenantRecord, DEMO_TENANT_ID)
         employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
         draft_employee = await session.get(EmployeeRecord, DEMO_DRAFT_EMPLOYEE_ID)
@@ -178,6 +200,7 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         } == {DEMO_TENANT_ID}
         assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
         assert employee is not None and employee.published_version == 1
+        assert employee.capabilities["file_upload"] is True
         assert "Seed 本身不调用模型" in employee.role_description
         assert "手动发起任务" in employee.role_description
         assert "可能产生上游费用" in employee.role_description
@@ -204,6 +227,23 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         completed_run = await session.get(RunRecord, DEMO_COMPLETED_RUN_ID)
         assert completed_run is not None
         assert completed_run.created_by == DEMO_MEMBER_USER_ID
+        file = await session.get(FileRecord, DEMO_FILE_ID)
+        attachment = await session.get(TaskAttachmentRecord, DEMO_ATTACHMENT_ID)
+        artifact = await session.get(ArtifactRecord, DEMO_ARTIFACT_ID)
+        assert file is not None and storage.objects[file.storage_key] == DEMO_FILE_CONTENT
+        assert attachment is not None and attachment.file_id == DEMO_FILE_ID
+        assert artifact is not None
+        assert storage.objects[artifact.storage_key] == DEMO_ARTIFACT_CONTENT
+        artifact_events = (
+            await session.scalars(
+                select(RunEventRecord).where(
+                    RunEventRecord.run_id == DEMO_COMPLETED_RUN_ID,
+                    RunEventRecord.event_type == "artifact.created",
+                )
+            )
+        ).all()
+        assert len(artifact_events) == 1
+        assert artifact_events[0].payload["artifact_id"] == str(DEMO_ARTIFACT_ID)
 
         employee.name = "被本地修改的名称"
         await session.commit()
@@ -212,6 +252,7 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         session_factory=session_factory,
         database_url=ALLOWED_DEMO_DATABASE_URL,
         environment="development",
+        artifact_storage=storage,
     )
     assert repaired.created == 0
     assert repaired.updated == 1

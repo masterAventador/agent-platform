@@ -1,7 +1,12 @@
 from typing import Protocol
 from uuid import UUID
 
-from agent_platform.platform.artifacts.entities import Artifact, File, TaskAttachment
+from agent_platform.platform.artifacts.entities import (
+    Artifact,
+    File,
+    StorageOperation,
+    TaskAttachment,
+)
 
 
 class ArtifactStorageProvider(Protocol):
@@ -34,6 +39,14 @@ class ArtifactRepository(Protocol):
     async def list_for_run(self, *, tenant_id: UUID, run_id: UUID) -> list[Artifact]: ...
 
     async def delete(self, *, tenant_id: UUID, artifact_id: UUID) -> bool: ...
+
+
+class StorageOperationRepository(Protocol):
+    async def add(self, operation: StorageOperation) -> None: ...
+
+    async def mark_status(self, *, operation_id: UUID, status: str) -> None: ...
+
+    async def list_pending(self, *, limit: int = 100) -> list[StorageOperation]: ...
 
 
 class ArtifactWorkspace(Protocol):

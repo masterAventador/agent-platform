@@ -204,6 +204,62 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     })
   })
 
+  it('shows a controlled error when the desktop file selector fails', async () => {
+    const user = userEvent.setup()
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(getPlatformAdapter).mockReturnValue({
+      selectFile: vi.fn().mockRejectedValue(new Error('permission denied')),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择文件' }))
+
+    expect(await screen.findByText(/无法读取所选文件/)).toBeInTheDocument()
+  })
+
+  it('keeps the modal open and explains an attachment upload failure', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn()
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    vi.mocked(uploadFile).mockRejectedValue(new Error('network unavailable'))
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择文件' }))
+    await user.type(screen.getByRole('textbox', { name: '任务内容' }), '总结附件')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    expect(await screen.findByText(/附件上传失败/)).toBeInTheDocument()
+    expect(mutateAsync).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
   it('catches createRun 409 and renders an actionable error in the modal', async () => {
     const user = userEvent.setup()
     const mutateAsync = vi.fn().mockRejectedValue({

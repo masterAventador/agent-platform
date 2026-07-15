@@ -2,9 +2,11 @@ from io import BytesIO
 
 import pytest
 
+from agent_platform.config import AppSettings
 from agent_platform.infrastructure.object_storage.artifacts import (
     MinioArtifactStorageProvider,
     TencentCosArtifactProvider,
+    create_artifact_storage_provider,
 )
 
 
@@ -97,3 +99,32 @@ async def test_tencent_cos_provider_is_lighthouse_cos_compatible() -> None:
     assert client.body is not None and client.body.closed
     await provider.delete(key="tenant/artifact")
     assert client.objects == {}
+
+
+def test_storage_factory_builds_tencent_cos_from_production_settings() -> None:
+    client = FakeCos()
+    captured: dict[str, object] = {}
+
+    def create_client(**kwargs: object) -> FakeCos:
+        captured.update(kwargs)
+        return client
+
+    provider = create_artifact_storage_provider(
+        settings=AppSettings(
+            artifact_storage_provider="tencent-cos",
+            artifact_storage_bucket="demo-1250000000",
+            cos_region="ap-beijing",
+            cos_secret_id="secret-id",
+            cos_secret_key="secret-key",
+        ),
+        cos_client_factory=create_client,
+    )
+
+    assert isinstance(provider, TencentCosArtifactProvider)
+    assert captured == {
+        "region": "ap-beijing",
+        "secret_id": "secret-id",
+        "secret_key": "secret-key",
+        "token": None,
+        "scheme": "https",
+    }

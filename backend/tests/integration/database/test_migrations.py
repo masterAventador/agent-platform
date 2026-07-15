@@ -110,15 +110,18 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'model_gateway_provisioning_commands'"
         ).fetchone()[0]
-        file_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(files)").fetchall()
-        }
+        file_columns = {row[1] for row in connection.execute("PRAGMA table_info(files)").fetchall()}
         attachment_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(task_attachments)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(task_attachments)").fetchall()
         }
         artifact_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
+        }
+        storage_operation_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(artifact_storage_operations)"
+            ).fetchall()
         }
         attachment_foreign_keys = {
             (row[2], row[3], row[4])
@@ -224,16 +227,47 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert "action = 'reconcile'" in provisioning_table_sql
     assert "status IN ('pending', 'processing', 'completed', 'failed')" in provisioning_table_sql
     assert {
-        "id", "tenant_id", "owner_id", "name", "media_type", "size_bytes",
-        "sha256", "storage_key", "created_at",
+        "id",
+        "tenant_id",
+        "owner_id",
+        "name",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "storage_key",
+        "created_at",
     } == file_columns
     assert {
-        "id", "tenant_id", "run_id", "file_id", "workspace_path", "created_at",
+        "id",
+        "tenant_id",
+        "run_id",
+        "file_id",
+        "workspace_path",
+        "created_at",
     } == attachment_columns
     assert {
-        "id", "tenant_id", "run_id", "created_by", "name", "media_type",
-        "size_bytes", "sha256", "storage_key", "created_at",
+        "id",
+        "tenant_id",
+        "run_id",
+        "created_by",
+        "name",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "storage_key",
+        "created_at",
     } == artifact_columns
+    assert {
+        "id",
+        "tenant_id",
+        "action",
+        "entity_kind",
+        "entity_id",
+        "storage_key",
+        "status",
+        "created_at",
+        "updated_at",
+    } == storage_operation_columns
     assert ("runs", "tenant_id", "tenant_id") in attachment_foreign_keys
     assert ("runs", "run_id", "id") in attachment_foreign_keys
     assert ("files", "tenant_id", "tenant_id") in attachment_foreign_keys
@@ -252,7 +286,8 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             ", 'runs', 'run_events', 'run_commands', 'knowledge_bases', "
             "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
             "'tool_audit_events', 'tenant_model_gateway_policies', "
-            "'model_gateway_provisioning_commands', 'files', 'task_attachments', 'artifacts'"
+            "'model_gateway_provisioning_commands', 'files', 'task_attachments', 'artifacts', "
+            "'artifact_storage_operations'"
             ")"
         ).fetchall()
     assert platform_tables == []
@@ -494,12 +529,7 @@ def test_model_gateway_alias_migration_uses_uuid_binds_for_postgres() -> None:
 
 
 def _load_model_gateway_migration() -> ModuleType:
-    path = (
-        BACKEND_ROOT
-        / "migrations"
-        / "versions"
-        / "20260714_0016_migrate_model_gateway_alias.py"
-    )
+    path = BACKEND_ROOT / "migrations" / "versions" / "20260714_0016_migrate_model_gateway_alias.py"
     spec = spec_from_file_location("model_gateway_alias_migration", path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)

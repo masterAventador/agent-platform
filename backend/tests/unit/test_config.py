@@ -47,3 +47,8 @@ def test_production_auth_transport_accepts_secure_cross_site_cookie() -> None:
 
     assert settings.auth_cookie_secure is True
     assert settings.auth_cookie_same_site == "none"
+
+
+def test_tencent_cos_requires_region_and_credentials() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(artifact_storage_provider="tencent-cos")
