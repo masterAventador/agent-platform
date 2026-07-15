@@ -5,6 +5,7 @@ const apiPort = process.env.PLAYWRIGHT_API_PORT ?? '18000'
 const ragflowPort = process.env.PLAYWRIGHT_RAGFLOW_PORT ?? '29380'
 const postgresPort = process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'
 const redisPort = process.env.PLAYWRIGHT_REDIS_PORT ?? '6379'
+const minioApiPort = process.env.PLAYWRIGHT_MINIO_API_PORT ?? '9000'
 
 export default defineConfig({
   testDir: './e2e',
@@ -42,6 +43,7 @@ export default defineConfig({
           `redis://:agent-platform-local-redis@127.0.0.1:${redisPort}/2`,
         AGENT_PLATFORM_RAGFLOW_URL: `http://127.0.0.1:${ragflowPort}`,
         AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-e2e-key',
+        AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioApiPort}`,
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
       },

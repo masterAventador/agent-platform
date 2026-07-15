@@ -124,6 +124,7 @@ struct SupervisorHandle {
 #[derive(Clone)]
 pub struct LocalExecutorManager {
     supervisor: Arc<Mutex<Option<SupervisorHandle>>>,
+    lifecycle: Arc<Mutex<()>>,
     safe_diagnostics: Arc<Mutex<SafeDiagnostics>>,
 }
 
@@ -131,6 +132,7 @@ impl Default for LocalExecutorManager {
     fn default() -> Self {
         Self {
             supervisor: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(Mutex::new(())),
             safe_diagnostics: Arc::new(Mutex::new(SafeDiagnostics::default())),
         }
     }
@@ -206,6 +208,10 @@ impl LocalExecutorManager {
         &self,
         launch_spec: LaunchSpec,
     ) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
         if self.status()?.running {
             return Err(LocalExecutorError::AlreadyRunning);
         }
@@ -215,7 +221,7 @@ impl LocalExecutorManager {
             .map_err(|_| LocalExecutorError::ProcessUnavailable)?
             .is_some()
         {
-            self.stop()?;
+            self.stop_inner()?;
         }
         let sidecar = spawn_sidecar(&launch_spec, Arc::clone(&self.safe_diagnostics))?;
         let (commands, receiver) = mpsc::channel();
@@ -292,6 +298,14 @@ impl LocalExecutorManager {
     }
 
     pub fn stop(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| LocalExecutorError::ProcessUnavailable)?;
+        self.stop_inner()
+    }
+
+    fn stop_inner(&self) -> Result<LocalExecutorStatus, LocalExecutorError> {
         let supervisor = self
             .supervisor
             .lock()

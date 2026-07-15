@@ -7,8 +7,9 @@ export const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..
 export const repositoryRoot = resolve(frontendRoot, '..')
 export const runtimeDatabaseName = 'agent_platform_runtime_e2e'
 export const runtimeDatabaseUrl =
-  'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_runtime_e2e'
-export const runtimeRedisUrl = 'redis://:agent-platform-local-redis@127.0.0.1:6379/3'
+  `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'}/agent_platform_runtime_e2e`
+export const runtimeRedisUrl =
+  `redis://:agent-platform-local-redis@127.0.0.1:${process.env.PLAYWRIGHT_REDIS_PORT ?? '6379'}/3`
 export const runtimeQueueStream = 'agent-platform:runtime-e2e:runs'
 export const runtimeQueueGroup = 'agent-platform-runtime-e2e-workers'
 export const runtimeControllerSecret = 'runtime-e2e-controller-secret'
@@ -19,8 +20,9 @@ export const runtimeReadyFiles = [
 
 export const recoveryDatabaseName = 'agent_platform_runtime_recovery_e2e'
 export const recoveryDatabaseUrl =
-  'postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/agent_platform_runtime_recovery_e2e'
-export const recoveryRedisUrl = 'redis://:agent-platform-local-redis@127.0.0.1:6379/4'
+  `postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${process.env.PLAYWRIGHT_POSTGRES_PORT ?? '5432'}/agent_platform_runtime_recovery_e2e`
+export const recoveryRedisUrl =
+  `redis://:agent-platform-local-redis@127.0.0.1:${process.env.PLAYWRIGHT_REDIS_PORT ?? '6379'}/4`
 export const recoveryQueueStream = 'agent-platform:runtime-recovery-e2e:runs'
 export const recoveryQueueGroup = 'agent-platform-runtime-recovery-e2e-workers'
 

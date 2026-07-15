@@ -406,6 +406,83 @@ fn stop_preempts_a_blocked_invocation_after_crash_recovery() {
 
 #[cfg(unix)]
 #[test]
+fn concurrent_starts_create_exactly_one_managed_sidecar() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let _process_guard = PROCESS_TEST_LOCK.lock().expect("process test lock");
+    let pids = tempfile::NamedTempFile::new().expect("sidecar pid file");
+    let script = executable_script(&format!(
+        "#!/bin/sh\nread token\necho $$ >> '{}'\nwhile read line; do echo '{{\"ok\":true}}'; done\n",
+        pids.path().display(),
+    ));
+    let script_path = script.to_path_buf();
+    let manager = LocalExecutorManager::default();
+    let initial_verification_barrier = Arc::new(Barrier::new(2));
+    let spawn_verifications = Arc::new(AtomicUsize::new(0));
+    let mut starts = Vec::new();
+
+    for _ in 0..2 {
+        let manager = manager.clone();
+        let verifier_path = script_path.clone();
+        let barrier = Arc::clone(&initial_verification_barrier);
+        let spawn_verifications = Arc::clone(&spawn_verifications);
+        starts.push(std::thread::spawn(move || {
+            let verifier_calls = AtomicUsize::new(0);
+            manager.start_verified(move || {
+                let contents = std::fs::read(&verifier_path)
+                    .map_err(|_| LocalExecutorError::LaunchVerificationFailed)?;
+                let file = std::fs::File::open(&verifier_path)
+                    .map_err(|_| LocalExecutorError::LaunchVerificationFailed)?;
+                if verifier_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    barrier.wait();
+                } else {
+                    spawn_verifications.fetch_add(1, Ordering::SeqCst);
+                    let deadline = Instant::now() + Duration::from_millis(200);
+                    while spawn_verifications.load(Ordering::SeqCst) < 2
+                        && Instant::now() < deadline
+                    {
+                        std::thread::yield_now();
+                    }
+                }
+                Ok(VerifiedSidecarExecutable {
+                    path: verifier_path.clone(),
+                    file,
+                    contents,
+                })
+            })
+        }));
+    }
+
+    let results = starts
+        .into_iter()
+        .map(|start| start.join().expect("start thread"))
+        .collect::<Vec<_>>();
+    std::thread::sleep(Duration::from_millis(50));
+    let sidecar_pids = std::fs::read_to_string(pids.path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    manager.stop().expect("stop managed sidecar");
+    for pid in &sidecar_pids {
+        if process_exists(*pid) {
+            unsafe { libc::kill(-*pid, libc::SIGKILL) };
+        }
+    }
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(LocalExecutorError::AlreadyRunning)))
+            .count(),
+        1,
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn verified_launch_executes_the_verified_bytes_not_a_replaced_path() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
