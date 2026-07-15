@@ -58,6 +58,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
             return
 
+        if scenario == "mvp-web-flow-failure":
+            self._send_json(
+                500,
+                {
+                    "error": {
+                        "message": "deterministic MVP controlled failure",
+                        "type": "mvp_controlled_failure",
+                    }
+                },
+            )
+            return
+
         if scenario == "retry":
             with self.retry_lock:
                 attempts = self.retry_counts.get("retry-once", 0)

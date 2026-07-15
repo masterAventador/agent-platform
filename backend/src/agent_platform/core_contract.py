@@ -15,6 +15,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
         "runs",
         "skills",
         "tools",
+        "workbench",
     }
 )
 

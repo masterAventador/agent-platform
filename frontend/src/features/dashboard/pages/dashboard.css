@@ -1,0 +1,32 @@
+.dashboard-health {
+  margin-bottom: 20px;
+}
+
+.dashboard-loading {
+  padding: 48px 0;
+}
+
+.dashboard-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.dashboard-card-breakdown {
+  margin-top: 20px;
+}
+
+.dashboard-status-card {
+  margin-top: 16px;
+}
+
+.dashboard-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-status-item {
+  min-height: 40px;
+  padding: 8px 12px;
+}
