@@ -37,6 +37,19 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             row[1] for row in connection.execute("PRAGMA table_info(employee_versions)").fetchall()
         }
         run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        conversation_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        conversation_message_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(conversation_messages)").fetchall()
+        }
+        conversation_message_foreign_keys = {
+            (row[2], row[3], row[4])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(conversation_messages)"
+            ).fetchall()
+        }
         event_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(run_events)").fetchall()
         }
@@ -154,10 +167,36 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "id",
         "tenant_id",
         "employee_id",
+            "thread_id",
+            "status",
+            "idempotency_key",
+            "conversation_id",
+        } <= run_columns
+    assert {
+        "id",
+        "tenant_id",
+        "employee_id",
+        "created_by",
+        "title",
         "thread_id",
-        "status",
-        "idempotency_key",
-    } <= run_columns
+        "created_at",
+        "updated_at",
+        "last_message_at",
+    } == conversation_columns
+    assert {
+        "id",
+        "tenant_id",
+        "conversation_id",
+        "run_id",
+        "sequence",
+        "role",
+        "content",
+        "attachment_ids",
+        "created_at",
+    } == conversation_message_columns
+    assert ("conversations", "tenant_id", "tenant_id") in conversation_message_foreign_keys
+    assert ("conversations", "conversation_id", "id") in conversation_message_foreign_keys
+    assert ("runs", "run_id", "id") in conversation_message_foreign_keys
     assert {"event_id", "run_id", "sequence", "event_type", "payload"} <= event_columns
     assert {"id", "run_id", "action", "dispatched_at", "processed_at"} <= command_columns
     assert {"id", "tenant_id", "name", "provider", "provider_id"} <= knowledge_columns
@@ -314,6 +353,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "'tenants', 'users', 'auth_sessions', 'tenant_memberships', "
             "'employees', 'employee_versions'"
             ", 'runs', 'run_events', 'run_commands', 'knowledge_bases', "
+            "'conversations', 'conversation_messages', "
             "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
             "'tool_audit_events', 'tenant_model_gateway_policies', "
             "'model_gateway_provisioning_commands', 'files', 'task_attachments', 'artifacts', "

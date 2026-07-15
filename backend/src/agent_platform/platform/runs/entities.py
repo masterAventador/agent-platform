@@ -60,6 +60,7 @@ class Run:
     error_code: str | None = None
     error_message: str | None = None
     idempotency_key: UUID | None = None
+    conversation_id: UUID | None = None
 
     @classmethod
     def create(
@@ -71,6 +72,8 @@ class Run:
         created_by: UUID,
         input_data: dict[str, JsonValue],
         idempotency_key: UUID | None = None,
+        conversation_id: UUID | None = None,
+        thread_id: str | None = None,
     ) -> "Run":
         run_id = uuid4()
         now = datetime.now(UTC)
@@ -80,12 +83,13 @@ class Run:
             employee_id=employee_id,
             employee_version=employee_version,
             created_by=created_by,
-            thread_id=str(run_id),
+            thread_id=thread_id or str(run_id),
             input_data=input_data,
             status=RunStatus.QUEUED,
             created_at=now,
             updated_at=now,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
         )
 
     def transition_to(

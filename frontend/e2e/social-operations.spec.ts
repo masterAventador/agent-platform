@@ -54,6 +54,30 @@ async function grantSocialPermissionsOnLogin(page: Page) {
   })
 }
 
+function createHealthyGovernance() {
+  return {
+    account_id: accountId,
+    status: 'healthy',
+    circuit_open: false,
+    health_score: 100,
+    recent_tasks: [],
+    failure_trend: {},
+    policy_limits: {
+      'social.account.health_check': {
+        action_type: 'social.account.health_check',
+        daily_limit: 10,
+        effective_daily_limit: 2,
+        remaining_daily: 1,
+        min_interval_seconds: 60,
+        cold_start_days: 7,
+        consecutive_failure_threshold: 3,
+        next_available_at: null,
+      },
+    },
+    recommendations: [],
+  }
+}
+
 test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ page }) => {
   const moduleRequests = trackSocialModuleRequests(page)
   await mockCapabilityRegistry(page, true)
@@ -85,6 +109,66 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
     }
     await route.fulfill({ contentType: 'application/json', json: [] })
   })
+  const authorizeRequests: unknown[] = []
+  let governance = createHealthyGovernance()
+  await page.route('**/api/v1/social-operations/accounts/**', async (route) => {
+    const url = route.request().url()
+    if (url.endsWith('/actions/authorize')) {
+      authorizeRequests.push(await route.request().postDataJSON())
+      await route.fulfill({
+        contentType: 'application/json',
+        json: {
+          account_id: accountId,
+          action_type: 'social.account.health_check',
+          allowed: true,
+          remaining_daily: 0,
+          next_available_at: null,
+          idempotency_key: 'e2e-authorized',
+        },
+      })
+      return
+    }
+    if (url.endsWith('/pause')) {
+      governance = {
+        ...governance,
+        status: 'paused',
+        circuit_open: true,
+        recommendations: ['账号已暂停，请完成复核后再恢复自动执行。'],
+      }
+      await route.fulfill({ contentType: 'application/json', json: { ok: true } })
+      return
+    }
+    if (url.endsWith('/resume')) {
+      governance = createHealthyGovernance()
+      await route.fulfill({ contentType: 'application/json', json: { ok: true } })
+      return
+    }
+    if (url.endsWith('/remote-stop')) {
+      governance = {
+        ...governance,
+        status: 'human_handoff',
+        circuit_open: true,
+        health_score: 40,
+        recent_tasks: [{
+          account_id: accountId,
+          action_type: 'private_message',
+          idempotency_key: 'dm-1',
+          result: 'failed',
+          occurred_at: '2026-07-15T02:30:00Z',
+          consecutive_failures: 3,
+        }],
+        failure_trend: { private_message: 3 },
+        recommendations: ['连续失败已触发熔断，请人工检查平台页面和任务参数。'],
+      }
+      await route.fulfill({ contentType: 'application/json', json: { ok: true } })
+      return
+    }
+    if (url.endsWith('/governance')) {
+      await route.fulfill({ contentType: 'application/json', json: governance })
+      return
+    }
+    await route.fulfill({ status: 404, contentType: 'application/json', json: {} })
+  })
 
   await registerAndLogin(page)
   await page.getByRole('link', { name: '设备与平台账号' }).click()
@@ -109,10 +193,25 @@ test('B02 生产入口通过 Tauri 适配器执行受控账号流程', async ({ 
   await expect(page.getByText('健康', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '启动本地执行器' }).click()
   await expect(page.getByText('执行器运行中')).toBeVisible()
+  await page.getByRole('button', { name: '刷新治理状态' }).click()
+  await expect(page.getByText('账号健康度 100')).toBeVisible()
   await page.getByRole('button', { name: '执行无副作用健康检查' }).click()
   await expect(page.getByText('无副作用健康检查已接受。')).toBeVisible()
+  expect(authorizeRequests).toEqual([
+    expect.objectContaining({ action_type: 'social.account.health_check' }),
+  ])
   await page.getByRole('button', { name: '生成安全诊断' }).click()
   await expect(page.getByText('cookie=[REDACTED]')).toBeVisible()
+  await page.getByRole('button', { name: '上报风控' }).click()
+  await expect(page.getByText('风控已触发熔断和人工接管。')).toBeVisible()
+  await expect(page.getByText('等待人工接管')).toBeVisible()
+  await page.getByRole('button', { name: '远程停止账号' }).click()
+  await expect(page.getByText('远程停止已生效。')).toBeVisible()
+  await expect(page.getByText('账号健康度 40')).toBeVisible()
+  await expect(page.getByText('private_message：失败（连续失败 3 次）')).toBeVisible()
+  await expect(page.getByText('private_message：3 次失败')).toBeVisible()
+  await expect(page.getByRole('button', { name: '执行无副作用健康检查' }))
+    .toBeDisabled()
   await page.getByRole('button', { name: '紧急停止' }).click()
   await expect(page.getByText('紧急停止已生效。')).toBeVisible()
 

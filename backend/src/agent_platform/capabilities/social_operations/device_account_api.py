@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_platform.capabilities.social_operations.device_account_service import (
+    AccountActionResult,
     AccountHealthSignal,
     ActorContext,
     AuthorizationError,
@@ -63,6 +65,42 @@ class BindAccountRequest(_Request):
 
 class AccountHealthRequest(_Request):
     signal: AccountHealthSignal
+
+
+class GovernancePolicyRequest(_Request):
+    platform: SocialPlatform
+    action_type: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.]+$")
+    min_interval_seconds: int = Field(ge=0, le=86_400)
+    daily_limit: int = Field(ge=1, le=100_000)
+    cold_start_daily_limit: int = Field(ge=1, le=100_000)
+    cold_start_days: int = Field(ge=0, le=365)
+    consecutive_failure_threshold: int = Field(ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _cold_limit_cannot_exceed_daily(self) -> GovernancePolicyRequest:
+        if self.cold_start_daily_limit > self.daily_limit:
+            raise ValueError("cold start daily limit cannot exceed daily limit")
+        return self
+
+
+class AuthorizeActionRequest(_Request):
+    action_type: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.]+$")
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class AccountActionResultRequest(_Request):
+    action_type: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.]+$")
+    result: AccountActionResult
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    failure_reason: str | None = Field(default=None, max_length=256)
+
+
+class PauseAccountRequest(_Request):
+    reason: str = Field(min_length=1, max_length=128)
+
+
+class RemoteStopAccountRequest(_Request):
+    reason: str = Field(min_length=1, max_length=128)
 
 
 def create_device_account_router(
@@ -162,6 +200,51 @@ def create_device_account_router(
             )
         )
 
+    @router.post("/governance/policies", status_code=status.HTTP_201_CREATED)
+    def configure_governance_policy(request: GovernancePolicyRequest) -> Any:
+        return _call(
+            lambda: service.configure_account_governance_policy(
+                actor_provider(),
+                platform=request.platform,
+                action_type=request.action_type,
+                min_interval=timedelta(seconds=request.min_interval_seconds),
+                daily_limit=request.daily_limit,
+                cold_start_daily_limit=request.cold_start_daily_limit,
+                cold_start_days=request.cold_start_days,
+                consecutive_failure_threshold=request.consecutive_failure_threshold,
+            )
+        )
+
+    @router.post("/accounts/{account_id}/actions/authorize")
+    def authorize_account_action(
+        account_id: UUID,
+        request: AuthorizeActionRequest,
+    ) -> Any:
+        return _call(
+            lambda: service.authorize_account_action(
+                actor_provider(),
+                account_id,
+                action_type=request.action_type,
+                idempotency_key=request.idempotency_key,
+            )
+        )
+
+    @router.post("/accounts/{account_id}/actions/result")
+    def record_account_action_result(
+        account_id: UUID,
+        request: AccountActionResultRequest,
+    ) -> Any:
+        return _call(
+            lambda: service.record_account_action_result(
+                actor_provider(),
+                account_id,
+                action_type=request.action_type,
+                result=request.result,
+                idempotency_key=request.idempotency_key,
+                failure_reason=request.failure_reason,
+            )
+        )
+
     @router.get("/accounts/{account_id}")
     def get_account(account_id: UUID) -> Any:
         return _call(lambda: service.get_account(actor_provider(), account_id))
@@ -170,15 +253,33 @@ def create_device_account_router(
     def list_accounts() -> Any:
         return _call(lambda: service.list_accounts(actor_provider()))
 
+    @router.get("/accounts/{account_id}/governance")
+    def get_account_governance(account_id: UUID) -> Any:
+        return _call(lambda: service.get_account_governance(actor_provider(), account_id))
+
+    @router.post("/accounts/{account_id}/pause")
+    def pause_account(account_id: UUID, request: PauseAccountRequest) -> Any:
+        return _call(
+            lambda: service.pause_account(
+                actor_provider(), account_id, reason=request.reason
+            )
+        )
+
     @router.post("/accounts/{account_id}/resume")
     def resume_account(account_id: UUID) -> Any:
-        return _call(
-            lambda: service.resume_account_after_handoff(actor_provider(), account_id)
-        )
+        return _call(lambda: service.resume_account(actor_provider(), account_id))
 
     @router.post("/accounts/{account_id}/logout")
     def logout_account(account_id: UUID) -> Any:
         return _call(lambda: service.logout_account(actor_provider(), account_id))
+
+    @router.post("/accounts/{account_id}/remote-stop")
+    def remote_stop_account(account_id: UUID, request: RemoteStopAccountRequest) -> Any:
+        return _call(
+            lambda: service.remote_stop_account(
+                actor_provider(), account_id, reason=request.reason
+            )
+        )
 
     return router
 

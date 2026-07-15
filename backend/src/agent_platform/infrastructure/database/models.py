@@ -10,6 +10,10 @@ from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
 )
+from agent_platform.infrastructure.database.repositories.conversations import (
+    ConversationMessageRecord,
+    ConversationRecord,
+)
 from agent_platform.infrastructure.database.repositories.dead_letters import RunDeadLetterRecord
 from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
@@ -46,6 +50,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     TenantMembershipRecord,
     EmployeeRecord,
     EmployeeVersionRecord,
+    ConversationRecord,
+    ConversationMessageRecord,
     RunRecord,
     RunEventRecord,
     RunCommandRecord,
