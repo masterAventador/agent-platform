@@ -360,3 +360,45 @@ async def test_demo_seed_adopts_migration_backfilled_tool_version(
             )
         ).scalars().all()
     assert len(versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_provides_representative_memories_idempotently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Demo Seed 预置代表性长期记忆且幂等，演示员工开箱启用记忆能力。"""
+    from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
+
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        memories = (
+            await session.scalars(
+                select(MemoryRecord).where(MemoryRecord.tenant_id == DEMO_TENANT_ID)
+            )
+        ).all()
+        employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
+        version = (
+            await session.scalars(
+                select(EmployeeVersionRecord).where(
+                    EmployeeVersionRecord.employee_id == DEMO_EMPLOYEE_ID
+                )
+            )
+        ).one()
+
+    assert employee is not None
+    assert employee.capabilities.get("memory") is True
+    capabilities = version.definition.get("capabilities")
+    assert isinstance(capabilities, dict) and capabilities.get("memory") is True
+    scopes = {record.scope for record in memories}
+    assert {"tenant", "user", "employee"}.issubset(scopes)
+    assert all(record.status == "active" for record in memories)
+    contents = {record.content for record in memories}
+    assert len(contents) == len(memories)

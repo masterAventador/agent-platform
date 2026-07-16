@@ -50,6 +50,7 @@ const employee: Employee = {
       conversation: true,
       scheduled_tasks: false,
       file_upload: false,
+      memory: false,
     },
     skill_ids: [],
     tool_ids: [],
@@ -163,7 +164,25 @@ describe('EmployeeEditorPage configuration availability', () => {
         conversation: false,
         scheduled_tasks: false,
         file_upload: true,
+        memory: false,
       },
+    }))
+  })
+
+  it('enables long-term memory capability when the checkbox is checked', async () => {
+    const user = userEvent.setup()
+    renderEditor()
+
+    await user.type(screen.getByLabelText('员工名称'), '记忆员工')
+    await user.type(screen.getByLabelText('岗位说明'), '验证长期记忆能力')
+    await user.type(screen.getByLabelText('系统指令'), '执行任务')
+    expect(screen.getByRole('checkbox', { name: /长期记忆/ })).not.toBeChecked()
+    await user.click(screen.getByRole('checkbox', { name: /长期记忆/ }))
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      capabilities: expect.objectContaining({ memory: true }),
     }))
   })
 
@@ -410,6 +429,7 @@ describe('EmployeeEditorPage configuration availability', () => {
         conversation: true,
         scheduled_tasks: false,
         file_upload: true,
+        memory: false,
       },
     }))
   })

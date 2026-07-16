@@ -59,12 +59,14 @@ class EmployeeCapabilities(BaseModel):
     conversation: bool = True
     scheduled_tasks: Literal[False] = False
     file_upload: bool = False
+    memory: bool = False
 
 
 class EmployeeCapabilitiesResponse(BaseModel):
     conversation: bool = True
     scheduled_tasks: bool = False
     file_upload: bool = False
+    memory: bool = False
 
 
 class EmployeeDefinitionBase(BaseModel):

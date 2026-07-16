@@ -262,10 +262,45 @@ def _message_content_text(message: BaseMessage) -> str:
     return str(content)
 
 
+MEMORY_WRITE_E2E_OUTPUT = (
+    "已记录用户偏好。<remember>记忆验收偏好-邮件使用中文签名-E2E</remember>"
+)
+MEMORY_RECALL_EMPTY_OUTPUT = "没有可用记忆"
+
+
+def _memory_recall_output(messages: Sequence[BaseMessage]) -> str:
+    """按注入的 memory_context 数据生成确定性输出，驱动召回闭环断言。"""
+
+    import json as json_module
+
+    for message in reversed(messages):
+        try:
+            data = json_module.loads(_message_content_text(message))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        memory_context = data.get("memory_context")
+        if isinstance(memory_context, dict):
+            memories = memory_context.get("memories")
+            if isinstance(memories, list) and memories:
+                contents = "；".join(
+                    str(item.get("content", ""))
+                    for item in memories
+                    if isinstance(item, dict)
+                )
+                return f"已召回记忆：{contents}"
+    return MEMORY_RECALL_EMPTY_OUTPUT
+
+
 def _output_for_messages(messages: Sequence[BaseMessage]) -> str:
     joined = "\n".join(_message_content_text(message) for message in messages)
     if "短视频投放" in joined or "结构化线索卡片" in joined:
         return STRUCTURED_RUNTIME_E2E_OUTPUT
+    if "memory-write-e2e" in joined:
+        return MEMORY_WRITE_E2E_OUTPUT
+    if "memory-recall-e2e" in joined:
+        return _memory_recall_output(messages)
     return RUNTIME_E2E_OUTPUT
 
 

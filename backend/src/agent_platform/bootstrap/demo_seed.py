@@ -30,6 +30,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
 from agent_platform.infrastructure.database.repositories.entitlements import (
     CapabilityEntitlementRecord,
 )
+from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
@@ -82,6 +83,9 @@ DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
+DEMO_TENANT_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "tenant-memory")
+DEMO_USER_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "user-memory")
+DEMO_EMPLOYEE_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "employee-memory")
 
 DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
 DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
@@ -133,6 +137,7 @@ type DemoRecord = (
     | FileRecord
     | TaskAttachmentRecord
     | ArtifactRecord
+    | MemoryRecord
 )
 
 
@@ -281,6 +286,7 @@ def _demo_records(
             "conversation": True,
             "scheduled_tasks": False,
             "file_upload": True,
+            "memory": True,
         },
         "skill_ids": [],
         "tool_ids": [],
@@ -392,6 +398,7 @@ def _demo_records(
                     "conversation": True,
                     "scheduled_tasks": False,
                     "file_upload": True,
+                    "memory": True,
                 },
                 skill_ids=[],
                 tool_ids=[],
@@ -490,6 +497,7 @@ def _demo_records(
         ),
         *_demo_run_records(),
         *_demo_artifact_records(),
+        *_demo_memory_records(),
         (
             McpServerRecord(
                 id=DEMO_MCP_SERVER_ID,
@@ -610,6 +618,80 @@ def _demo_records(
         ),
     ]
     return records
+
+
+def _demo_memory_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    """代表性长期记忆演示数据：企业/用户/员工三级命名空间各一条，幂等收编。"""
+
+    memory_fields = (
+        "tenant_id",
+        "scope",
+        "scope_ref",
+        "key",
+        "content",
+        "source",
+        "source_ref",
+        "confidence",
+        "status",
+        "expires_at",
+        "created_by",
+    )
+
+    def record(
+        memory_id: UUID,
+        *,
+        scope: str,
+        scope_ref: UUID,
+        content: str,
+        source: str,
+        source_ref: str | None,
+    ) -> tuple[DemoRecord, tuple[str, ...]]:
+        return (
+            MemoryRecord(
+                id=memory_id,
+                tenant_id=DEMO_TENANT_ID,
+                scope=scope,
+                scope_ref=scope_ref,
+                key=sha256(content.encode("utf-8")).hexdigest(),
+                content=content,
+                source=source,
+                source_ref=source_ref,
+                confidence=1.0,
+                status="active",
+                expires_at=None,
+                created_by=DEMO_USER_ID,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            memory_fields,
+        )
+
+    return [
+        record(
+            DEMO_TENANT_MEMORY_ID,
+            scope="tenant",
+            scope_ref=DEMO_TENANT_ID,
+            content="演示工作区统一使用北京时间（UTC+8）安排任务与汇报。",
+            source="manual",
+            source_ref=None,
+        ),
+        record(
+            DEMO_USER_MEMORY_ID,
+            scope="user",
+            scope_ref=DEMO_USER_ID,
+            content="演示账号偏好：邮件与报告使用中文，署名「演示用户」。",
+            source="run",
+            source_ref=str(DEMO_COMPLETED_RUN_ID),
+        ),
+        record(
+            DEMO_EMPLOYEE_MEMORY_ID,
+            scope="employee",
+            scope_ref=DEMO_EMPLOYEE_ID,
+            content="演示研究助理沉淀：行业周报固定包含竞品动态与政策变化两节。",
+            source="manual",
+            source_ref=None,
+        ),
+    ]
 
 
 def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:

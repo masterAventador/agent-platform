@@ -26,6 +26,7 @@ export default defineConfig({
     'runtime.spec.ts',
     'runtime-recovery.spec.ts',
     'knowledge-runtime.spec.ts',
+    'memory-runtime.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
