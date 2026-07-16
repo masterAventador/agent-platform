@@ -33,6 +33,8 @@ def test_operational_metrics_cover_c14_domains_with_low_cardinality_labels() -> 
     meter = RecordingMeter()
     metrics = OperationalMetrics(meter)  # type: ignore[arg-type]
 
+    # AUDIT 组件禁止在此直接构造终态制造覆盖假象：
+    # 其成功/失败计数必须经真实仓储写入路径断言，见 test_audit_metrics.py。
     examples = {
         OperationalComponent.WORKER: "run",
         OperationalComponent.QUEUE: "enqueue",
@@ -40,7 +42,6 @@ def test_operational_metrics_cover_c14_domains_with_low_cardinality_labels() -> 
         OperationalComponent.RAGFLOW: "retrieve",
         OperationalComponent.SANDBOX: "acquire",
         OperationalComponent.CLIENT: "api",
-        OperationalComponent.AUDIT: "persist",
     }
     for component, operation in examples.items():
         metrics.record(

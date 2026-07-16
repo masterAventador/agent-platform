@@ -38,6 +38,9 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactStorageOperationRepository,
     SqlAlchemyFileRepository,
 )
+from agent_platform.infrastructure.database.repositories.audit import (
+    purge_expired_audit_events,
+)
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
     create_bounded_minio_client,
@@ -197,13 +200,40 @@ def create_app(
                 logger.exception("artifact_storage_reconciliation_failed")
             await asyncio.sleep(5)
 
+    async def sweep_audit_retention() -> None:
+        await _wait_for_database_ready(configured_session_factory)
+        while True:
+            try:
+                async with configured_session_factory() as session:
+                    purged = await purge_expired_audit_events(
+                        session,
+                        cutoff=datetime.now(UTC)
+                        - timedelta(days=app_settings.audit_retention_days),
+                        limit=app_settings.audit_retention_sweep_batch_limit,
+                    )
+                    await session.commit()
+                if purged:
+                    logger.info(
+                        "audit_retention_sweep_purged",
+                        extra={"purged_events": purged},
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("audit_retention_sweep_failed")
+            await asyncio.sleep(app_settings.audit_retention_sweep_interval_seconds)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
+        audit_retention_task = asyncio.create_task(sweep_audit_retention())
         try:
             yield
         finally:
+            audit_retention_task.cancel()
             reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await audit_retention_task
             with suppress(asyncio.CancelledError):
                 await reconciliation_task
             try:

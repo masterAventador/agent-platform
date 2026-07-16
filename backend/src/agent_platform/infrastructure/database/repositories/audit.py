@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from time import perf_counter
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
@@ -31,6 +32,11 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunRepository,
 )
 from agent_platform.observability.correlation import current_correlation_id
+from agent_platform.observability.metrics import (
+    OperationalComponent,
+    OperationalMetrics,
+    active_operational_metrics,
+)
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.tool_gateway.errors import ToolInvocationClaimRejected
 from agent_platform.platform.tool_gateway.models import AuditEventType, ToolAuditEvent
@@ -312,10 +318,26 @@ class SqlAlchemyToolAuditReader:
 
 
 class SqlAlchemyAuditEventRepository:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        metrics: OperationalMetrics | None = None,
+    ) -> None:
         self._session = session
+        self._metrics = metrics
 
     async def add(self, event: AuditEventCreate) -> AuditEvent:
+        started = perf_counter()
+        try:
+            created = await self._add(event)
+        except Exception:
+            self._record_metric("persist", "failed", started)
+            raise
+        self._record_metric("persist", "succeeded", started)
+        return created
+
+    async def _add(self, event: AuditEventCreate) -> AuditEvent:
         from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
 
         await self._session.execute(
@@ -407,6 +429,20 @@ class SqlAlchemyAuditEventRepository:
         *,
         tenant_id: UUID,
     ) -> AuditIntegrityVerification:
+        started = perf_counter()
+        try:
+            verification = await self._verify_integrity(tenant_id=tenant_id)
+        except Exception:
+            self._record_metric("verify", "failed", started)
+            raise
+        self._record_metric("verify", "succeeded", started)
+        return verification
+
+    async def _verify_integrity(
+        self,
+        *,
+        tenant_id: UUID,
+    ) -> AuditIntegrityVerification:
         state = await self._session.get(AuditChainStateRecord, tenant_id)
         result = await self._session.execute(
             select(AuditEventRecord)
@@ -471,6 +507,22 @@ class SqlAlchemyAuditEventRepository:
         cutoff: datetime,
         limit: int,
     ) -> int:
+        started = perf_counter()
+        try:
+            purged = await self._purge_before(tenant_id=tenant_id, cutoff=cutoff, limit=limit)
+        except Exception:
+            self._record_metric("retention", "failed", started)
+            raise
+        self._record_metric("retention", "succeeded", started)
+        return purged
+
+    async def _purge_before(
+        self,
+        *,
+        tenant_id: UUID,
+        cutoff: datetime,
+        limit: int,
+    ) -> int:
         if limit < 1 or limit > 10_000:
             raise ValueError("audit retention limit must be between 1 and 10000")
         state = await self._chain_state_for_update(tenant_id=tenant_id)
@@ -506,6 +558,17 @@ class SqlAlchemyAuditEventRepository:
         await self._session.flush()
         return len(records)
 
+    def _record_metric(self, operation: str, outcome: str, started: float) -> None:
+        metrics = self._metrics or active_operational_metrics()
+        if metrics is None:
+            return
+        metrics.record(
+            component=OperationalComponent.AUDIT,
+            operation=operation,
+            outcome=outcome,
+            duration_ms=(perf_counter() - started) * 1000,
+        )
+
     async def _chain_state_for_update(
         self, *, tenant_id: UUID
     ) -> AuditChainStateRecord | None:
@@ -534,6 +597,28 @@ class SqlAlchemyAuditEventRepository:
             event_hash=record.event_hash,
             metadata=dict(record.metadata_json),
         )
+
+
+async def purge_expired_audit_events(
+    session: AsyncSession,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> int:
+    """Purge expired audit events for every tenant while keeping each hash chain valid."""
+
+    repository = SqlAlchemyAuditEventRepository(session)
+    tenant_ids = (
+        (await session.execute(select(AuditChainStateRecord.tenant_id))).scalars().all()
+    )
+    purged = 0
+    for tenant_id in tenant_ids:
+        purged += await repository.purge_before(
+            tenant_id=tenant_id,
+            cutoff=cutoff,
+            limit=limit,
+        )
+    return purged
 
 
 async def emit_audit_event(

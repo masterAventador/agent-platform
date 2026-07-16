@@ -42,14 +42,11 @@ class OperationalComponent(StrEnum):
 
 
 _OPERATIONS: dict[OperationalComponent, frozenset[str]] = {
-    OperationalComponent.WORKER: frozenset({"run", "recovery", "heartbeat"}),
-    OperationalComponent.QUEUE: frozenset(
-        {"setup", "enqueue", "dequeue", "ack", "reclaim", "dead_letter"}
-    ),
-    OperationalComponent.MODEL_GATEWAY: frozenset({"readiness", "chat"}),
+    OperationalComponent.WORKER: frozenset({"run"}),
+    OperationalComponent.QUEUE: frozenset({"enqueue", "dequeue", "dead_letter"}),
+    OperationalComponent.MODEL_GATEWAY: frozenset({"readiness"}),
     OperationalComponent.RAGFLOW: frozenset(
         {
-            "health",
             "create_dataset",
             "delete_dataset",
             "upload_document",
@@ -58,9 +55,7 @@ _OPERATIONS: dict[OperationalComponent, frozenset[str]] = {
             "retrieve",
         }
     ),
-    OperationalComponent.SANDBOX: frozenset(
-        {"acquire", "reconnect", "delete", "heartbeat", "file", "command"}
-    ),
+    OperationalComponent.SANDBOX: frozenset({"acquire", "reconnect", "delete"}),
     OperationalComponent.CLIENT: frozenset({"page", "interaction", "api", "sse", "error"}),
     OperationalComponent.AUDIT: frozenset({"persist", "verify", "retention"}),
 }
@@ -133,3 +128,17 @@ class OperationalMetrics:
             self._client_errors.add(1, {"operation": operation})
         if component is OperationalComponent.AUDIT and outcome == "failed":
             self._audit_failures.add(1, {"operation": operation})
+
+
+_active_operational_metrics: OperationalMetrics | None = None
+
+
+def set_operational_metrics(metrics: OperationalMetrics | None) -> None:
+    """Register the process-wide operational metrics used by non-injected call sites."""
+
+    global _active_operational_metrics
+    _active_operational_metrics = metrics
+
+
+def active_operational_metrics() -> OperationalMetrics | None:
+    return _active_operational_metrics
