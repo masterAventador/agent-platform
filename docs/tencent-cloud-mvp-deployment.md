@@ -36,7 +36,7 @@
 | SSH | `root` + 本机 ED25519 公钥已验证成功 |
 | 轻量对象存储挂载 | `/lhcos-data` 当前不存在 |
 
-禁止把服务器密码、私钥、腾讯云 SecretId/SecretKey、生产凭据或客户凭据写入本文档和 Git。当前 Demo 百炼 API Key 由用户明确决定随私有仓库同步，是仅限 Demo 多机开发的例外；不得把该例外扩展到其他凭据。服务器地址不是认证凭据，但所有公网端口仍必须遵守最小暴露原则。
+禁止把服务器密码、私钥、生产凭据或客户凭据写入本文档和 Git。当前有两个用户明确批准的 Demo 例外随私有仓库版本化：百炼 API Key，以及 2026-07-16 批准的开发用腾讯云子账号 `agent-platform-server` SecretId/SecretKey 与开发桶 `agent-platform-1424480216`（位于 `infra/compose/.env.platform`，仅限开发/演示，C18 时轮换废止）。不得把例外扩展到其他凭据。服务器地址不是认证凭据，但所有公网端口仍必须遵守最小暴露原则。
 
 ## 3. MVP 最小部署拓扑
 
@@ -265,9 +265,9 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - [ ] 配置容器内存限制、日志轮转和健康检查；
 - [ ] 只开放必要公网端口，SSH 仅使用密钥；
 - [x] 阿里云百炼通过 LiteLLM 完成最小真实请求（2026-07-15，`qwen-plus`，23 Token）；
-- [ ] 创建北京私有 LighthouseCOS 存储桶；
-- [ ] 完成服务端 STS、Tauri 直传和签名下载；
-- [x] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界（2026-07-15：MinIO 真实全链路及 COS 官方 SDK 契约通过；真实 COS 桶凭据门禁仍待执行）；
+- [x] 创建北京私有 LighthouseCOS 存储桶（2026-07-16：`agent-platform-1424480216`，私有读写；CAM 子账号 `agent-platform-server` 已授权 COS+STS）；
+- [ ] 完成服务端 STS、Tauri 直传和签名下载（凭据已就绪，签发实现属 B04，待 C17 三层授权）；
+- [x] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界（2026-07-15：MinIO 真实全链路及 COS 官方 SDK 契约通过；2026-07-16：真实 COS 桶凭据门禁通过，并修复 Provider 对真实 StreamBody 的资源释放缺陷——Mock 曾放宽 close 契约）；
 - [ ] MPS 从 LighthouseCOS/COS 读取素材并将成片写回；
 - [ ] 完成单用户、单 Worker、单 Sandbox 的资源压力检查；
 - [ ] 验证服务器重启后容器恢复；

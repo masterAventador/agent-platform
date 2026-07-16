@@ -56,10 +56,16 @@ class MinioArtifactStorageProvider:
                 response.release_conn()
 
 
+class CosRawStream(Protocol):
+    def close(self) -> None: ...
+
+
 class CosBody(Protocol):
+    """cos-python-sdk-v5 StreamBody 的真实契约：只保证 read 与 get_raw_stream，没有 close。"""
+
     def read(self) -> bytes: ...
 
-    def close(self) -> None: ...
+    def get_raw_stream(self) -> CosRawStream: ...
 
 
 class TencentCosClient(Protocol):
@@ -102,7 +108,7 @@ class TencentCosArtifactProvider:
         try:
             return body.read()
         finally:
-            body.close()
+            body.get_raw_stream().close()
 
 
 CosClientFactory = Callable[..., TencentCosClient]

@@ -281,7 +281,7 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 
 - [`docs/tencent-cloud-mvp-deployment.md`](docs/tencent-cloud-mvp-deployment.md) 是当前腾讯云资源、最小采购、单机部署、对象存储、视频云服务、RAGFlow 延后方案和扩容条件的权威基线；涉及腾讯云采购、部署或 Provider 选择前必须先完整阅读；
 - 本项目的模型服务使用阿里云百炼，云端运行、对象存储和视频渲染分别使用腾讯云 Lighthouse、LighthouseCOS/COS 和 MPS；腾讯云部署不代表模型供应商必须迁移到腾讯云，禁止再次把这两个决策绑定；竞品分析中保留的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 只描述竞品事实，不得作为本项目默认实现；
-- 当前 Demo 阶段的百炼 API Key 为方便多台开发电脑同步，由用户明确决定随私有项目仓库版本化；除非用户再次明确要求，不得删除该 Key、要求轮换或改写 Git 历史。此例外只适用于当前 Demo 百炼 Key，不扩展到服务器密码、SSH 私钥、生产凭据、客户凭据或腾讯云 SecretId/SecretKey；
+- 当前 Demo 阶段的百炼 API Key 为方便多台开发电脑同步，由用户明确决定随私有项目仓库版本化；除非用户再次明确要求，不得删除该 Key、要求轮换或改写 Git 历史。2026-07-16 用户明确批准第二个例外：开发用腾讯云子账号 `agent-platform-server` 的 SecretId/SecretKey 与开发桶信息随私有仓库版本化（位于 `infra/compose/.env.platform`），仅限开发/演示用途，C18 生产凭据体系建立时必须轮换废止。这两个例外之外，不扩展到服务器密码、SSH 私钥、生产凭据、客户凭据或其他任何腾讯云密钥；
 - 当前无 RAGFlow MVP 复用已有北京 4C4G Lighthouse；在 C07 前不得为了展示提前采购 RAGFlow 或其 MySQL、Redis、Elasticsearch、MinIO 托管服务；
 - 现有 4C4G 只承载低并发演示，不运行本地大模型、完整 FFmpeg 批量渲染、RAGFlow 或重型观测栈；素材和成片必须直传对象存储；
 - 开发到 C07 时，RAGFlow 最小使用独立 4C16G、100GiB 节点，先通过官方 Docker Compose 同机运行其依赖，并保持独立网络、Volume、凭据和端口；
