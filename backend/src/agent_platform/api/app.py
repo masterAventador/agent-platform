@@ -25,6 +25,7 @@ from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
 from agent_platform.api.routes.model_gateway import router as model_gateway_router
+from agent_platform.api.routes.observability import router as observability_router
 from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import mcp_router, tool_router
@@ -264,6 +265,7 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(tool_router)
     app.include_router(model_gateway_router)
+    app.include_router(observability_router)
     app.include_router(workbench_router)
 
     @app.exception_handler(KnowledgeProviderUnavailable)

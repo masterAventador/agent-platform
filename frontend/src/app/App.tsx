@@ -1,13 +1,14 @@
 import { useIsMutating, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Flex, Layout, Result, Select, Space, Typography } from 'antd'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Link, Route, Routes, useNavigate } from 'react-router-dom'
+import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 import { isTenantMutationFor } from '../api/tenant'
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
 import { WorkspaceCapabilityGate } from '../features/workspaces/components/WorkspaceCapabilityGate'
+import { reportClientEvent } from '../observability/client-events'
 import {
   getWorkspaceCapabilities,
   workspacePermissions,
@@ -130,6 +131,7 @@ function PlatformShell() {
 
 function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const logout = useLogout()
+  const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { activeWorkspace, isReconciled, select } = useWorkspaceSelection(user)
@@ -148,6 +150,15 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   useEffect(() => {
     if (pendingActiveWorkspaceMutations === 0) setWorkspaceSwitchWarning(undefined)
   }, [pendingActiveWorkspaceMutations])
+
+  useEffect(() => {
+    if (activeWorkspace !== undefined) {
+      void reportClientEvent(
+        { operation: 'page', outcome: 'succeeded', duration_ms: 0 },
+        activeWorkspace.id,
+      )
+    }
+  }, [activeWorkspace, location.pathname])
 
   const signOut = async () => {
     await logout.mutateAsync()
