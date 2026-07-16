@@ -13,12 +13,19 @@ import {
 
 const sandboxImage = process.env.SANDBOX_CONTROLLER_IMAGE
   ?? 'python:3.12.13-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b'
+const runtimeFrontendPort = process.env.PLAYWRIGHT_RUNTIME_FRONTEND_PORT ?? '15174'
+const runtimeApiPort = process.env.PLAYWRIGHT_RUNTIME_API_PORT ?? '18001'
+const runtimeSandboxPort = process.env.PLAYWRIGHT_RUNTIME_SANDBOX_PORT ?? '18090'
+const runtimeBaseUrl = process.env.PLAYWRIGHT_RUNTIME_BASE_URL ?? `http://127.0.0.1:${runtimeFrontendPort}`
+const runtimeApiUrl = `http://127.0.0.1:${runtimeApiPort}`
+const runtimeSandboxUrl = `http://127.0.0.1:${runtimeSandboxPort}`
+const runtimeMinioEndpoint = `127.0.0.1:${process.env.PLAYWRIGHT_MINIO_API_PORT ?? process.env.MINIO_API_PORT ?? '9000'}`
 const backendEnvironment = {
   AGENT_PLATFORM_DATABASE_URL: runtimeDatabaseUrl,
   AGENT_PLATFORM_REDIS_URL: runtimeRedisUrl,
   AGENT_PLATFORM_RUN_QUEUE_STREAM_NAME: runtimeQueueStream,
   AGENT_PLATFORM_RUN_QUEUE_GROUP_NAME: runtimeQueueGroup,
-  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel"]',
+  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","structured-output"]',
 }
 
 export default defineConfig({
@@ -33,31 +40,31 @@ export default defineConfig({
   timeout: 180_000,
   expect: { timeout: 120_000 },
   use: {
-    baseURL: process.env.PLAYWRIGHT_RUNTIME_BASE_URL ?? 'http://127.0.0.1:15174',
+    baseURL: runtimeBaseUrl,
     channel: 'chrome',
     trace: 'retain-on-failure',
   },
   webServer: [
     {
-      command: 'uv run uvicorn agent_platform.sandbox.controller.main:app --host 127.0.0.1 --port 18090',
+      command: `uv run uvicorn agent_platform.sandbox.controller.main:app --host 127.0.0.1 --port ${runtimeSandboxPort}`,
       cwd: `${repositoryRoot}/backend`,
       env: {
         SANDBOX_CONTROLLER_BEARER_SECRET: runtimeControllerSecret,
         SANDBOX_CONTROLLER_IMAGE: sandboxImage,
       },
-      url: 'http://127.0.0.1:18090/health/ready',
+      url: `${runtimeSandboxUrl}/health/ready`,
       reuseExistingServer: false,
       timeout: 120_000,
     },
     {
-      command: 'uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port 18001',
+      command: `uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port ${runtimeApiPort}`,
       cwd: `${repositoryRoot}/backend`,
       env: {
         ...backendEnvironment,
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
       },
-      url: 'http://127.0.0.1:18001/api/v1/health/live',
+      url: `${runtimeApiUrl}/api/v1/health/live`,
       reuseExistingServer: false,
       timeout: 120_000,
     },
@@ -73,10 +80,10 @@ export default defineConfig({
       cwd: `${repositoryRoot}/backend`,
       env: {
         ...backendEnvironment,
-        AGENT_PLATFORM_MINIO_ENDPOINT: '127.0.0.1:9000',
+        AGENT_PLATFORM_MINIO_ENDPOINT: runtimeMinioEndpoint,
         AGENT_PLATFORM_MINIO_ACCESS_KEY: 'agent_platform',
         AGENT_PLATFORM_MINIO_SECRET_KEY: 'agent-platform-local-minio',
-        AGENT_PLATFORM_SANDBOX_CONTROLLER_URL: 'http://127.0.0.1:18090',
+        AGENT_PLATFORM_SANDBOX_CONTROLLER_URL: runtimeSandboxUrl,
         AGENT_PLATFORM_SANDBOX_CONTROLLER_SECRET: runtimeControllerSecret,
         AGENT_PLATFORM_LOCAL_CREDENTIALS_REPOSITORY_ROOT: repositoryRoot,
       },
@@ -84,10 +91,10 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: 'pnpm dev --host 127.0.0.1 --port 15174',
+      command: `pnpm dev --host 127.0.0.1 --port ${runtimeFrontendPort}`,
       cwd: frontendRoot,
-      env: { VITE_API_PROXY_TARGET: 'http://127.0.0.1:18001' },
-      url: 'http://127.0.0.1:15174',
+      env: { VITE_API_PROXY_TARGET: runtimeApiUrl },
+      url: runtimeBaseUrl,
       reuseExistingServer: false,
       timeout: 120_000,
     },

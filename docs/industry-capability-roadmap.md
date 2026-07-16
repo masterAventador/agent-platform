@@ -306,9 +306,11 @@ deployment_installed && tenant_entitled && user_permitted
 
 **所属：Video Studio**
 
-**状态：`🧪 待集成`**
+**状态：`🚧 进行中`**
 
 **开始日期：2026-07-16**
+
+2026-07-16 进度与复审记录：实现位于 `task/b04-media-library` 分支（WIP 提交 `f7652c5`）。独立代码质量复审确认素材领域模型、上传/预览/删除、STS TTL 上限、跨租户拒绝、CAS 并发、可信对象元数据校验等单元/契约测试质量较高，迁移 `20260716_0024` 自身链条正确；前端能力模块经 capability registry 动态发现，无 Tauri 直连。继续开发必须先解决的阻断项：Core `infrastructure/database/models.py`/`repositories/video_studio.py` 静态 import 能力包内部实现，卸载能力包后 Core 无法启动（违反 Core 禁止导入能力包铁律）；STS 签发只校验通用 RBAC，无 `deployment_installed && tenant_entitled && user_permitted` 三层授权（依赖 C17）；`video.*` 权限域后端未生效；无真实腾讯 CAM/STS Provider（生产 503）；成片下载不支持；未接 Core Artifact 权限与审计（依赖 C14）；引用创建无 API；生产 App 不挂载 video-studio 路由，Playwright 用测试夹具应用不构成生产验收。迁移编号与 C14 分支同号 `20260716_0024`，后合入者必须改号。
 
 完成定义：
 
@@ -319,7 +321,7 @@ deployment_installed && tenant_entitled && user_permitted
 - 素材复用 Core Artifact 权限和审计；
 - 大文件、跨租户、STS 过期和失败清理测试通过。
 
-隔离实现证据：B04 已新增 `video-studio` 素材库后端服务、SQLAlchemy 仓储、FastAPI 可选路由、`20260716_0024` 迁移和前端素材库页面；Core `create_app()` 通过 `extra_routers` 显式挂载可选路由，默认 OpenAPI route root 仍只包含 Core，能力关闭后不暴露 `/api/v1/video-studio`。后端支持素材文件夹/标签、视频/图片/音乐校验、20 GiB 上限、租户隔离、tenant/material scoped 短期 STS 端口、服务端可信对象元数据核验、上传中止与过期草稿扫描、可重试对象清理、短时预览 URL、引用保护删除，以及下载排队、单调进度、断点、失败、重试、完成、取消、成员所有权和 revision CAS 并发保护状态机；缺少 STS、可信对象校验或预览 provider 时统一 503 失败关闭，不再签发伪本地密钥。前端已由手填 size/SHA256 的协议演示改为真实文件选择、4 MiB 分块 SHA256、腾讯 COS 分片直传、失败 abort、服务端完成核验、短时预览、删除和下载任务管理。隔离无头 Playwright 已用生产 API 和数据库、显式测试 provider、浏览器 COS 请求拦截覆盖固定测试账号登录、文件选择、直传、确认、预览、下载初态和删除；测试 provider 与拦截只存在于测试目录，不能替代真实腾讯 CAM STS/COS、真实对象可信核验或网络故障验收。生产腾讯 CAM STS/COS 的 issuer、对象校验/清理/预签名 provider 与真实账号联调，Core C14 Audit、C17 Entitlement/Capability Host、真实 20 GiB/断网恢复及真实腾讯云全栈验收仍是完成门禁，因此保持 `🧪 待集成`。
+隔离实现证据：B04 已新增 `video-studio` 素材库后端服务、SQLAlchemy 仓储、FastAPI 可选路由、`20260716_0024` 迁移和前端素材库页面；Core `create_app()` 通过 `extra_routers` 显式挂载可选路由，默认 OpenAPI route root 仍只包含 Core，能力关闭后不暴露 `/api/v1/video-studio`。后端支持素材文件夹/标签、视频/图片/音乐校验、20 GiB 上限、租户隔离、tenant/material scoped 短期 STS 端口、服务端可信对象元数据核验、上传中止与过期草稿扫描、可重试对象清理、短时预览 URL、引用保护删除，以及下载排队、单调进度、断点、失败、重试、完成、取消、成员所有权和 revision CAS 并发保护状态机；缺少 STS、可信对象校验或预览 provider 时统一 503 失败关闭，不再签发伪本地密钥。前端已由手填 size/SHA256 的协议演示改为真实文件选择、4 MiB 分块 SHA256、腾讯 COS 分片直传、失败 abort、服务端完成核验、短时预览、删除和下载任务管理。隔离无头 Playwright 已用生产 API 和数据库、显式测试 provider、浏览器 COS 请求拦截覆盖固定测试账号登录、文件选择、直传、确认、预览、下载初态和删除；测试 provider 与拦截只存在于测试目录，不能替代真实腾讯 CAM STS/COS、真实对象可信核验或网络故障验收。生产腾讯 CAM STS/COS 的 issuer、对象校验/清理/预签名 provider 与真实账号联调，Core C14 Audit、C17 Entitlement/Capability Host、真实 20 GiB/断网恢复及真实腾讯云全栈验收仍是完成门禁；叠加上方复审阻断项，状态保持 `🚧 进行中`。
 
 ### B05 Timeline 编辑与 App 内预览
 
@@ -527,9 +529,9 @@ deployment_installed && tenant_entitled && user_permitted
 
 | 项目 | 当前结果 |
 | --- | --- |
-| `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；B04 隔离层已补齐素材文件夹/标签、可信直传核验、上传失败/过期回收、可重试清理、短时预览、引用保护删除、下载任务完整终态与 revision CAS、浏览器 COS 分片直传、前端素材库页面、隔离无头 Playwright 闭环和 `20260716_0024` 数据库迁移；测试 provider/COS 拦截不替代真实腾讯 CAM STS/COS provider，Core C14/C17 和真实腾讯云全栈验收仍待集成 |
+| `video-studio` 源码模块 | 已建立独立、供应商无关 Manifest；B04 素材库隔离层在 `task/b04-media-library` 分支进行中，阻断项见 B04 记录 |
 | `social-operations` 源码模块 | 已建立独立、供应商无关 Manifest、本地执行器 v1 协议及 Tauri 无固定端口认证 stdio Sidecar；B02 隔离层补齐原子设备/账号/任务 API、SQLite 快照与审计 outbox、签名 Manifest 安装、真实进程监管、私有浏览器 Profile/Cookie 及 Tauri 应用编排；B08 隔离层补齐账号治理、频控、冷启动、熔断、人工接管、远程停止、服务端授权和账号中心治理展示；生产 PostgreSQL、Core Audit/Entitlement、真实签名发布和真实账号 RPA 仍待集成 |
-| Core 前置条件 | C01-C02 已完成；C03-C20 继续串行，业务条目按依赖标记待集成 |
+| Core 前置条件 | C01-C04、C06、C08 已完成；C05 待集成；C07、C14 进行中（C14 复审退回）；其余按依赖 DAG 推进，业务条目按依赖标记待集成 |
 | 竞品静态分析 | 已完成，见完整分析报告 |
 | 竞品动态账号验收 | 尚未完成 |
 | 我们的真实平台账号 E2E | 尚未开始 |
@@ -541,8 +543,8 @@ deployment_installed && tenant_entitled && user_permitted
 | --- | --- | --- | --- | --- | --- | --- |
 | B01 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | Mock Host / JSON Schema / macOS Tauri | 两个版本化 Manifest 已覆盖路由、Worker、权限、事件、前端、迁移、健康与桌面声明；Mock Host 四组合隔离及关闭门禁通过。本地执行器 v1 以 Pydantic 为单一来源导出 Draft 2020-12 Schema，10 个有效/25 个无效样例覆盖任务、取消、步骤进度、人工接管、诊断、身份、幂等、截止时间、治理引用、严格状态与脱敏语义。Tauri 现通过匿名 stdin/stdout 管道管理同源 Sidecar，使用 256 位随机会话令牌逐消息认证，不经参数/环境变量泄露且不监听 TCP；Rust 单元/stdio 回放 3 项与隐藏、无 Dock 的 macOS 真实桌面启动、调用、状态、停止生命周期 E2E 通过，完整原生套件 3 项通过。B01 只提供无业务副作用的版本化接收确认；设备注册、任务持久化、Sidecar 下载/签名/崩溃恢复、账号与 RPA 属于 B02，真实四组合回归按定义属于 B17。 |
 | B02 | 🧪 待集成 | 2026-07-15 | — | 本任务提交 | Python / Rust / TypeScript / Playwright / macOS 无头真实子进程 | 后端 capability 164 项和全量 pytest 878 项通过，35 项仅因真实 PostgreSQL/Redis/MinIO 或破坏性 Docker 门禁而跳过；覆盖原子竞态、owner 隔离、离线/紧停门禁、租约边界、持久化回滚、审计 outbox、非敏感原因以及 SQLite 防符号链接、私有父目录、连接竞态和多实例 revision CAS；Ruff 通过，mypy 163 个源文件无问题。执行 `cd frontend/src-tauri && cargo test --locked --offline`，完整原生套件 49 项全部通过、0 失败、0 忽略、0 过滤（lib 4 + browser 9 + credentials 2 + executor 14 + security 12 + runtime 8），覆盖签名 Manifest/逐跳下载/超时/防降级/重启恢复、启动时重验与已验证字节执行、并发启动单实例登记、调用中紧停抢占、stop/超时/崩溃整树清理、真实 Sidecar 崩溃/挂起/限界脱敏、Cookie/Profile 私有原子存储和 Tauri 编排层闭环；`cargo fmt --check` 及全 targets/features 的 Clippy `-D warnings` 通过。TypeScript 完整接入 11 个 B02 IPC，运行时 Capability Registry 以静态公开元数据在动态导入前严格核对能力 ID、唯一且精确的入口/权限、部署、租户授权和用户权限，畸形、失败、重复声明替代缺项及恶意漂移均失败关闭且不加载业务模块；`pnpm test` 为 35 文件、146 项通过，`pnpm lint && pnpm typecheck && pnpm build` 通过，生产 `dist` 不包含 `__AGENT_PLATFORM_TEST_ADAPTER__`、`__socialCommands`、`createSocialOperationsTestAdapter` 或 `test-adapter`；Playwright 通过共享 compose helper 将 `PLAYWRIGHT_COMPOSE_PROJECT_NAME` 与 `PLAYWRIGHT_*_PORT` 同步注入 Docker Compose、API、Alembic 和测试夹具，B02 允许/租户拒绝/恶意入口 3 项及完整 17 项回归全部通过；隐藏主窗口、无 Dock 的 macOS 真实 Tauri 套件 5 项通过，其中真实 WebView 已调用 B02 账号 ACL/状态转移命令；服务、浏览器、隔离容器/网络/卷均已清理，`agent-platform-dev` 未受影响。Windows 新增 API 最小 MSVC-target 交叉编译通过；完整交叉编译在第三方 `ring` 因本机缺 Windows SDK `assert.h` 而中止。Core PostgreSQL、C14、C17 生产宿主/Entitlement、生产账号后端链路、真实发布签名链、Windows 真实构建/运行和双平台受控账号 E2E 未完成，因此严格保持 `🧪 待集成`。 |
-| B04 | 🧪 待集成 | 2026-07-16 | — | 本任务提交 | Python / TypeScript / SQLite / COS STS Port / Playwright | RED 先后固定：缺少素材库模块/表/文件夹 API；完成上传信任客户端 object key/size/hash；下载缺 complete/cancel 且越界进度被静默截断；同租户成员可操作他人任务；伪本地 STS fallback；失败清理不可恢复；预览路由缺失；页面手填元数据而未真实上传；直传失败不终止草稿；并发下载更新可覆盖新状态；生产 App 未挂载 B04 provider；Playwright webServer 叠加、STS action 假设不全、COS Bucket 缺 APPID、HTTP COS 请求未拦截。GREEN：服务单元 13 项与 API 契约 3 项通过；迁移往返、Manifest、依赖边界 99 项通过（仅 2 个既有 SQLite expression-index reflection warning）；Python B04 定向 Ruff、mypy 通过；COS 分块哈希/过期凭证、页面流程与 Capability 边界 3 文件 5 项通过，前端 oxlint、typecheck、生产构建通过。隔离无头 Playwright `pnpm exec playwright test --config playwright.video-studio.config.ts` 为 1 项通过，使用生产 API/数据库、显式测试 provider 和浏览器 COS 请求拦截覆盖固定账号登录、文件选择、直传、服务端确认、预览、下载 queued/0 与删除，结束后隔离容器、卷、网络和端口均清理。实现现覆盖服务端可信对象核验、STS/存储/预览 fail-closed、abort/过期扫描/清理重试、短时预览、下载完整终态、拥有者约束和 revision CAS，以及浏览器分块 SHA256 + COS multipart 真实直传。测试 provider/COS 拦截不替代真实腾讯云验收；生产腾讯 CAM STS/COS provider 与账号、Core C14 Audit、C17 Entitlement/Capability Host、真实 20 GiB/断网续传和真实腾讯云全栈验收未完成，因此保持 `🧪 待集成`。 |
 | B08 | 🧪 待集成 | 2026-07-16 | — | 本任务提交 | Python / TypeScript / Playwright | 后端 B08 单元/API 覆盖平台/账号/动作治理策略、冷启动并发日限、频控窗口、结果上报授权绑定与幂等重放、连续失败熔断、登录失效、异常行为、暂停/恢复、设备离线、远程停止、客户端策略覆盖拒绝和审计脱敏；前端 API/组件测试覆盖治理 Schema、账号中心健康度、最近任务、失败趋势、处置建议、服务端授权禁用和暂停/恢复/远程停止；正式 Playwright 社媒流程覆盖服务端授权、风控熔断、最近任务展示、失败趋势、远程停止和本地紧急停止。B02、Core C14/C17、生产账号后端链路、真实平台账号 E2E 与组合回归未完成，因此保持 `🧪 待集成`。 |
+| B04 | 🚧 进行中 | 2026-07-16 | — | 分支 `task/b04-media-library`（WIP `f7652c5`） | Python / TypeScript / Playwright（测试夹具） | 隔离层单元/契约测试质量较高；Core 反向依赖、三层授权、真实 STS、生产装配等阻断项见第 5 节 B04 记录 |
 | B03、B05-B07、B09-B17 | 尚未开始 | — | — | — | — | 按第 5 节依赖顺序逐项推进 |
 
 后续每完成一项，将其拆成独立行记录。提交标识允许写“本任务提交”，精确哈希由 Git 历史追溯；不得为了回填提交自身哈希制造循环提交。

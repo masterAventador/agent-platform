@@ -5,6 +5,33 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/infra/compose/core.yml"
 COMPOSE_ENV="${ROOT_DIR}/infra/compose/.env.example"
 DATABASE_NAME="agent_platform_runtime_e2e"
+COMPOSE_PROJECT_NAME="${PLAYWRIGHT_COMPOSE_PROJECT_NAME:-agent-platform-runtime-e2e}"
+
+pick_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+export COMPOSE_PROJECT_NAME
+export POSTGRES_PORT="${PLAYWRIGHT_POSTGRES_PORT:-${POSTGRES_PORT:-$(pick_port)}}"
+export REDIS_PORT="${PLAYWRIGHT_REDIS_PORT:-${REDIS_PORT:-$(pick_port)}}"
+export MINIO_API_PORT="${PLAYWRIGHT_MINIO_API_PORT:-${MINIO_API_PORT:-$(pick_port)}}"
+export MINIO_CONSOLE_PORT="${PLAYWRIGHT_MINIO_CONSOLE_PORT:-${MINIO_CONSOLE_PORT:-$(pick_port)}}"
+export PLAYWRIGHT_RUNTIME_API_PORT="${PLAYWRIGHT_RUNTIME_API_PORT:-$(pick_port)}"
+export PLAYWRIGHT_RUNTIME_SANDBOX_PORT="${PLAYWRIGHT_RUNTIME_SANDBOX_PORT:-$(pick_port)}"
+export PLAYWRIGHT_RUNTIME_FRONTEND_PORT="${PLAYWRIGHT_RUNTIME_FRONTEND_PORT:-$(pick_port)}"
+export PLAYWRIGHT_RUNTIME_BASE_URL="${PLAYWRIGHT_RUNTIME_BASE_URL:-http://127.0.0.1:${PLAYWRIGHT_RUNTIME_FRONTEND_PORT}}"
+export PLAYWRIGHT_POSTGRES_PORT="${POSTGRES_PORT}"
+export PLAYWRIGHT_REDIS_PORT="${REDIS_PORT}"
+export PLAYWRIGHT_MINIO_API_PORT="${MINIO_API_PORT}"
+export PLAYWRIGHT_MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT}"
+
+COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT_NAME}" --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}")
 
 cleanup() {
   local lease_id container_id
@@ -15,15 +42,16 @@ cleanup() {
     done < <(docker ps -aq \
       --filter "label=agent-platform.sandbox.managed=true" \
       --filter "label=agent-platform.sandbox.lease-id=${lease_id}")
-  done < <(docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T postgres \
+  done < <("${COMPOSE[@]}" exec -T postgres \
     psql -U agent_platform -d "${DATABASE_NAME}" -Atc 'select id from sandbox_leases' \
     2>/dev/null || true)
-  docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T \
+  "${COMPOSE[@]}" exec -T \
     -e REDISCLI_AUTH=agent-platform-local-redis redis redis-cli -n 3 FLUSHDB \
     >/dev/null 2>&1 || true
-  docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T postgres \
+  "${COMPOSE[@]}" exec -T postgres \
     dropdb --force --if-exists -U agent_platform "${DATABASE_NAME}" \
     >/dev/null 2>&1 || true
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f /tmp/agent-platform-runtime-e2e-dispatcher-ready \
     /tmp/agent-platform-runtime-e2e-worker-ready \
     /tmp/agent-platform-runtime-e2e-slow-model-started \
@@ -44,23 +72,23 @@ if [[ "${DOCKER_HOST}" != unix://* ]]; then
   exit 2
 fi
 
-docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" up -d --wait \
+"${COMPOSE[@]}" up -d --wait \
   postgres redis minio
 
-docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T postgres \
+"${COMPOSE[@]}" exec -T postgres \
   dropdb --force --if-exists -U agent_platform "${DATABASE_NAME}"
-docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T postgres \
+"${COMPOSE[@]}" exec -T postgres \
   createdb -U agent_platform "${DATABASE_NAME}"
-docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T \
+"${COMPOSE[@]}" exec -T \
   -e REDISCLI_AUTH=agent-platform-local-redis redis redis-cli -n 3 FLUSHDB \
   >/dev/null
 (
   cd "${ROOT_DIR}/backend"
-  AGENT_PLATFORM_DATABASE_URL="postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:5432/${DATABASE_NAME}" \
+  AGENT_PLATFORM_DATABASE_URL="postgresql+asyncpg://agent_platform:agent-platform-local-postgres@127.0.0.1:${POSTGRES_PORT}/${DATABASE_NAME}" \
     uv run alembic upgrade head
 )
 HEAD_REVISION="$(cd "${ROOT_DIR}/backend" && uv run alembic heads | sed -E 's/ .*//')"
-DATABASE_REVISION="$(docker compose --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}" exec -T \
+DATABASE_REVISION="$("${COMPOSE[@]}" exec -T \
   postgres psql -U agent_platform -d "${DATABASE_NAME}" -Atc 'select version_num from alembic_version')"
 if [[ "${DATABASE_REVISION}" != "${HEAD_REVISION}" ]]; then
   echo "Runtime E2E database is not at Alembic head" >&2
@@ -68,7 +96,6 @@ if [[ "${DATABASE_REVISION}" != "${HEAD_REVISION}" ]]; then
 fi
 
 cd "${ROOT_DIR}/frontend"
-PLAYWRIGHT_RUNTIME_BASE_URL="http://127.0.0.1:15174" \
 PLAYWRIGHT_RUNTIME_EXPECTED_OUTPUT="Runtime E2E completed in the real worker." \
 PLAYWRIGHT_RUNTIME_EXPECTED_SCHEMA_VERSION="${HEAD_REVISION}" \
 pnpm exec playwright test --config playwright.runtime.config.ts

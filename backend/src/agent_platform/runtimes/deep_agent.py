@@ -17,6 +17,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command, StateSnapshot
 from pydantic import JsonValue, TypeAdapter
 
+from agent_platform.platform.dynamic_io import coerce_output_for_schema, has_effective_output_schema
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.runtimes.base import (
@@ -182,7 +183,7 @@ class DeepAgentRuntime:
                 )
                 self._states[request.run_id] = state
                 return state
-            output = self._output(result)
+            output = self._output(result, request)
         except _RuntimeExecutionCancelled:
             return self._mark_cancelled(request)
         except Exception as error:
@@ -203,7 +204,11 @@ class DeepAgentRuntime:
             return state
 
         self._append_event(request, EventType.MESSAGE_OUTPUT, {"content": output})
-        self._append_event(request, EventType.RUN_COMPLETED, {"status": "completed"})
+        self._append_event(
+            request,
+            EventType.RUN_COMPLETED,
+            {"status": "completed", "output": output},
+        )
         state = RuntimeState(
             run_id=request.run_id,
             status=RunStatus.COMPLETED,
@@ -244,14 +249,18 @@ class DeepAgentRuntime:
             last_message = messages[-1]
             if not isinstance(last_message, BaseMessage):
                 raise RuntimeRecoveryUnavailable
-            output = self._message_text(last_message)
+            output = self._output_from_message(last_message, request)
             if output:
                 self._append_event(
                     request,
                     EventType.MESSAGE_OUTPUT,
                     {"content": output},
                 )
-            self._append_event(request, EventType.RUN_COMPLETED, {"status": "completed"})
+            self._append_event(
+                request,
+                EventType.RUN_COMPLETED,
+                {"status": "completed", "output": output},
+            )
             state = RuntimeState(
                 run_id=request.run_id,
                 status=RunStatus.COMPLETED,
@@ -280,9 +289,9 @@ class DeepAgentRuntime:
         graph: AgentGraph,
         request: RuntimeStartRequest,
         input_data: Mapping[str, JsonValue],
-    ) -> str:
+    ) -> JsonValue:
         result = await self._invoke_result(graph, request, input_data)
-        return self._output(result)
+        return self._output(result, request)
 
     async def _invoke_result(
         self,
@@ -331,21 +340,47 @@ class DeepAgentRuntime:
             self._cancel_requested.discard(request.run_id)
 
     @staticmethod
-    def _output(result: Mapping[str, object]) -> str:
+    def _output(result: Mapping[str, object], request: RuntimeStartRequest) -> JsonValue:
         messages = result.get("messages")
         if not isinstance(messages, Sequence) or not messages:
             return ""
         last_message = messages[-1]
         if not isinstance(last_message, BaseMessage):
             return ""
-        return DeepAgentRuntime._message_text(last_message)
+        return DeepAgentRuntime._output_from_message(last_message, request)
+
+    @staticmethod
+    def _output_from_message(
+        message: BaseMessage,
+        request: RuntimeStartRequest,
+    ) -> JsonValue:
+        output_schema = DeepAgentRuntime._output_schema(request)
+        if not has_effective_output_schema(output_schema):
+            return DeepAgentRuntime._message_text(message)
+        return coerce_output_for_schema(
+            output_schema=output_schema,
+            value=DeepAgentRuntime._message_content(message),
+        )
+
+    @staticmethod
+    def _message_content(message: BaseMessage) -> JsonValue:
+        if isinstance(message.content, str):
+            return message.content
+        return TypeAdapter(JsonValue).validate_python(message.content)
 
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
-        if isinstance(message.content, str):
-            return message.content
-        json_content: JsonValue = TypeAdapter(JsonValue).validate_python(message.content)
-        return json.dumps(json_content, ensure_ascii=False)
+        content = DeepAgentRuntime._message_content(message)
+        if isinstance(content, str):
+            return content
+        return json.dumps(content, ensure_ascii=False)
+
+    @staticmethod
+    def _output_schema(request: RuntimeStartRequest) -> Mapping[str, object] | None:
+        output_schema = request.employee_definition.get("output_schema")
+        if isinstance(output_schema, Mapping):
+            return output_schema
+        return None
 
     def stream(
         self,
@@ -434,9 +469,13 @@ class DeepAgentRuntime:
                 data={},
             )
             return
-        output = self._output(result)
+        output = self._output(result, request)
         self._append_event(request, EventType.MESSAGE_OUTPUT, {"content": output})
-        self._append_event(request, EventType.RUN_COMPLETED, {"status": "completed"})
+        self._append_event(
+            request,
+            EventType.RUN_COMPLETED,
+            {"status": "completed", "output": output},
+        )
         self._states[run_id] = RuntimeState(
             run_id=run_id,
             status=RunStatus.COMPLETED,

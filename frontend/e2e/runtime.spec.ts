@@ -59,6 +59,87 @@ test('用户可以通过真实 Worker 完成自主员工任务并看到模型输
   expect(remainingSandboxIds).toBe('')
 })
 
+test('用户可以通过真实 Worker 提交动态输入并查看结构化输出', async ({ page }) => {
+  await registerAndLogin(page)
+
+  const inputSchema = {
+    type: 'object',
+    required: ['topic', 'priority', 'due_date', 'keywords'],
+    additionalProperties: false,
+    properties: {
+      topic: { type: 'string', title: '主题', minLength: 2 },
+      priority: { type: 'string', title: '优先级', enum: ['low', 'high'] },
+      due_date: { type: 'string', title: '截止日期', format: 'date' },
+      keywords: { type: 'array', title: '关键词', items: { type: 'string' } },
+    },
+  }
+  const outputSchema = {
+    type: 'object',
+    'x-agent-platform-view': 'cards',
+    required: ['cards'],
+    properties: {
+      cards: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['title', 'score'],
+          properties: {
+            title: { type: 'string' },
+            score: { type: 'number' },
+          },
+        },
+      },
+      summary: { type: 'string' },
+    },
+  }
+
+  await page.getByRole('link', { name: '数字员工' }).click()
+  await page.getByRole('button', { name: '创建数字员工' }).click()
+  await page.getByLabel('员工名称').fill('结构化验收专员')
+  await page.getByLabel('岗位说明').fill('验证动态输入和结构化输出链路')
+  await page.getByLabel('系统指令').fill('根据用户输入生成结构化线索卡片。')
+  await page.getByLabel('输入 Schema JSON').fill(JSON.stringify(inputSchema, null, 2))
+  await page.getByLabel('输出 Schema JSON').fill(JSON.stringify(outputSchema, null, 2))
+  await page.getByRole('button', { name: '保存草稿' }).click()
+
+  await expect(page).toHaveURL(/\/employees\/[0-9a-f-]+$/)
+  await page.getByRole('button', { name: '发布员工' }).click()
+  await expect(page.getByText('已发布', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: '发起任务' }).click()
+  await page.getByLabel('主题').fill('短视频投放')
+  await page.getByLabel('优先级').selectOption('high')
+  await page.getByLabel('截止日期').fill('2026-07-16')
+  await page.getByLabel('关键词').fill('线索\n转化')
+  await page.getByRole('button', { name: '确认发起' }).click()
+
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByText('结构化结果', { exact: true })).toBeVisible()
+  await expect(page.getByText('线索 A', { exact: true })).toBeVisible()
+  await expect(page.getByText('score', { exact: true })).toBeVisible()
+  await expect(page.getByText('0.91', { exact: true })).toBeVisible()
+  await expect(page.getByText('已生成结构化卡片', { exact: true })).toBeVisible()
+
+  const runId = new URL(page.url()).pathname.split('/').at(-1)
+  expect(runId).toMatch(/^[0-9a-f-]{36}$/)
+  const savedInput = queryRuntimeDatabase(
+    `SELECT concat_ws('|', (input_data::jsonb)->>'topic', (input_data::jsonb)->>'priority', (input_data::jsonb)->>'due_date', (input_data::jsonb)#>>'{keywords,0}') FROM runs WHERE id = '${runId}'`,
+  )
+  expect(savedInput).toBe('短视频投放|high|2026-07-16|线索')
+  expect(queryRuntimeDatabase(
+    `SELECT payload #>> '{content,cards,0,title}' FROM run_events WHERE run_id = '${runId}' AND event_type = 'message.output'`,
+  )).toBe('线索 A')
+  expect(queryRuntimeDatabase(
+    `SELECT payload #>> '{output,cards,0,title}' FROM run_events WHERE run_id = '${runId}' AND event_type = 'run.completed'`,
+  )).toBe('线索 A')
+
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: '导出 JSON' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe(`${runId}-output.json`)
+})
+
 test('用户可以取消正在调用模型的真实 Worker 任务且运行停止', async ({ page }) => {
   await registerAndLogin(page)
 
