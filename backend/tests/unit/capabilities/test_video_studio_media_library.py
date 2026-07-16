@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 
 from agent_platform.capabilities.video_studio.media_library import (
+    MAX_MATERIAL_SIZE_BYTES,
     DownloadTaskConcurrentUpdateError,
     DownloadTaskStatus,
     InMemoryMaterialRepository,
@@ -829,3 +830,36 @@ async def test_list_references_is_tenant_scoped_and_ordered_by_creation() -> Non
 
     with pytest.raises(MaterialNotFoundError):
         await service.list_references(tenant_id=other_tenant_id, material_id=material.id)
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_reject_materials_over_size_limit() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(InvalidMaterialInput, match="^素材大小无效$"):
+        await service.request_upload_credentials(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            name="oversized.mp4",
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=MAX_MATERIAL_SIZE_BYTES + 1,
+            sha256="a" * 64,
+        )
+
+    boundary = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="boundary.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=MAX_MATERIAL_SIZE_BYTES,
+        sha256="b" * 64,
+    )
+    assert boundary.material.size_bytes == MAX_MATERIAL_SIZE_BYTES

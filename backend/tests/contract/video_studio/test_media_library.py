@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.api.app import create_app
 from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
+from agent_platform.capabilities.video_studio.media_library import MAX_MATERIAL_SIZE_BYTES
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
@@ -486,3 +487,42 @@ async def test_material_reference_create_list_and_delete_protection(
         json={"reference_type": "timeline_clip", "reference_id": str(uuid4())},
     )
     assert missing_material.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_reject_oversized_material_with_precise_error(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    _, _, owner, _, _ = media_library_api
+    identity = await register(owner, "oversize-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+
+    rejected = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers={"X-Tenant-ID": tenant_id},
+        json={
+            "name": "oversized.mp4",
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": MAX_MATERIAL_SIZE_BYTES + 1,
+            "sha256": "9" * 64,
+        },
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == {
+        "code": "invalid_video_material_input",
+        "message": "素材大小无效",
+    }
+
+    listed = await owner.get(
+        "/api/v1/video-studio/materials",
+        headers={"X-Tenant-ID": tenant_id},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
