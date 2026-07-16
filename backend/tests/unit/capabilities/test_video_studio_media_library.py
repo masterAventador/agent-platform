@@ -765,3 +765,67 @@ async def test_download_state_transition_fails_on_concurrent_revision_change() -
 
     with pytest.raises(DownloadTaskConcurrentUpdateError):
         await service.start_download_task(tenant_id=tenant_id, task_id=task.id)
+
+
+@pytest.mark.asyncio
+async def test_list_references_is_tenant_scoped_and_ordered_by_creation() -> None:
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    moments = iter(
+        datetime(2026, 7, 16, 11, minute, tzinfo=UTC) for minute in range(30)
+    )
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: next(moments),
+    )
+
+    async def make_material(target_tenant_id, name: str):
+        draft = await service.request_upload_credentials(
+            tenant_id=target_tenant_id,
+            actor_id=owner_id,
+            name=name,
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=1024,
+            sha256="d" * 64,
+        )
+        verifier.objects[(target_tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+            size_bytes=1024,
+            sha256="d" * 64,
+        )
+        return await service.complete_upload(
+            tenant_id=target_tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+
+    material = await make_material(tenant_id, "list-refs.mp4")
+    other_material = await make_material(other_tenant_id, "other.mp4")
+
+    first = await service.add_reference(
+        tenant_id=tenant_id,
+        material_id=material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+    second = await service.add_reference(
+        tenant_id=tenant_id,
+        material_id=material.id,
+        reference_type="render_job",
+        reference_id=uuid4(),
+    )
+    await service.add_reference(
+        tenant_id=other_tenant_id,
+        material_id=other_material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+
+    listed = await service.list_references(tenant_id=tenant_id, material_id=material.id)
+    assert [reference.id for reference in listed] == [first.id, second.id]
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.list_references(tenant_id=other_tenant_id, material_id=material.id)

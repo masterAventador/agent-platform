@@ -19,6 +19,7 @@ from agent_platform.capabilities.video_studio.media_library import (
     MaterialInUseError,
     MaterialKind,
     MaterialNotFoundError,
+    MaterialReference,
     MediaLibraryService,
     UploadCredentialExpiredError,
 )
@@ -142,6 +143,33 @@ class MaterialPreviewResponse(BaseModel):
     @classmethod
     def from_entity(cls, preview: IssuedMaterialPreview) -> MaterialPreviewResponse:
         return cls(url=preview.url, expires_at=preview.expires_at)
+
+
+class MaterialReferenceCreateRequest(BaseModel):
+    reference_type: str
+    reference_id: UUID
+
+
+class MaterialReferenceResponse(BaseModel):
+    id: UUID
+    material_id: UUID
+    reference_type: str
+    reference_id: UUID
+    created_at: datetime
+
+    @classmethod
+    def from_entity(cls, reference: MaterialReference) -> MaterialReferenceResponse:
+        return cls(
+            id=reference.id,
+            material_id=reference.material_id,
+            reference_type=reference.reference_type,
+            reference_id=reference.reference_id,
+            created_at=reference.created_at,
+        )
+
+
+class MaterialReferenceListResponse(BaseModel):
+    items: list[MaterialReferenceResponse]
 
 
 class DownloadTaskCreateRequest(BaseModel):
@@ -507,6 +535,70 @@ async def preview_material(
         except InvalidMaterialInput as error:
             raise _invalid(str(error)) from None
         return MaterialPreviewResponse.from_entity(preview)
+
+
+@router.post(
+    "/materials/{material_id}/references",
+    response_model=MaterialReferenceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_material_reference(
+    material_id: UUID,
+    payload: MaterialReferenceCreateRequest,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> MaterialReferenceResponse:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.RUNS_MANAGE,
+        )
+        try:
+            reference = await _service(
+                request,
+                SqlAlchemyMediaLibraryRepository(session),
+            ).add_reference(
+                tenant_id=access.tenant.id,
+                material_id=material_id,
+                reference_type=payload.reference_type,
+                reference_id=payload.reference_id,
+            )
+        except MaterialNotFoundError:
+            raise _not_found() from None
+        except InvalidMaterialInput as error:
+            raise _invalid(str(error)) from None
+        await session.commit()
+        return MaterialReferenceResponse.from_entity(reference)
+
+
+@router.get(
+    "/materials/{material_id}/references",
+    response_model=MaterialReferenceListResponse,
+)
+async def list_material_references(
+    material_id: UUID,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> MaterialReferenceListResponse:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.RUNS_EXECUTE,
+        )
+        try:
+            references = await _service(
+                request,
+                SqlAlchemyMediaLibraryRepository(session),
+            ).list_references(tenant_id=access.tenant.id, material_id=material_id)
+        except MaterialNotFoundError:
+            raise _not_found() from None
+        return MaterialReferenceListResponse(
+            items=[MaterialReferenceResponse.from_entity(item) for item in references],
+        )
 
 
 @router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT)

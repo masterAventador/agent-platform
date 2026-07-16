@@ -252,6 +252,13 @@ class MaterialRepository(Protocol):
 
     async def add_reference(self, reference: MaterialReference) -> None: ...
 
+    async def list_references(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+    ) -> list[MaterialReference]: ...
+
     async def count_references(self, *, tenant_id: UUID, material_id: UUID) -> int: ...
 
     async def add_download_task(self, task: DownloadTask) -> None: ...
@@ -328,6 +335,21 @@ class InMemoryMaterialRepository:
 
     async def add_reference(self, reference: MaterialReference) -> None:
         self.references.append(reference)
+
+    async def list_references(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+    ) -> list[MaterialReference]:
+        return sorted(
+            (
+                reference
+                for reference in self.references
+                if reference.tenant_id == tenant_id and reference.material_id == material_id
+            ),
+            key=lambda reference: (reference.created_at, reference.id),
+        )
 
     async def count_references(self, *, tenant_id: UUID, material_id: UUID) -> int:
         return sum(
@@ -612,6 +634,18 @@ class MediaLibraryService:
         )
         await self._repository.add_reference(reference)
         return reference
+
+    async def list_references(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+    ) -> list[MaterialReference]:
+        await self.get_material(tenant_id=tenant_id, material_id=material_id)
+        return await self._repository.list_references(
+            tenant_id=tenant_id,
+            material_id=material_id,
+        )
 
     async def delete_material(self, *, tenant_id: UUID, actor_id: UUID, material_id: UUID) -> None:
         del actor_id

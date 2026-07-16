@@ -252,6 +252,27 @@ class SqlAlchemyMediaLibraryRepository:
     async def add_reference(self, reference: MaterialReference) -> None:
         self._session.add(VideoMaterialReferenceRecord(**asdict(reference)))
 
+    async def list_references(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+    ) -> list[MaterialReference]:
+        records = (
+            await self._session.execute(
+                select(VideoMaterialReferenceRecord)
+                .where(
+                    VideoMaterialReferenceRecord.tenant_id == tenant_id,
+                    VideoMaterialReferenceRecord.material_id == material_id,
+                )
+                .order_by(
+                    VideoMaterialReferenceRecord.created_at,
+                    VideoMaterialReferenceRecord.id,
+                )
+            )
+        ).scalars()
+        return [_record_to_reference(record) for record in records]
+
     async def count_references(self, *, tenant_id: UUID, material_id: UUID) -> int:
         return len(
             (
@@ -341,6 +362,17 @@ def _record_to_material(record: VideoMaterialRecord) -> Material:
         created_at=record.created_at,
         updated_at=record.updated_at,
         deleted_at=record.deleted_at,
+    )
+
+
+def _record_to_reference(record: VideoMaterialReferenceRecord) -> MaterialReference:
+    return MaterialReference(
+        id=record.id,
+        tenant_id=record.tenant_id,
+        material_id=record.material_id,
+        reference_type=record.reference_type,
+        reference_id=record.reference_id,
+        created_at=record.created_at,
     )
 
 

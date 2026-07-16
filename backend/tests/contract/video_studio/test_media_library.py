@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -375,3 +375,114 @@ async def test_storage_ports_fail_closed_instead_of_issuing_fake_credentials(
         missing_storage.json()["detail"]["code"]
         == "video_material_storage_not_configured"
     )
+
+
+async def create_available_material(
+    client: AsyncClient,
+    tenant_id: str,
+    verifier: ConfigurableObjectVerifier,
+    *,
+    name: str,
+    sha: str,
+) -> dict[str, Any]:
+    headers = {"X-Tenant-ID": tenant_id}
+    credential_response = await client.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers=headers,
+        json={
+            "name": name,
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": 1000,
+            "sha256": sha * 64,
+        },
+    )
+    assert credential_response.status_code == 201
+    material = credential_response.json()["material"]
+    verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256=sha * 64,
+    )
+    completed = await client.post(
+        f"/api/v1/video-studio/materials/{material['id']}/complete-upload",
+        headers=headers,
+    )
+    assert completed.status_code == 200
+    return completed.json()
+
+
+@pytest.mark.asyncio
+async def test_material_reference_create_list_and_delete_protection(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    _, _, owner, outsider, verifier = media_library_api
+    owner_identity = await register(owner, "reference-owner@example.com")
+    outsider_identity = await register(outsider, "reference-outsider@example.com")
+    tenant_id = owner_identity["workspaces"][0]["id"]
+    outsider_tenant_id = outsider_identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+
+    material = await create_available_material(
+        owner, tenant_id, verifier, name="referenced.mp4", sha="a"
+    )
+    reference_target = str(uuid4())
+
+    created = await owner.post(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+        json={"reference_type": "timeline_clip", "reference_id": reference_target},
+    )
+    assert created.status_code == 201
+    reference = created.json()
+    assert reference["reference_type"] == "timeline_clip"
+    assert reference["reference_id"] == reference_target
+    assert reference["material_id"] == material["id"]
+    assert reference["created_at"] is not None
+
+    listed = await owner.get(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [reference["id"]]
+
+    invalid = await owner.post(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+        json={"reference_type": "Bad-Type!", "reference_id": str(uuid4())},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "invalid_video_material_input"
+    assert invalid.json()["detail"]["message"] == "素材引用类型无效"
+
+    cross_tenant = await outsider.post(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers={"X-Tenant-ID": outsider_tenant_id},
+        json={"reference_type": "timeline_clip", "reference_id": str(uuid4())},
+    )
+    assert cross_tenant.status_code == 404
+    cross_tenant_list = await outsider.get(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers={"X-Tenant-ID": outsider_tenant_id},
+    )
+    assert cross_tenant_list.status_code == 404
+
+    blocked_delete = await owner.delete(
+        f"/api/v1/video-studio/materials/{material['id']}",
+        headers=headers,
+    )
+    assert blocked_delete.status_code == 409
+    assert blocked_delete.json()["detail"]["code"] == "material_in_use"
+
+    missing_material = await owner.post(
+        f"/api/v1/video-studio/materials/{uuid4()}/references",
+        headers=headers,
+        json={"reference_type": "timeline_clip", "reference_id": str(uuid4())},
+    )
+    assert missing_material.status_code == 404
