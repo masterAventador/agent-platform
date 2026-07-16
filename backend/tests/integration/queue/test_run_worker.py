@@ -192,6 +192,47 @@ class ConversationOutputRuntime(CompletingRuntime):
         return self.state
 
 
+class StructuredOutputRuntime(CompletingRuntime):
+    def __init__(self, output: JsonValue) -> None:
+        super().__init__()
+        self.output = output
+
+    async def start(self, request: RuntimeStartRequest) -> RuntimeState:
+        self.requests.append(request)
+        self.events = [
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=1,
+                event_type=EventType.RUN_STARTED,
+                payload={},
+            ),
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=2,
+                event_type=EventType.MESSAGE_OUTPUT,
+                payload={"content": self.output},
+            ),
+            PlatformEvent.create(
+                tenant_id=request.tenant_id,
+                employee_id=request.employee_id,
+                run_id=request.run_id,
+                sequence=3,
+                event_type=EventType.RUN_COMPLETED,
+                payload={"output": self.output},
+            ),
+        ]
+        self.state = RuntimeState(
+            run_id=request.run_id,
+            status=RunStatus.COMPLETED,
+            data={"output": self.output},
+        )
+        return self.state
+
+
 class RestorableRuntime(CompletingRuntime):
     def __init__(self) -> None:
         super().__init__()
@@ -821,6 +862,272 @@ async def test_worker_executes_run_and_persists_events_and_terminal_state(factor
         assert persisted is not None and persisted.status is RunStatus.COMPLETED
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert [event.type for event in events] == [EventType.RUN_STARTED, EventType.RUN_COMPLETED]
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_treats_legacy_default_object_output_schema_as_unstructured(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"task": "生成一段普通文本"},
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={
+            "runtime_type": "workflow",
+            "output_schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "历史默认输出",
+                "description": "仅包含元数据和默认 object 类型，不应触发结构化校验",
+                "type": "object",
+            },
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="legacy-default-output",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(StructuredOutputRuntime("纯文本输出")),
+        consumer_name="legacy-default-output-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["legacy-default-output"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        assert persisted is not None
+        assert persisted.status is RunStatus.COMPLETED
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        assert [event.type for event in events] == [
+            EventType.RUN_STARTED,
+            EventType.MESSAGE_OUTPUT,
+            EventType.RUN_COMPLETED,
+        ]
+        assert events[1].payload["content"] == "纯文本输出"
+        assert events[2].payload["output"] == "纯文本输出"
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_completed_output_that_violates_employee_output_schema(
+    factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"topic": "线索评分"},
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={
+            "runtime_type": "workflow",
+            "output_schema": {
+                "type": "object",
+                "required": ["cards"],
+                "properties": {
+                    "cards": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["title", "score"],
+                            "properties": {
+                                "title": {"type": "string"},
+                                "score": {"type": "number"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "additionalProperties": False,
+            },
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="invalid-output",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(
+            StructuredOutputRuntime({"cards": [{"title": 123, "score": "high"}]})
+        ),
+        consumer_name="invalid-output-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["invalid-output"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        assert persisted is not None
+        assert persisted.status is RunStatus.FAILED
+        assert persisted.error_code == "output_schema_validation_failed"
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        assert [event.type for event in events] == [
+            EventType.RUN_STARTED,
+            EventType.RUN_FAILED,
+        ]
+        assert events[-1].payload["code"] == "output_schema_validation_failed"
+        assert "message.output" not in repr(events)
+        assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_completed_output_that_matches_employee_output_schema(
+    factory,
+) -> None:
+    output: JsonValue = {
+        "cards": [{"title": "线索 A", "score": 0.91}],
+        "summary": "已生成结构化卡片",
+    }
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"topic": "线索评分"},
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=run.employee_version,
+        definition={
+            "runtime_type": "workflow",
+            "output_schema": {
+                "type": "object",
+                "required": ["cards", "summary"],
+                "properties": {
+                    "cards": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["title", "score"],
+                            "properties": {
+                                "title": {"type": "string"},
+                                "score": {"type": "number"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "summary": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="valid-output",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(StructuredOutputRuntime(output)),
+        consumer_name="valid-output-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        assert persisted is not None
+        assert persisted.status is RunStatus.COMPLETED
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        assert [event.type for event in events] == [
+            EventType.RUN_STARTED,
+            EventType.MESSAGE_OUTPUT,
+            EventType.RUN_COMPLETED,
+        ]
+        assert events[1].payload["content"] == output
+        assert events[2].payload["output"] == output
         assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
 
 

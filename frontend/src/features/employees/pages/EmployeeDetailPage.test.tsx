@@ -244,6 +244,201 @@ describe('EmployeeDetailPage legacy configuration guard', () => {
     })
   })
 
+  it('renders schema-driven run fields and submits typed structured input', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'run-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          input_schema: {
+            type: 'object',
+            required: ['topic', 'priority', 'level', 'due_date', 'keywords', 'scores'],
+            additionalProperties: false,
+            properties: {
+              topic: { type: 'string', title: '主题', minLength: 2 },
+              estimate_hours: { type: 'number', title: '预计小时', minimum: 1 },
+              urgent: { type: 'boolean', title: '紧急' },
+              priority: { type: 'string', title: '优先级', enum: ['low', 'high'] },
+              level: { type: 'integer', title: '等级', enum: [1, 2] },
+              due_date: { type: 'string', title: '截止日期', format: 'date' },
+              keywords: { type: 'array', title: '关键词', items: { type: 'string' } },
+              scores: { type: 'array', title: '评分', items: { type: 'number' } },
+            },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+    expect(await screen.findByText(/主题不符合输入要求/)).toBeInTheDocument()
+    expect(mutateAsync).not.toHaveBeenCalled()
+
+    await user.type(screen.getByLabelText('主题'), '视频脚本')
+    await user.type(screen.getByLabelText('预计小时'), '3')
+    await user.click(screen.getByLabelText('紧急'))
+    await user.selectOptions(screen.getByLabelText('优先级'), screen.getByRole('option', { name: 'high' }))
+    await user.selectOptions(screen.getByLabelText('等级'), screen.getByRole('option', { name: '2' }))
+    fireEvent.change(screen.getByLabelText('截止日期'), { target: { value: '2026-07-20' } })
+    await user.type(screen.getByLabelText('关键词'), '短视频\n投放')
+    await user.type(screen.getByLabelText('评分'), '0.8\n0.9')
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
+      input: {
+        topic: '视频脚本',
+        estimate_hours: 3,
+        urgent: true,
+        priority: 'high',
+        level: 2,
+        due_date: '2026-07-20',
+        keywords: ['短视频', '投放'],
+        scores: [0.8, 0.9],
+      },
+      attachmentIds: [],
+      idempotencyKey: expect.any(String),
+    }))
+  })
+
+  it('binds schema file controls to uploaded attachments and input fields', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'run-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+          input_schema: {
+            type: 'object',
+            required: ['source_file'],
+            properties: {
+              source_file: {
+                type: 'string',
+                title: '资料文件',
+                'x-agent-platform-control': 'file',
+              },
+            },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择 资料文件' }))
+    expect(await screen.findByText('brief.txt')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
+      input: { source_file: 'file-1' },
+      attachmentIds: ['file-1'],
+      idempotencyKey: expect.any(String),
+    }))
+  })
+
+  it('reuses retained schema file ids when an idempotent dynamic-file run is retried', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn()
+      .mockRejectedValueOnce(new Error('response dropped'))
+      .mockResolvedValueOnce({ id: 'run-1' })
+    vi.mocked(deleteUnboundFile).mockResolvedValueOnce({ deleted: false })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          capabilities: { ...employee.definition.capabilities, file_upload: true },
+          input_schema: {
+            type: 'object',
+            required: ['source_file'],
+            properties: {
+              source_file: {
+                type: 'string',
+                title: '资料文件',
+                'x-agent-platform-control': 'file',
+              },
+            },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    await user.click(screen.getByRole('button', { name: '选择 资料文件' }))
+    expect(await screen.findByText('brief.txt')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(deleteUnboundFile).toHaveBeenCalledWith('tenant-1', 'file-1'))
+    const firstCall = mutateAsync.mock.calls[0]?.[0]
+    expect(firstCall).toMatchObject({
+      input: { source_file: 'file-1' },
+      attachmentIds: ['file-1'],
+      idempotencyKey: expect.any(String),
+    })
+
+    const confirmButton = () => screen.getByText('确认发起').closest('button')
+    await waitFor(() => expect(confirmButton()).toBeEnabled())
+    await user.click(confirmButton() as HTMLButtonElement)
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(2))
+    expect(uploadFile).toHaveBeenCalledTimes(1)
+    expect(mutateAsync.mock.calls[1]?.[0]).toEqual(firstCall)
+  })
+
+  it('submits an explicit zero-field input schema as an empty object', async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ id: 'run-1' })
+    vi.mocked(useEmployee).mockReturnValue({
+      data: {
+        ...employee,
+        status: 'published',
+        published_version: 1,
+        definition: {
+          ...employee.definition,
+          input_schema: { type: 'object', additionalProperties: false },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useCreateRun).mockReturnValue({
+      isPending: false, isError: false, error: null, mutateAsync, reset: vi.fn(),
+    } as never)
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '发起任务' }))
+    expect(screen.queryByRole('textbox', { name: '任务内容' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '确认发起' }))
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({
+      input: {},
+      attachmentIds: [],
+      idempotencyKey: expect.any(String),
+    }))
+  })
+
   it('shows a controlled error when the desktop file selector fails', async () => {
     const user = userEvent.setup()
     vi.mocked(useEmployee).mockReturnValue({

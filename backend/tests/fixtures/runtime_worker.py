@@ -23,6 +23,9 @@ from agent_platform.workers.main import run_worker_service
 from agent_platform.workers.runtime_composition import PlatformModelResolver
 
 RUNTIME_E2E_OUTPUT = "Runtime E2E completed in the real worker."
+STRUCTURED_RUNTIME_E2E_OUTPUT = (
+    '{"cards":[{"title":"线索 A","score":0.91}],"summary":"已生成结构化卡片"}'
+)
 RUNTIME_E2E_WORKER_READY_FILE = Path("/tmp/agent-platform-runtime-e2e-worker-ready")
 SLOW_MODEL_STARTED_FILE = Path("/tmp/agent-platform-runtime-e2e-slow-model-started")
 SLOW_MODEL_STOPPED_FILE = Path("/tmp/agent-platform-runtime-e2e-slow-model-stopped")
@@ -41,6 +44,48 @@ class ToolBindingGenericFakeChatModel(GenericFakeChatModel):
     ) -> Runnable[Any, AIMessage]:
         del tools, tool_choice, kwargs
         return self
+
+
+class ToolBindingRuntimeE2EChatModel(BaseChatModel):
+    """Test-only model that returns deterministic output based on public messages."""
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        del tools, tool_choice, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content=_output_for_messages(messages),
+        ))])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content=_output_for_messages(messages),
+        ))])
+
+    @property
+    def _llm_type(self) -> str:
+        return "runtime-e2e-conditional-model"
 
 
 class ToolBindingCancellableSlowChatModel(BaseChatModel):
@@ -95,6 +140,25 @@ def _messages() -> Iterator[AIMessage | str]:
         yield AIMessage(content=RUNTIME_E2E_OUTPUT)
 
 
+def _structured_messages() -> Iterator[AIMessage | str]:
+    while True:
+        yield AIMessage(content=STRUCTURED_RUNTIME_E2E_OUTPUT)
+
+
+def _message_content_text(message: BaseMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
+def _output_for_messages(messages: Sequence[BaseMessage]) -> str:
+    joined = "\n".join(_message_content_text(message) for message in messages)
+    if "短视频投放" in joined or "结构化线索卡片" in joined:
+        return STRUCTURED_RUNTIME_E2E_OUTPUT
+    return RUNTIME_E2E_OUTPUT
+
+
 async def _wait_for_runtime_database(settings: AppSettings) -> None:
     """Wait until global setup has recreated and migrated the isolated database.
 
@@ -124,11 +188,13 @@ async def _main() -> None:
         SLOW_MODEL_SIDE_EFFECT_FILE,
     ):
         marker.unlink(missing_ok=True)
-    model = ToolBindingGenericFakeChatModel(messages=_messages())
+    model = ToolBindingRuntimeE2EChatModel()
+    structured_model = ToolBindingGenericFakeChatModel(messages=_structured_messages())
     slow_model = ToolBindingCancellableSlowChatModel()
     resolver = PlatformModelResolver(
         injected_models={
             "general-purpose": model,
+            "structured-output": structured_model,
             "slow-cancel": slow_model,
         },
     )

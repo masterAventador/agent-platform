@@ -19,6 +19,8 @@ interface EmployeeFormValues {
   conversation: boolean
   fileUpload: boolean
   scheduledTasks: boolean
+  inputSchemaText: string
+  outputSchemaText: string
   skillIds: string[]
   toolIds: string[]
 }
@@ -32,6 +34,8 @@ const defaultValues: EmployeeFormValues = {
   conversation: true,
   fileUpload: false,
   scheduledTasks: false,
+  inputSchemaText: formatJson({ type: 'object' }),
+  outputSchemaText: formatJson({}),
   skillIds: [],
   toolIds: [],
 }
@@ -66,6 +70,8 @@ export function EmployeeEditorPage() {
       conversation: employee.definition.capabilities.conversation,
       fileUpload: employee.definition.capabilities.file_upload,
       scheduledTasks: false,
+      inputSchemaText: formatJson(employee.definition.input_schema),
+      outputSchemaText: formatJson(employee.definition.output_schema),
       skillIds: employee.definition.skill_ids,
       toolIds: employee.definition.tool_ids,
     })
@@ -79,6 +85,16 @@ export function EmployeeEditorPage() {
       }])
       return
     }
+    const inputSchema = parseJsonObjectField(values.inputSchemaText)
+    if (!inputSchema.ok) {
+      form.setFields([{ name: 'inputSchemaText', errors: [inputSchema.error] }])
+      return
+    }
+    const outputSchema = parseJsonObjectField(values.outputSchemaText)
+    if (!outputSchema.ok) {
+      form.setFields([{ name: 'outputSchemaText', errors: [outputSchema.error] }])
+      return
+    }
     const existing = editingEmployee.data?.definition
     const definition: EmployeeWriteDefinition = {
       name: values.name,
@@ -88,8 +104,8 @@ export function EmployeeEditorPage() {
       work_mode: 'autonomous',
       system_prompt: values.systemPrompt,
       model: { kind: 'gateway_alias', alias: 'general-purpose' },
-      input_schema: existing?.input_schema ?? { type: 'object' },
-      output_schema: existing?.output_schema ?? { type: 'object' },
+      input_schema: inputSchema.value,
+      output_schema: outputSchema.value,
       capabilities: {
         conversation: values.conversation,
         scheduled_tasks: false,
@@ -187,6 +203,35 @@ export function EmployeeEditorPage() {
           <Typography.Paragraph type="secondary">
             当前仅开放平台默认模型，供应商与实际模型路由由平台统一管理。
           </Typography.Paragraph>
+          <Form.Item
+            label="输入 Schema JSON"
+            name="inputSchemaText"
+            rules={[{ required: true, message: '请输入输入 Schema JSON' }]}
+          >
+            <Input.TextArea
+              rows={8}
+              spellCheck={false}
+              placeholder={'{\n  "type": "object",\n  "properties": {}\n}'}
+            />
+          </Form.Item>
+          <Typography.Paragraph type="secondary">
+            留空字段请使用默认 object；需要动态表单时声明 properties、required 和
+            additionalProperties。保存时后端会拒绝当前表单无法等价渲染的 Schema。
+          </Typography.Paragraph>
+          <Form.Item
+            label="输出 Schema JSON"
+            name="outputSchemaText"
+            rules={[{ required: true, message: '请输入输出 Schema JSON' }]}
+          >
+            <Input.TextArea
+              rows={8}
+              spellCheck={false}
+              placeholder={'{\n  "type": "object"\n}'}
+            />
+          </Form.Item>
+          <Typography.Paragraph type="secondary">
+            声明输出 Schema 后，任务详情会按结构化结果展示模型输出。
+          </Typography.Paragraph>
           <Form.Item label="能力">
             <Space wrap>
               <Form.Item name="conversation" valuePropName="checked" noStyle>
@@ -245,4 +290,20 @@ export function EmployeeEditorPage() {
       </Card>
     </section>
   )
+}
+
+function formatJson(value: unknown): string {
+  return JSON.stringify(value ?? {}, null, 2)
+}
+
+function parseJsonObjectField(text: string): { ok: true, value: Record<string, unknown> } | { ok: false, error: string } {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return { ok: false, error: 'Schema 必须是 JSON 对象' }
+    }
+    return { ok: true, value: value as Record<string, unknown> }
+  } catch {
+    return { ok: false, error: 'Schema JSON 格式无效' }
+  }
 }

@@ -230,6 +230,152 @@ describe('RunDetailPage tenant-scoped event stream', () => {
     expect(mutate).toHaveBeenCalledWith('artifact-1')
   })
 
+  it('renders card structured output from the run output schema and exports JSON', async () => {
+    const user = (await import('@testing-library/user-event')).default.setup()
+    const saveFile = vi.fn()
+    vi.mocked(getPlatformAdapter).mockReturnValue({ saveFile } as never)
+    vi.mocked(useRun).mockReturnValue({
+      data: {
+        ...runningRun,
+        status: 'completed',
+        output_schema: {
+          type: 'object',
+          'x-agent-platform-view': 'cards',
+          properties: {
+            cards: {
+              type: 'array',
+              items: { type: 'object' },
+            },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'event-output',
+        type: 'run.completed',
+        sequence: 3,
+        payload: {
+          output: {
+            cards: [{ title: '线索 A', score: 0.91 }],
+            summary: '已生成结构化卡片',
+          },
+        },
+      }],
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText('结构化结果')).toBeInTheDocument()
+    expect(screen.getByText('线索 A')).toBeInTheDocument()
+    expect(screen.getByText('score')).toBeInTheDocument()
+    expect(screen.getByText('0.91')).toBeInTheDocument()
+    expect(screen.getByText('已生成结构化卡片')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '导出 JSON' }))
+    expect(saveFile).toHaveBeenCalledWith(expect.objectContaining({
+      suggestedName: 'run-1-output.json',
+    }))
+  })
+
+  it('renders table structured output from the run output schema', () => {
+    vi.mocked(useRun).mockReturnValue({
+      data: {
+        ...runningRun,
+        status: 'completed',
+        output_schema: {
+          type: 'object',
+          'x-agent-platform-view': 'table',
+          properties: {
+            rows: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  amount: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'event-output',
+        type: 'run.completed',
+        sequence: 3,
+        payload: { output: { rows: [{ name: '素材剪辑', amount: 12 }] } },
+      }],
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText('素材剪辑')).toBeInTheDocument()
+    expect(screen.getByText('12')).toBeInTheDocument()
+  })
+
+  it('falls back to formatted JSON for generic structured output', () => {
+    vi.mocked(useRun).mockReturnValue({
+      data: {
+        ...runningRun,
+        status: 'completed',
+        output_schema: {
+          type: 'object',
+          properties: {
+            raw: { type: 'object' },
+          },
+        },
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'event-output',
+        type: 'run.completed',
+        sequence: 3,
+        payload: { output: { raw: { ok: true } } },
+      }],
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText(/"ok": true/)).toBeInTheDocument()
+  })
+
+  it.each([
+    [{ type: 'object' }],
+    [{}],
+    [{ title: '仅描述输出', description: '没有实际约束' }],
+  ])('does not render structured output for a non-effective output schema', (outputSchema) => {
+    vi.mocked(useRun).mockReturnValue({
+      data: {
+        ...runningRun,
+        status: 'completed',
+        output_schema: outputSchema,
+      },
+      isPending: false,
+    } as never)
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'event-output',
+        type: 'run.completed',
+        sequence: 3,
+        payload: { output: '纯文本输出' },
+      }],
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.queryByText('结构化结果')).not.toBeInTheDocument()
+  })
+
   it.each([
     [403, '无权访问任务'],
     [404, '任务不存在或无权访问'],

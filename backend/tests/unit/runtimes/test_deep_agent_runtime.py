@@ -29,6 +29,44 @@ class FakeAgentGraph:
         }
 
 
+class JsonOutputAgentGraph:
+    async def ainvoke(
+        self,
+        input_data: dict[str, object],
+        config: dict[str, object],
+    ) -> dict[str, Any]:
+        del input_data, config
+        return {
+            "messages": [
+                AIMessage(content='{"cards":[{"title":"线索 A","score":0.91}]}')
+            ],
+        }
+
+
+class ScalarJsonOutputAgentGraph:
+    async def ainvoke(
+        self,
+        input_data: dict[str, object],
+        config: dict[str, object],
+    ) -> dict[str, Any]:
+        del input_data, config
+        return {"messages": [AIMessage(content="2")]}
+
+
+class BlockContentAgentGraph:
+    async def ainvoke(
+        self,
+        input_data: dict[str, object],
+        config: dict[str, object],
+    ) -> dict[str, Any]:
+        del input_data, config
+        return {
+            "messages": [
+                AIMessage(content=[{"type": "text", "text": "分段文本"}])
+            ],
+        }
+
+
 class BlockingAgentGraph:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -85,6 +123,113 @@ async def test_deep_agent_runtime_maps_result_to_platform_contract() -> None:
     assert "private_graph_state" not in str([event.model_dump() for event in history])
     streamed_events = [event async for event in runtime.stream(request.run_id, after_sequence=1)]
     assert streamed_events == history[1:]
+
+
+@pytest.mark.asyncio
+async def test_deep_agent_runtime_parses_json_text_for_structured_output_schema() -> None:
+    runtime = DeepAgentRuntime(agent_factory=lambda request: JsonOutputAgentGraph())
+    request = RuntimeStartRequest(
+        run_id=uuid4(),
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        employee_id=uuid4(),
+        thread_id="thread-deep-agent-structured",
+        employee_definition={
+            "system_prompt": "输出结构化线索",
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "cards": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
+                },
+            },
+        },
+        input_data={"topic": "线索"},
+    )
+
+    state = await runtime.start(request)
+    history = await runtime.get_history(request.run_id)
+
+    assert state.data == {"output": {"cards": [{"title": "线索 A", "score": 0.91}]}}
+    assert history[1].payload == {"content": {"cards": [{"title": "线索 A", "score": 0.91}]}}
+    assert history[2].payload == {
+        "status": "completed",
+        "output": {"cards": [{"title": "线索 A", "score": 0.91}]},
+    }
+
+
+@pytest.mark.asyncio
+async def test_deep_agent_runtime_parses_json_scalar_for_structured_output_schema() -> None:
+    runtime = DeepAgentRuntime(agent_factory=lambda request: ScalarJsonOutputAgentGraph())
+    request = RuntimeStartRequest(
+        run_id=uuid4(),
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        employee_id=uuid4(),
+        thread_id="thread-deep-agent-structured-scalar",
+        employee_definition={
+            "system_prompt": "输出结构化数字",
+            "output_schema": {"type": "integer", "enum": [1, 2]},
+        },
+        input_data={"topic": "等级"},
+    )
+
+    state = await runtime.start(request)
+    history = await runtime.get_history(request.run_id)
+
+    assert state.data == {"output": 2}
+    assert history[1].payload == {"content": 2}
+    assert history[2].payload == {"status": "completed", "output": 2}
+
+
+@pytest.mark.asyncio
+async def test_deep_agent_runtime_keeps_plain_numeric_text_for_string_output_schema() -> None:
+    runtime = DeepAgentRuntime(agent_factory=lambda request: ScalarJsonOutputAgentGraph())
+    request = RuntimeStartRequest(
+        run_id=uuid4(),
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        employee_id=uuid4(),
+        thread_id="thread-deep-agent-string-scalar",
+        employee_definition={
+            "system_prompt": "输出字符串编号",
+            "output_schema": {"type": "string"},
+        },
+        input_data={"topic": "编号"},
+    )
+
+    state = await runtime.start(request)
+    history = await runtime.get_history(request.run_id)
+
+    assert state.data == {"output": "2"}
+    assert history[1].payload == {"content": "2"}
+    assert history[2].payload == {"status": "completed", "output": "2"}
+
+
+@pytest.mark.asyncio
+async def test_deep_agent_runtime_keeps_legacy_text_output_without_effective_schema() -> None:
+    runtime = DeepAgentRuntime(agent_factory=lambda request: BlockContentAgentGraph())
+    request = RuntimeStartRequest(
+        run_id=uuid4(),
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        employee_id=uuid4(),
+        thread_id="thread-deep-agent-unstructured-blocks",
+        employee_definition={"system_prompt": "输出普通文本", "output_schema": {"type": "object"}},
+        input_data={"topic": "普通输出"},
+    )
+
+    state = await runtime.start(request)
+    history = await runtime.get_history(request.run_id)
+
+    assert state.data == {"output": '[{"type": "text", "text": "分段文本"}]'}
+    assert history[1].payload == {"content": '[{"type": "text", "text": "分段文本"}]'}
+    assert history[2].payload == {
+        "status": "completed",
+        "output": '[{"type": "text", "text": "分段文本"}]',
+    }
 
 
 @pytest.mark.asyncio

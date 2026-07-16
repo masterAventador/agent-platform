@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -47,6 +47,13 @@ from agent_platform.platform.conversations.entities import (
     ConversationMessage,
     ConversationMessageRole,
     limit_conversation_message_content,
+)
+from agent_platform.platform.dynamic_io import (
+    DynamicOutputTooLarge,
+    DynamicOutputValidationFailed,
+    InvalidDynamicSchema,
+    has_effective_output_schema,
+    validate_run_output,
 )
 from agent_platform.platform.runs.commands import RunCommand
 from agent_platform.platform.runs.entities import Run, RunStatus
@@ -556,6 +563,12 @@ class RunWorker:
                         )
                     )
                 )
+            state, history = await self._apply_output_schema_guard(
+                session=session,
+                run=current,
+                state=state,
+                history=history,
+            )
             events = SqlAlchemyRunEventRepository(session)
             await self._append_new_history(events=events, run_id=run.id, history=history)
             conversation_projection = (current, history)
@@ -1060,6 +1073,12 @@ class RunWorker:
                 if event.type is EventType.APPROVAL_REQUIRED
                 and event.payload.get("approval_id") is not None
             }
+            state, history = await self._apply_output_schema_guard(
+                session=session,
+                run=current,
+                state=state,
+                history=history,
+            )
             await self._append_new_history(events=events, run_id=run.id, history=history)
             conversation_projection = (current, history)
             stale_approval_ids = {
@@ -1090,6 +1109,89 @@ class RunWorker:
                 history=conversation_projection[1],
             )
         return state.status
+
+    async def _apply_output_schema_guard(
+        self,
+        *,
+        session: AsyncSession,
+        run: Run,
+        state: RuntimeState,
+        history: list[PlatformEvent],
+    ) -> tuple[RuntimeState, list[PlatformEvent]]:
+        if state.status is not RunStatus.COMPLETED:
+            return state, history
+
+        version = await SqlAlchemyEmployeeVersionRepository(session).get(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            version=run.employee_version,
+        )
+        if version is None:
+            return state, history
+
+        output_schema = version.definition.get("output_schema")
+        if not isinstance(output_schema, Mapping):
+            return state, history
+        if not has_effective_output_schema(output_schema):
+            return state, history
+
+        try:
+            validate_run_output(
+                output_schema=output_schema,
+                value=state.data.get("output"),
+            )
+        except (
+            DynamicOutputTooLarge,
+            DynamicOutputValidationFailed,
+            InvalidDynamicSchema,
+        ) as error:
+            error_code = "output_schema_validation_failed"
+            payload = self._output_schema_failure_payload(error)
+            filtered_history = [
+                event
+                for event in history
+                if event.type not in {EventType.MESSAGE_OUTPUT, EventType.RUN_COMPLETED}
+            ]
+            filtered_history.append(
+                PlatformEvent.create(
+                    tenant_id=run.tenant_id,
+                    employee_id=run.employee_id,
+                    run_id=run.id,
+                    sequence=len(filtered_history) + 1,
+                    event_type=EventType.RUN_FAILED,
+                    payload=payload,
+                )
+            )
+            return (
+                RuntimeState(
+                    run_id=run.id,
+                    status=RunStatus.FAILED,
+                    data={
+                        "error_code": error_code,
+                        "error_message": str(payload["message"]),
+                    },
+                ),
+                filtered_history,
+            )
+
+        return state, history
+
+    @staticmethod
+    def _output_schema_failure_payload(
+        error: DynamicOutputTooLarge | DynamicOutputValidationFailed | InvalidDynamicSchema,
+    ) -> dict[str, JsonValue]:
+        payload: dict[str, JsonValue] = {
+            "code": "output_schema_validation_failed",
+            "message": "运行输出不符合数字员工发布版本的输出 Schema",
+        }
+        if isinstance(error, DynamicOutputValidationFailed):
+            payload["errors"] = list(error.errors)
+        elif isinstance(error, DynamicOutputTooLarge):
+            payload["reason"] = "output_too_large"
+        elif isinstance(error, InvalidDynamicSchema):
+            payload["reason"] = "invalid_output_schema"
+            payload["schema_path"] = list(error.issue.path)
+        return payload
 
     @staticmethod
     async def _append_new_history(

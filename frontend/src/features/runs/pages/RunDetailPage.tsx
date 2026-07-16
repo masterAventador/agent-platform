@@ -15,6 +15,7 @@ import {
   useRunEvents,
 } from '../api/queries'
 import { downloadArtifact, type Artifact } from '../api/runs'
+import { StructuredOutput } from '../../dynamic-io/StructuredOutput'
 import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
 import './runs.css'
 
@@ -74,6 +75,10 @@ export function RunDetailPage({
   const approvalId = [...(events.data ?? [])]
     .reverse()
     .find((event) => event.type === 'approval.required')?.payload.approval_id
+  const structuredOutput = [...(events.data ?? [])]
+    .reverse()
+    .find((event) => event.payload.output !== undefined)
+    ?.payload.output
 
   return (
     <section className="run-detail">
@@ -159,6 +164,11 @@ export function RunDetailPage({
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="等待任务开始执行" />
         )}
       </Card>
+      <StructuredOutput
+        runId={data.id}
+        outputSchema={data.output_schema}
+        output={structuredOutput}
+      />
       <Card className="run-artifacts" title="任务产物">
         {artifacts.data?.length ? (
           <List

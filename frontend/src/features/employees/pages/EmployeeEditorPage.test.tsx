@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -135,12 +135,62 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
       work_mode: 'autonomous',
       model: { kind: 'gateway_alias', alias: 'general-purpose' },
+      output_schema: {},
       capabilities: {
         conversation: false,
         scheduled_tasks: false,
         file_upload: true,
       },
     }))
+  })
+
+  it('submits configured input and output schemas from the editor form', async () => {
+    const user = userEvent.setup()
+    renderEditor()
+
+    const inputSchema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['topic'],
+      properties: { topic: { type: 'string', title: '主题', minLength: 2 } },
+    }
+    const outputSchema = {
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+    }
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '结构化专员')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '负责结构化任务')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '输出结构化结果')
+    fireEvent.change(screen.getByRole('textbox', { name: '输入 Schema JSON' }), {
+      target: { value: JSON.stringify(inputSchema, null, 2) },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: '输出 Schema JSON' }), {
+      target: { value: JSON.stringify(outputSchema, null, 2) },
+    })
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      input_schema: inputSchema,
+      output_schema: outputSchema,
+    }))
+  })
+
+  it('blocks invalid schema JSON before submitting', async () => {
+    const user = userEvent.setup()
+    renderEditor()
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '结构化专员')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '负责结构化任务')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '输出结构化结果')
+    fireEvent.change(screen.getByRole('textbox', { name: '输入 Schema JSON' }), {
+      target: { value: '{bad json' },
+    })
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    expect(await screen.findByText('Schema JSON 格式无效')).toBeInTheDocument()
+    expect(createMutateAsync).not.toHaveBeenCalled()
   })
 
   it('does not expose an interaction that can submit another model alias', () => {
