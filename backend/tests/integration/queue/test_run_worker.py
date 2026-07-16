@@ -974,6 +974,124 @@ async def test_worker_injects_retrieved_knowledge_and_persists_citation_event(fa
 
 
 @pytest.mark.asyncio
+async def test_knowledge_event_survives_redelivery_without_duplicate_or_loss(factory) -> None:
+    """流收集瞬态失败后重投递：knowledge.retrieved 事件必须恰好持久化一次。"""
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    resolver = Resolver(StreamFailingRuntime())
+    knowledge_context = RuntimeKnowledgeContext(
+        citations=(
+            KnowledgeCitation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_name="handbook.pdf",
+                dataset_id="dataset-1",
+                content="年假十天",
+                score=0.91,
+                metadata={},
+            ),
+        )
+    )
+    original_resolve = resolver.resolve
+
+    async def resolve_with_knowledge(run_arg: Run, definition: dict[str, object]) -> Prepared:
+        prepared = await original_resolve(run_arg, definition)
+        prepared.knowledge_context = knowledge_context
+        return prepared
+
+    resolver.resolve = resolve_with_knowledge  # type: ignore[method-assign]
+    queue = MessageQueue(
+        [
+            RunQueueDelivery(
+                delivery_id=delivery_id,
+                message=RunQueueMessage(
+                    command_id=command.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            )
+            for delivery_id in ("knowledge-stream-error", "knowledge-stream-retry")
+        ]
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=resolver,
+        consumer_name="test-worker",
+    )
+
+    with pytest.raises(RuntimeError, match="transient event stream failure"):
+        await worker.run_once(block_ms=1)
+
+    await worker.run_once(block_ms=1)
+
+    assert queue.acknowledged == ["knowledge-stream-retry"]
+    async with factory() as session:
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+    knowledge_events = [
+        event for event in events if event.type is EventType.KNOWLEDGE_RETRIEVED
+    ]
+    assert len(knowledge_events) == 1
+    assert knowledge_events[0].payload["citation_count"] == 1
+
+
+def test_knowledge_event_id_is_deterministic_per_run_for_persistent_dedup() -> None:
+    """同一 run 重复生成的 knowledge 事件必须复用同一 event_id，依托持久去重。"""
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    prepared = Prepared(
+        runtime=CompletingRuntime(),
+        employee_definition={},
+        knowledge_context=RuntimeKnowledgeContext(citations=()),
+    )
+
+    first = RunWorker._knowledge_event(run, prepared)
+    second = RunWorker._knowledge_event(run, prepared)
+
+    assert first is not None and second is not None
+    assert first.event_id == second.event_id
+
+    other_run = Run.create(
+        tenant_id=run.tenant_id,
+        employee_id=run.employee_id,
+        employee_version=1,
+        created_by=run.created_by,
+        input_data={},
+    )
+    other = RunWorker._knowledge_event(other_run, prepared)
+    assert other is not None
+    assert other.event_id != first.event_id
+
+
+@pytest.mark.asyncio
 async def test_worker_treats_legacy_default_object_output_schema_as_unstructured(
     factory,
 ) -> None:

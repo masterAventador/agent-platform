@@ -6,7 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeVar
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
@@ -108,6 +108,7 @@ class WorkerFenced(RuntimeError):
 
 logger = logging.getLogger(__name__)
 RuntimeOperationResult = TypeVar("RuntimeOperationResult")
+_KNOWLEDGE_EVENT_NAMESPACE = UUID("8f3c1af2-6c1d-4be0-9dbb-1a4a9d8f5f77")
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +350,8 @@ class RunWorker:
             if pending_result.command_id != message.command_id:
                 raise RuntimeAlreadyPrepared(run.id)
             runtime = self._required_runtime(run.id)
+            # 事件流重收集时必须重建知识事件；确定性 event_id 保证已持久化时被去重。
+            knowledge_event = self._knowledge_event(run, self._prepared_runtimes[run.id])
             state = pending_result.state
             history = list(pending_result.history) if pending_result.history is not None else None
         elif message.action == "start":
@@ -1449,13 +1452,22 @@ class RunWorker:
             "citation_count": len(knowledge_context.citations),
             **knowledge_context.as_input_payload(),
         }
-        return PlatformEvent.create(
+        event = PlatformEvent.create(
             tenant_id=run.tenant_id,
             employee_id=run.employee_id,
             run_id=run.id,
             sequence=1,
             event_type=EventType.KNOWLEDGE_RETRIEVED,
             payload=TypeAdapter(dict[str, JsonValue]).validate_python(payload),
+        )
+        # 重投递会重新生成本事件；event_id 必须按 run 确定，依托持久化 event_id 去重。
+        return event.model_copy(
+            update={
+                "event_id": uuid5(
+                    _KNOWLEDGE_EVENT_NAMESPACE,
+                    f"{EventType.KNOWLEDGE_RETRIEVED.value}:{run.id}",
+                )
+            }
         )
 
     @staticmethod
