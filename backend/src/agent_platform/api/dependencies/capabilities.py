@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, suppress
 from datetime import UTC, datetime
 from functools import wraps
+from inspect import iscoroutinefunction
 from typing import Any, cast
 from uuid import UUID
 
@@ -167,6 +168,18 @@ def wrap_capability_router(router: APIRouter) -> APIRouter:
     for route in router.routes:
         if not isinstance(route, APIRoute):
             raise TypeError("capability routers must only contain API routes")
+        # 装配期 fail-fast：包装器重建路由只透传 path/methods/status_code/name，
+        # 暂不支持的路由形态必须显式拒绝，禁止静默丢弃元数据或产出损坏响应。
+        if iscoroutinefunction(route.endpoint):
+            raise TypeError(
+                f"capability route {route.path} uses an async endpoint; "
+                "the audit wrapper only supports sync endpoints for now"
+            )
+        if route.dependencies:
+            raise TypeError(
+                f"capability route {route.path} declares per-route dependencies, "
+                "which the audit wrapper would silently drop"
+            )
         wrapped_router.add_api_route(
             route.path,
             _wrap_capability_endpoint(route.endpoint),
