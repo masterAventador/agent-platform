@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid5
 
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -232,6 +233,17 @@ async def _upsert_record(
 ) -> tuple[bool, bool]:
     identity = desired.event_id if isinstance(desired, RunEventRecord) else desired.id
     existing = cast(DemoRecord | None, await session.get(type(desired), identity))
+    if existing is None and isinstance(desired, ToolVersionRecord):
+        # 迁移回填可能已用随机 id 建立了同 (tool_id, version) 的行；
+        # Seed 必须按业务唯一键收编该行，避免撞 uq_tool_versions_number。
+        existing = (
+            await session.execute(
+                select(ToolVersionRecord).where(
+                    ToolVersionRecord.tool_id == desired.tool_id,
+                    ToolVersionRecord.version == desired.version,
+                )
+            )
+        ).scalar_one_or_none()
     if existing is None:
         session.add(desired)
         return True, False

@@ -302,3 +302,61 @@ async def test_demo_seed_grants_social_operations_entitlement_idempotently(
     assert entitlement.status == "active"
     assert entitlement.source == "demo-seed"
     assert entitlement.expires_at is None
+
+@pytest.mark.asyncio
+async def test_demo_seed_adopts_migration_backfilled_tool_version(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """迁移 0028 会用随机 id 为存量工具回填 version=1；Seed 重放必须按业务键
+    (tool_id, version) 收编该行，而不是用稳定 id 再插一条撞唯一约束。"""
+    from uuid import uuid4
+
+    from agent_platform.bootstrap.demo_seed import DEMO_TOOL_ID
+    from agent_platform.infrastructure.database.repositories.tools import ToolVersionRecord
+
+    storage = MemoryArtifactStorage()
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+    # 模拟迁移回填：把 seed 建的版本行替换成随机 id 的等价行
+    async with session_factory() as session:
+        existing = (
+            await session.execute(
+                select(ToolVersionRecord).where(ToolVersionRecord.tool_id == DEMO_TOOL_ID)
+            )
+        ).scalar_one()
+        backfilled = ToolVersionRecord(
+            id=uuid4(),
+            tenant_id=existing.tenant_id,
+            tool_id=existing.tool_id,
+            version=existing.version,
+            description=existing.description,
+            input_schema=existing.input_schema,
+            risk_level=existing.risk_level,
+            approval_policy=existing.approval_policy,
+            change_source=existing.change_source,
+            created_at=existing.created_at,
+        )
+        await session.delete(existing)
+        await session.flush()
+        session.add(backfilled)
+        await session.commit()
+
+    result = await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+    assert result.created == 0
+
+    async with session_factory() as session:
+        versions = (
+            await session.execute(
+                select(ToolVersionRecord).where(ToolVersionRecord.tool_id == DEMO_TOOL_ID)
+            )
+        ).scalars().all()
+    assert len(versions) == 1
