@@ -7,9 +7,8 @@ from typing import Any, cast
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry._logs import LogRecord
-from opentelemetry.sdk._logs import ReadableLogRecord
+from opentelemetry.sdk._logs import LoggerProvider, ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportResult
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.resources import Resource

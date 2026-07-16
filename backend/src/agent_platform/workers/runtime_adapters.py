@@ -14,6 +14,7 @@ from agent_platform.infrastructure.database.repositories.sandbox import (
     SqlAlchemySandboxLeaseUnitOfWorkFactory,
 )
 from agent_platform.infrastructure.secrets import LocalFileCredentialResolver
+from agent_platform.observability.metrics import OperationalMetrics
 from agent_platform.runtimes.base import EmployeeRuntime
 from agent_platform.runtimes.deep_agent import DeepAgentSandboxBackendValidator
 from agent_platform.sandbox.manager import SandboxManager
@@ -91,6 +92,7 @@ def create_runtime_adapters(
     settings: AppSettings,
     session_factory: async_sessionmaker[AsyncSession],
     workflow_factories: Mapping[tuple[UUID, int], WorkflowRuntimeFactory] | None = None,
+    metrics: OperationalMetrics | None = None,
 ) -> BuiltinRuntimeAdapters:
     validate_runtime_adapter_configuration(settings)
     secret = settings.sandbox_controller_secret.get_secret_value()
@@ -99,6 +101,7 @@ def create_runtime_adapters(
         base_url=settings.sandbox_controller_url,
         bearer_secret=secret,
         request_timeout_seconds=settings.sandbox_controller_request_timeout_seconds,
+        metrics=metrics,
     )
     manager = SandboxManager(
         unit_of_work_factory=SqlAlchemySandboxLeaseUnitOfWorkFactory(session_factory),

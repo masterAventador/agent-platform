@@ -1,11 +1,14 @@
 import json
 from dataclasses import dataclass
+from time import perf_counter
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
+
+from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 
 if TYPE_CHECKING:
     from agent_platform.infrastructure.queue.dead_letters import RunDeadLetter
@@ -79,6 +82,7 @@ class RedisRunQueue:
         pending_min_idle_ms: int = 1_000,
         dead_letter_stream_name: str = "agent-platform:runs:dlq",
         max_delivery_attempts: int = 5,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         self._redis = redis
         self._stream_name = stream_name
@@ -87,6 +91,7 @@ class RedisRunQueue:
         self._dead_letter_stream_name = dead_letter_stream_name
         self._max_delivery_attempts = max_delivery_attempts
         self._claim_cursor = "0-0"
+        self._metrics = metrics
 
     async def setup(self) -> None:
         try:
@@ -101,16 +106,22 @@ class RedisRunQueue:
                 raise
 
     async def enqueue(self, message: RunQueueMessage) -> str:
-        delivery_id = await self._redis.xadd(
-            self._stream_name,
-            {
-                "command_id": str(message.command_id),
-                "run_id": str(message.run_id),
-                "tenant_id": str(message.tenant_id),
-                "action": message.action,
-                "payload": json.dumps(message.payload, ensure_ascii=False),
-            },
-        )
+        started = perf_counter()
+        try:
+            delivery_id = await self._redis.xadd(
+                self._stream_name,
+                {
+                    "command_id": str(message.command_id),
+                    "run_id": str(message.run_id),
+                    "tenant_id": str(message.tenant_id),
+                    "action": message.action,
+                    "payload": json.dumps(message.payload, ensure_ascii=False),
+                },
+            )
+        except Exception:
+            self._record_metric("enqueue", "failed", started)
+            raise
+        self._record_metric("enqueue", "succeeded", started)
         return str(delivery_id)
 
     async def dequeue(
@@ -118,6 +129,21 @@ class RedisRunQueue:
         *,
         consumer_name: str,
         block_ms: int = 5_000,
+    ) -> RunQueueDelivery | None:
+        started = perf_counter()
+        try:
+            delivery = await self._dequeue(consumer_name=consumer_name, block_ms=block_ms)
+        except Exception:
+            self._record_metric("dequeue", "failed", started)
+            raise
+        self._record_metric("dequeue", "succeeded", started)
+        return delivery
+
+    async def _dequeue(
+        self,
+        *,
+        consumer_name: str,
+        block_ms: int,
     ) -> RunQueueDelivery | None:
         while True:
             claimed = await self._redis.xautoclaim(
@@ -198,19 +224,34 @@ class RedisRunQueue:
         return attempts if attempts >= self._max_delivery_attempts else None
 
     async def publish_dead_letter(self, record: "RunDeadLetter") -> None:
-        await self._redis.eval(
-            _MIRROR_DEAD_LETTER_SCRIPT,
-            2,
-            self._dead_letter_stream_name,
-            f"{self._dead_letter_stream_name}:dedupe",
-            str(record.id),
-            record.source_stream,
-            record.original_delivery_id,
-            str(record.original_command_id or ""),
-            str(record.original_run_id or ""),
-            str(record.tenant_id or ""),
-            record.action or "",
-            str(record.attempts),
-            record.error_type,
-            record.failed_at.isoformat(),
-        )
+        started = perf_counter()
+        try:
+            await self._redis.eval(
+                _MIRROR_DEAD_LETTER_SCRIPT,
+                2,
+                self._dead_letter_stream_name,
+                f"{self._dead_letter_stream_name}:dedupe",
+                str(record.id),
+                record.source_stream,
+                record.original_delivery_id,
+                str(record.original_command_id or ""),
+                str(record.original_run_id or ""),
+                str(record.tenant_id or ""),
+                record.action or "",
+                str(record.attempts),
+                record.error_type,
+                record.failed_at.isoformat(),
+            )
+        except Exception:
+            self._record_metric("dead_letter", "failed", started)
+            raise
+        self._record_metric("dead_letter", "succeeded", started)
+
+    def _record_metric(self, operation: str, outcome: str, started: float) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                component=OperationalComponent.QUEUE,
+                operation=operation,
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1_000,
+            )

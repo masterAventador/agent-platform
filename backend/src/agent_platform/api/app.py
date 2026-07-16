@@ -128,6 +128,7 @@ def create_app(
         owned_knowledge_provider = RagFlowClient(
             base_url=app_settings.ragflow_url,
             api_key=app_settings.ragflow_api_key,
+            metrics=app_telemetry.operational_metrics,
         )
         knowledge_provider = owned_knowledge_provider
 

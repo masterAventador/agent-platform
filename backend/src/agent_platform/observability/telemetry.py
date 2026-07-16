@@ -9,6 +9,7 @@ from typing import Any, Protocol, cast
 from weakref import WeakSet
 
 from fastapi import FastAPI, Request
+from opentelemetry._logs import LogRecord
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -16,7 +17,6 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry._logs import LogRecord
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler, ReadableLogRecord
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogRecordExporter
 from opentelemetry.sdk.metrics import MeterProvider
@@ -38,6 +38,7 @@ from agent_platform.observability.attributes import (
     sanitize_span_attributes,
 )
 from agent_platform.observability.correlation import current_correlation_id
+from agent_platform.observability.metrics import OperationalMetrics
 
 _FLUSH_TIMEOUT_MILLIS = 30_000
 _SENSITIVE_HTTP_HEADERS = ["authorization", "cookie", "set-cookie"]
@@ -88,7 +89,7 @@ class SanitizingSpanExporter(SpanExporter):
         return self._exporter.force_flush(timeout_millis)
 
     def shutdown(self) -> None:
-        self._exporter.shutdown()
+        cast(Any, self._exporter).shutdown()
 
 
 class SanitizingLogExporter(LogRecordExporter):
@@ -101,7 +102,7 @@ class SanitizingLogExporter(LogRecordExporter):
         return self._exporter.export(tuple(_sanitized_log_record(record) for record in batch))
 
     def shutdown(self) -> None:
-        self._exporter.shutdown()
+        cast(Any, self._exporter).shutdown()
 
 
 class _CorrelationLogFilter(logging.Filter):
@@ -120,6 +121,11 @@ class Telemetry:
         instrumentors: InstrumentorSet,
     ) -> None:
         self.providers = providers
+        self.operational_metrics = (
+            OperationalMetrics(providers.meter_provider.get_meter("agent_platform.operations"))
+            if providers is not None
+            else None
+        )
         self._instrumentors = instrumentors
         self._shutdown = False
         self._logging_handler: LoggingHandler | None = None
@@ -137,6 +143,7 @@ class Telemetry:
         self._instrument_once(
             self._instrumentors.httpx,
             tracer_provider=tracer_provider,
+            meter_provider=self.providers.meter_provider,
         )
         self._instrument_once(
             self._instrumentors.redis,

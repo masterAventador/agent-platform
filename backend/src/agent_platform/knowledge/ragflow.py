@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -12,6 +13,7 @@ from pydantic import (
     ValidationError,
 )
 
+from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
     KnowledgeProviderUnavailable,
@@ -100,10 +102,12 @@ class RagFlowClient:
         base_url: str,
         api_key: str,
         client: httpx.AsyncClient | None = None,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         self._owned_client = client is None
         self._client = client or httpx.AsyncClient(base_url=base_url, timeout=60.0)
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._metrics = metrics
 
     async def aclose(self) -> None:
         if self._owned_client:
@@ -119,6 +123,7 @@ class RagFlowClient:
         data = await self._request(
             "POST",
             "/api/v1/datasets",
+            operation="create_dataset",
             json={
                 "name": name,
                 "description": description,
@@ -129,7 +134,12 @@ class RagFlowClient:
         return self._dataset(data)
 
     async def delete_dataset(self, provider_id: str) -> None:
-        await self._request("DELETE", "/api/v1/datasets", json={"ids": [provider_id]})
+        await self._request(
+            "DELETE",
+            "/api/v1/datasets",
+            operation="delete_dataset",
+            json={"ids": [provider_id]},
+        )
 
     async def upload_document(
         self,
@@ -142,6 +152,7 @@ class RagFlowClient:
         data = await self._request(
             "POST",
             f"/api/v1/datasets/{dataset_id}/documents",
+            operation="upload_document",
             files={"file": (Path(filename).name, content, content_type)},
         )
         documents = _validate_response(
@@ -157,6 +168,7 @@ class RagFlowClient:
         await self._request(
             "POST",
             f"/api/v1/datasets/{dataset_id}/chunks",
+            operation="parse_document",
             json={"document_ids": document_ids},
         )
 
@@ -164,6 +176,7 @@ class RagFlowClient:
         data = await self._request(
             "GET",
             f"/api/v1/datasets/{dataset_id}/documents",
+            operation="list_chunks",
             params={"page": 1, "page_size": 100, "orderby": "create_time", "desc": "true"},
         )
         payload = _validate_response(
@@ -189,7 +202,12 @@ class RagFlowClient:
         }
         if metadata_condition is not None:
             payload["metadata_condition"] = metadata_condition
-        data = await self._request("POST", "/api/v1/retrieval", json=payload)
+        data = await self._request(
+            "POST",
+            "/api/v1/retrieval",
+            operation="retrieve",
+            json=payload,
+        )
         response = _validate_response(
             _RETRIEVAL_ADAPTER,
             data,
@@ -200,24 +218,49 @@ class RagFlowClient:
             citations=[self._citation(chunk) for chunk in response.chunks],
         )
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        **kwargs: Any,
+    ) -> Any:
+        started = perf_counter()
         try:
             response = await self._client.request(method, path, headers=self._headers, **kwargs)
             response.raise_for_status()
         except httpx.HTTPError as error:
+            self._record_metric(operation, "failed", started)
             raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
         try:
             envelope = response.json()
         except (OverflowError, ValueError) as error:
+            self._record_metric(operation, "failed", started)
             raise InvalidKnowledgeProviderResponse("知识供应商返回了畸形 JSON") from error
-        validated = _validate_response(
-            _ENVELOPE_ADAPTER,
-            envelope,
-            "知识供应商响应信封格式错误",
-        )
+        try:
+            validated = _validate_response(
+                _ENVELOPE_ADAPTER,
+                envelope,
+                "知识供应商响应信封格式错误",
+            )
+        except InvalidKnowledgeProviderResponse:
+            self._record_metric(operation, "failed", started)
+            raise
         if validated.code != 0:
+            self._record_metric(operation, "failed", started)
             raise KnowledgeProviderUnavailable("知识供应商拒绝了请求")
+        self._record_metric(operation, "succeeded", started)
         return validated.data
+
+    def _record_metric(self, operation: str, outcome: str, started: float) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                component=OperationalComponent.RAGFLOW,
+                operation=operation,
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1_000,
+            )
 
     @staticmethod
     def _dataset(data: Any) -> KnowledgeDataset:
