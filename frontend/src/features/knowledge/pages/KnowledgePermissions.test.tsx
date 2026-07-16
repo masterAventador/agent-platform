@@ -39,7 +39,6 @@ vi.mock('../api/queries', () => ({
     mutateAsync: deleteKnowledgeBase,
   })),
   useKnowledgeDocuments: vi.fn(() => ({ data: [] })),
-  useUploadKnowledgeDocument: vi.fn(() => ({ isPending: false, mutate: vi.fn() })),
   useUploadKnowledgeDocuments: vi.fn(() => ({
     isPending: false,
     mutate: uploadKnowledgeDocuments,
@@ -154,6 +153,91 @@ describe('knowledge capability controls', () => {
 
     await user.click(screen.getByRole('button', { name: '删除文档 policy.txt' }))
     expect(deleteKnowledgeDocument).toHaveBeenCalledWith('document-1')
+  })
+
+  it('scopes retry and delete pending state to the acting row only', () => {
+    vi.mocked(useKnowledgeDocuments).mockReturnValue({
+      data: [
+        {
+          provider_id: 'document-1',
+          name: 'policy.txt',
+          status: 'FAIL',
+          size_bytes: 12,
+          chunk_count: 0,
+        },
+        {
+          provider_id: 'document-2',
+          name: 'handbook.txt',
+          status: 'FAIL',
+          size_bytes: 20,
+          chunk_count: 0,
+        },
+      ],
+    } as never)
+    vi.mocked(useRetryKnowledgeDocument).mockReturnValue({
+      isPending: true,
+      variables: 'document-1',
+      mutate: retryKnowledgeDocument,
+    } as never)
+    vi.mocked(useDeleteKnowledgeDocument).mockReturnValue({
+      isPending: true,
+      variables: 'document-2',
+      mutate: deleteKnowledgeDocument,
+    } as never)
+    renderDetail(true)
+
+    expect(
+      screen.getByRole('button', { name: /重试解析 policy\.txt/ }),
+    ).toHaveClass('ant-btn-loading')
+    expect(
+      screen.getByRole('button', { name: '重试解析 handbook.txt' }),
+    ).not.toHaveClass('ant-btn-loading')
+    expect(
+      screen.getByRole('button', { name: /删除文档 handbook\.txt/ }),
+    ).toHaveClass('ant-btn-loading')
+    expect(
+      screen.getByRole('button', { name: '删除文档 policy.txt' }),
+    ).not.toHaveClass('ant-btn-loading')
+  })
+
+  it('surfaces a visible error when a document operation fails', () => {
+    vi.mocked(useKnowledgeDocuments).mockReturnValue({
+      data: [
+        {
+          provider_id: 'document-1',
+          name: 'policy.txt',
+          status: 'FAIL',
+          size_bytes: 12,
+          chunk_count: 0,
+        },
+      ],
+    } as never)
+    vi.mocked(useRetryKnowledgeDocument).mockReturnValue({
+      isPending: false,
+      error: new Error('provider unavailable'),
+      mutate: retryKnowledgeDocument,
+    } as never)
+    vi.mocked(useDeleteKnowledgeDocument).mockReturnValue({
+      isPending: false,
+      error: new Error('provider unavailable'),
+      mutate: deleteKnowledgeDocument,
+    } as never)
+    vi.mocked(useUploadKnowledgeDocuments).mockReturnValue({
+      isPending: false,
+      error: new Error('provider unavailable'),
+      mutate: uploadKnowledgeDocuments,
+    } as never)
+    vi.mocked(useReplaceKnowledgeDocument).mockReturnValue({
+      isPending: false,
+      error: new Error('provider unavailable'),
+      mutate: replaceKnowledgeDocument,
+    } as never)
+    renderDetail(true)
+
+    expect(screen.getByText('文档重试解析失败，请稍后重试')).toBeInTheDocument()
+    expect(screen.getByText('文档删除失败，请稍后重试')).toBeInTheDocument()
+    expect(screen.getByText('文档上传失败，请稍后重试')).toBeInTheDocument()
+    expect(screen.getByText('文档替换失败，请稍后重试')).toBeInTheDocument()
   })
 
   it('allows knowledge managers to delete after explicit confirmation', async () => {

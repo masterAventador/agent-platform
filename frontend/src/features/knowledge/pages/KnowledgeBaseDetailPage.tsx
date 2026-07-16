@@ -82,6 +82,34 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
             </Button>
           </Flex>
         )}
+        {upload.error != null && (
+          <Alert
+            type="error"
+            showIcon
+            title={getApiErrorMessage(upload.error, '文档上传失败，请稍后重试')}
+          />
+        )}
+        {retryDocument.error != null && (
+          <Alert
+            type="error"
+            showIcon
+            title={getApiErrorMessage(retryDocument.error, '文档重试解析失败，请稍后重试')}
+          />
+        )}
+        {replaceDocument.error != null && (
+          <Alert
+            type="error"
+            showIcon
+            title={getApiErrorMessage(replaceDocument.error, '文档替换失败，请稍后重试')}
+          />
+        )}
+        {deleteDocument.error != null && (
+          <Alert
+            type="error"
+            showIcon
+            title={getApiErrorMessage(deleteDocument.error, '文档删除失败，请稍后重试')}
+          />
+        )}
         <div className="knowledge-documents">
           {documents.data?.length ? documents.data.map((document) => {
             const status = documentStatuses[document.status] ?? {
@@ -106,7 +134,10 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
                   <Space wrap>
                     <Button
                       size="small"
-                      loading={retryDocument.isPending}
+                      loading={
+                        retryDocument.isPending
+                        && retryDocument.variables === document.provider_id
+                      }
                       onClick={() => retryDocument.mutate(document.provider_id)}
                     >
                       {`重试解析 ${document.name}`}
@@ -128,7 +159,10 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
                     <Button
                       danger
                       size="small"
-                      loading={deleteDocument.isPending}
+                      loading={
+                        deleteDocument.isPending
+                        && deleteDocument.variables === document.provider_id
+                      }
                       onClick={() => deleteDocument.mutate(document.provider_id)}
                     >
                       {`删除文档 ${document.name}`}

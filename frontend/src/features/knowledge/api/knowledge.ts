@@ -60,20 +60,6 @@ export async function listDocuments(
   ).data
 }
 
-export async function uploadDocument(
-  tenantId: string,
-  knowledgeBaseId: string,
-  file: File,
-): Promise<KnowledgeDocument> {
-  const body = new FormData()
-  body.append('file', file)
-  return (
-    await apiClient.post(`/knowledge-bases/${knowledgeBaseId}/documents`, body, {
-      ...tenantRequestConfig(tenantId),
-    })
-  ).data
-}
-
 export async function uploadDocuments(
   tenantId: string,
   knowledgeBaseId: string,

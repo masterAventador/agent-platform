@@ -11,7 +11,6 @@ import {
   replaceDocument,
   retrieve,
   retryDocumentParsing,
-  uploadDocument,
   uploadDocuments,
 } from './knowledge'
 
@@ -58,17 +57,6 @@ export function useKnowledgeDocuments(id: string | undefined) {
     queryFn: () => listDocuments(tenantId!, id!),
     enabled: Boolean(tenantId && id),
     refetchInterval: 3_000,
-  })
-}
-
-export function useUploadKnowledgeDocument(id: string) {
-  const tenantId = useActiveWorkspaceId()
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'upload', id),
-    mutationFn: (file: File) => uploadDocument(tenantId!, id, file),
-    onSuccess: async () =>
-      queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
   })
 }
 
