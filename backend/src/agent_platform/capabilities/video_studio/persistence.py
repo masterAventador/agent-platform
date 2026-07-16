@@ -19,6 +19,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,6 +30,7 @@ from agent_platform.capabilities.video_studio.media_library import (
     MaterialFolder,
     MaterialKind,
     MaterialReference,
+    MaterialReferenceAlreadyExistsError,
 )
 from agent_platform.infrastructure.database.base import Base
 
@@ -42,7 +44,9 @@ class VideoMaterialFolderRecord(Base):
     )
     parent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     name: Mapped[str] = mapped_column(String(255))
-    created_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
+    created_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
@@ -68,7 +72,9 @@ class VideoMaterialRecord(Base):
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
-    owner_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
+    owner_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
+    )
     folder_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     name: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(32))
@@ -137,7 +143,9 @@ class VideoDownloadTaskRecord(Base):
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
-    requested_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
+    requested_by: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT")
+    )
     source_type: Mapped[str] = mapped_column(String(32))
     source_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
@@ -251,6 +259,11 @@ class SqlAlchemyMediaLibraryRepository:
 
     async def add_reference(self, reference: MaterialReference) -> None:
         self._session.add(VideoMaterialReferenceRecord(**asdict(reference)))
+        try:
+            await self._session.flush()
+        except IntegrityError as error:
+            await self._session.rollback()
+            raise MaterialReferenceAlreadyExistsError("素材引用已存在") from error
 
     async def list_references(
         self,

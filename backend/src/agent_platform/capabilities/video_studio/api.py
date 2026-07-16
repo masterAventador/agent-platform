@@ -20,6 +20,7 @@ from agent_platform.capabilities.video_studio.media_library import (
     MaterialKind,
     MaterialNotFoundError,
     MaterialReference,
+    MaterialReferenceAlreadyExistsError,
     MediaLibraryService,
     UploadCredentialExpiredError,
 )
@@ -567,6 +568,8 @@ async def create_material_reference(
             )
         except MaterialNotFoundError:
             raise _not_found() from None
+        except MaterialReferenceAlreadyExistsError as error:
+            raise _conflict("reference_already_exists", str(error)) from None
         except InvalidMaterialInput as error:
             raise _invalid(str(error)) from None
         await session.commit()

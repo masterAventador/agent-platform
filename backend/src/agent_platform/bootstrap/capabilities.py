@@ -16,6 +16,7 @@ from agent_platform.capabilities.registration import BackendCapabilityRegistrati
 from agent_platform.capabilities.video_studio.registration import (
     VIDEO_STUDIO_BACKEND_REGISTRATION,
 )
+from agent_platform.infrastructure.database.models import load_database_models
 
 
 class UnknownInstalledCapabilityError(ValueError):
@@ -26,6 +27,23 @@ _INSTALLABLE_BACKEND_REGISTRATIONS: dict[str, BackendCapabilityRegistration] = {
     registration.manifest.capability_id: registration
     for registration in (VIDEO_STUDIO_BACKEND_REGISTRATION,)
 }
+
+
+def load_all_database_models() -> None:
+    """注册 Core 与全部能力包模型到共享 Metadata（迁移与运行时同源）。
+
+    能力包的表属于随代码交付的 schema，无论部署 Profile 是否安装该能力，
+    Alembic 迁移都必须无条件包含这些模型；否则 ``alembic revision
+    --autogenerate`` 会把已存在的能力包表误判为需要 DROP 的漂移。
+    """
+
+    load_database_models()
+    for registration in _INSTALLABLE_BACKEND_REGISTRATIONS.values():
+        if not registration.database_models:
+            raise RuntimeError(
+                f"capability declares no database models: "
+                f"{registration.manifest.capability_id}"
+            )
 
 
 def resolve_installed_backend_registrations(

@@ -10,7 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.api.app import create_app
 from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
-from agent_platform.capabilities.video_studio.media_library import MAX_MATERIAL_SIZE_BYTES
+from agent_platform.capabilities.video_studio.media_library import (
+    MAX_MATERIAL_SIZE_BYTES,
+    InMemoryMaterialRepository,
+    MaterialReference,
+    MaterialReferenceAlreadyExistsError,
+)
+from agent_platform.capabilities.video_studio.persistence import (
+    SqlAlchemyMediaLibraryRepository,
+)
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
@@ -490,6 +498,93 @@ async def test_material_reference_create_list_and_delete_protection(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_material_reference_returns_controlled_conflict(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    _, _, owner, _, verifier = media_library_api
+    identity = await register(owner, "duplicate-reference-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    material = await create_available_material(
+        owner, tenant_id, verifier, name="duplicated.mp4", sha="b"
+    )
+    payload = {"reference_type": "timeline_clip", "reference_id": str(uuid4())}
+
+    first = await owner.post(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+        json=payload,
+    )
+    assert first.status_code == 201
+
+    duplicate = await owner.post(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+        json=payload,
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "reference_already_exists"
+
+    listed = await owner.get(
+        f"/api/v1/video-studio/materials/{material['id']}/references",
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [first.json()["id"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repository_kind", ["in_memory", "sqlalchemy"])
+async def test_duplicate_reference_error_semantics_match_across_repositories(
+    repository_kind: str,
+) -> None:
+    """InMemory 与 SQL 仓储对唯一约束冲突必须抛出同一领域错误。"""
+
+    from datetime import UTC, datetime
+
+    tenant_id = uuid4()
+    material_id = uuid4()
+    reference_id = uuid4()
+
+    def build_reference() -> MaterialReference:
+        return MaterialReference(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            material_id=material_id,
+            reference_type="timeline_clip",
+            reference_id=reference_id,
+            created_at=datetime.now(UTC),
+        )
+
+    if repository_kind == "in_memory":
+        repository: Any = InMemoryMaterialRepository()
+        await repository.add_reference(build_reference())
+        with pytest.raises(MaterialReferenceAlreadyExistsError):
+            await repository.add_reference(build_reference())
+        return
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            sql_repository = SqlAlchemyMediaLibraryRepository(session)
+            await sql_repository.add_reference(build_reference())
+            with pytest.raises(MaterialReferenceAlreadyExistsError):
+                await sql_repository.add_reference(build_reference())
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_upload_credentials_reject_oversized_material_with_precise_error(
     media_library_api: tuple[
         FastAPI,
@@ -526,3 +621,34 @@ async def test_upload_credentials_reject_oversized_material_with_precise_error(
     )
     assert listed.status_code == 200
     assert listed.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_accept_material_at_exact_size_limit(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    _, _, owner, _, _ = media_library_api
+    identity = await register(owner, "size-limit-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+
+    accepted = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers={"X-Tenant-ID": tenant_id},
+        json={
+            "name": "exactly-max.mp4",
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": MAX_MATERIAL_SIZE_BYTES,
+            "sha256": "7" * 64,
+        },
+    )
+    assert accepted.status_code == 201
+    material = accepted.json()["material"]
+    assert material["size_bytes"] == MAX_MATERIAL_SIZE_BYTES
+    assert material["status"] == "pending_upload"

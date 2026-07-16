@@ -33,22 +33,35 @@ def test_capability_packages_do_not_import_each_other(
         )
 
 
+# 组合根与能力包自身允许 import 具体能力包；其余顶层目录一律视为 Core 并受保护，
+# 新增顶层目录无需修改本测试即默认纳入扫描。
+_CAPABILITY_IMPORT_ALLOWLIST = frozenset({"bootstrap", "capabilities"})
+
+
+def _core_top_level_directories() -> list[str]:
+    return sorted(
+        entry.name
+        for entry in _SOURCE_ROOT.iterdir()
+        if entry.is_dir()
+        and entry.name != "__pycache__"
+        and entry.name not in _CAPABILITY_IMPORT_ALLOWLIST
+    )
+
+
 def test_core_business_modules_do_not_import_concrete_capabilities() -> None:
     concrete_packages = (
         "agent_platform.capabilities.video_studio",
         "agent_platform.capabilities.social_operations",
     )
 
+    core_directories = _core_top_level_directories()
+    # 防止扫描目标失效：枚举结果必须包含当前真实存在的代表性 Core 目录。
+    assert {"api", "infrastructure", "platform", "runtimes", "sandbox", "workers"} <= set(
+        core_directories
+    )
+
     violations: list[str] = []
-    for core_directory in (
-        "platform",
-        "runtimes",
-        "knowledge",
-        "tools",
-        "memory",
-        "infrastructure",
-        "api",
-    ):
+    for core_directory in core_directories:
         for source_file in (_SOURCE_ROOT / core_directory).rglob("*.py"):
             assert not uses_dynamic_import_primitive(source_file)
             violations.extend(

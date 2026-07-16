@@ -73,6 +73,28 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
 )
 
 
+MIGRATION_INTERNAL_TABLE_NAMES: frozenset[str] = frozenset(
+    {
+        # 20260714_0016 为支持 downgrade 还原而长期保留的迁移簿记表，
+        # 不对应任何 ORM 模型，autogenerate 必须忽略它。
+        "employee_model_migration_backups",
+    }
+)
+
+
+def include_name_for_autogenerate(
+    name: str | None,
+    type_: str,
+    parent_names: object,
+) -> bool:
+    """Alembic autogenerate 的 ``include_name`` 钩子：忽略迁移内部簿记表。"""
+
+    del parent_names
+    if type_ == "table":
+        return name not in MIGRATION_INTERNAL_TABLE_NAMES
+    return True
+
+
 def load_database_models() -> None:
     """显式注册全部 SQLAlchemy 模型到共享 Metadata。"""
 

@@ -49,7 +49,7 @@ class RunRecord(Base):
     )
     employee_version: Mapped[int] = mapped_column(Integer)
     created_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
-    thread_id: Mapped[str] = mapped_column(String(200), index=True)
+    thread_id: Mapped[str] = mapped_column(String(200))
     input_data: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -60,7 +60,7 @@ class RunRecord(Base):
     error_message: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     idempotency_key: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     conversation_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("conversations.id"), nullable=True
+        Uuid(as_uuid=True), ForeignKey("conversations.id"), nullable=True, index=True
     )
 
     __table_args__ = (

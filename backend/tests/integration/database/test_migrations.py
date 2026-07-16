@@ -683,6 +683,50 @@ def test_migration_head_is_current_forward_only_revision() -> None:
     assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0024"
 
 
+def test_autogenerate_detects_no_drift_between_head_and_runtime_metadata(
+    tmp_path: Path,
+) -> None:
+    """迁移到 head 后，数据库结构必须与迁移 env 使用的 metadata 完全一致。
+
+    该守卫防止能力包模型（如 video_studio 四张表）脱离迁移 metadata：
+    一旦漂移，后续 `alembic revision --autogenerate` 会生成 DROP 能力包表的迁移。
+    """
+
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from agent_platform.bootstrap.capabilities import load_all_database_models
+    from agent_platform.infrastructure.database.base import Base
+    from agent_platform.infrastructure.database.models import include_name_for_autogenerate
+
+    database_path = tmp_path / "autogenerate-drift.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "head")
+
+    # 与 migrations/env.py 保持同一 metadata 来源与 include_name 过滤。
+    load_all_database_models()
+    target_metadata = Base.metadata
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection,
+                opts={
+                    "compare_type": False,
+                    "include_name": include_name_for_autogenerate,
+                },
+            )
+            diffs = compare_metadata(context, target_metadata)
+    finally:
+        engine.dispose()
+
+    assert diffs == [], "迁移 metadata 与 head 数据库存在漂移:\n" + "\n".join(
+        repr(diff) for diff in diffs
+    )
+
+
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(
     tmp_path: Path,
 ) -> None:

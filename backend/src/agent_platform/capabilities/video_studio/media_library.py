@@ -63,6 +63,10 @@ class MaterialInUseError(MaterialLibraryError):
     pass
 
 
+class MaterialReferenceAlreadyExistsError(MaterialLibraryError):
+    pass
+
+
 class UploadCredentialExpiredError(MaterialLibraryError):
     pass
 
@@ -334,6 +338,14 @@ class InMemoryMaterialRepository:
         )[:limit]
 
     async def add_reference(self, reference: MaterialReference) -> None:
+        if any(
+            existing.tenant_id == reference.tenant_id
+            and existing.material_id == reference.material_id
+            and existing.reference_type == reference.reference_type
+            and existing.reference_id == reference.reference_id
+            for existing in self.references
+        ):
+            raise MaterialReferenceAlreadyExistsError("素材引用已存在")
         self.references.append(reference)
 
     async def list_references(
