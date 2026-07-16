@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agent_platform.platform.tools.entities import ToolApprovalPolicy
+
 from .models import (
     PolicyContext,
     PolicyDecision,
@@ -10,6 +12,17 @@ from .models import (
 )
 
 _APPROVAL_RISKS = frozenset({ToolRisk.EXTERNAL, ToolRisk.DESTRUCTIVE})
+
+
+def _requires_approval(definition: ToolDefinition) -> bool:
+    # 纵深防御：destructive 永远要求审批，即使数据层被绕过写入 never。
+    if definition.risk is ToolRisk.DESTRUCTIVE:
+        return True
+    if definition.approval_policy is ToolApprovalPolicy.ALWAYS:
+        return True
+    if definition.approval_policy is ToolApprovalPolicy.NEVER:
+        return False
+    return definition.risk in _APPROVAL_RISKS
 
 
 def evaluate_policy(
@@ -27,8 +40,10 @@ def evaluate_policy(
         return PolicyOutcome(PolicyDecision.DENY, "tool_disabled")
     if not definition.server_enabled:
         return PolicyOutcome(PolicyDecision.DENY, "server_disabled")
+    if definition.upstream_missing:
+        return PolicyOutcome(PolicyDecision.DENY, "tool_upstream_missing")
     if invocation.tool_id not in context.allowed_tool_ids:
         return PolicyOutcome(PolicyDecision.DENY, "tool_not_allowed")
-    if definition.risk in _APPROVAL_RISKS and not context.approval_granted:
+    if _requires_approval(definition) and not context.approval_granted:
         return PolicyOutcome(PolicyDecision.REQUIRE_APPROVAL, "approval_required")
     return PolicyOutcome(PolicyDecision.ALLOW)

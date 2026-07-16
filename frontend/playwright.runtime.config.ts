@@ -16,6 +16,7 @@ const sandboxImage = process.env.SANDBOX_CONTROLLER_IMAGE
 const runtimeFrontendPort = process.env.PLAYWRIGHT_RUNTIME_FRONTEND_PORT ?? '15174'
 const runtimeApiPort = process.env.PLAYWRIGHT_RUNTIME_API_PORT ?? '18001'
 const runtimeSandboxPort = process.env.PLAYWRIGHT_RUNTIME_SANDBOX_PORT ?? '18090'
+const runtimeMcpStubPort = process.env.PLAYWRIGHT_RUNTIME_MCP_STUB_PORT ?? '18941'
 const runtimeRagflowPort = process.env.PLAYWRIGHT_RUNTIME_RAGFLOW_PORT ?? '29381'
 const runtimeBaseUrl = process.env.PLAYWRIGHT_RUNTIME_BASE_URL ?? `http://127.0.0.1:${runtimeFrontendPort}`
 const runtimeApiUrl = `http://127.0.0.1:${runtimeApiPort}`
@@ -27,7 +28,7 @@ const backendEnvironment = {
   AGENT_PLATFORM_REDIS_URL: runtimeRedisUrl,
   AGENT_PLATFORM_RUN_QUEUE_STREAM_NAME: runtimeQueueStream,
   AGENT_PLATFORM_RUN_QUEUE_GROUP_NAME: runtimeQueueGroup,
-  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","slow-complete","structured-output"]',
+  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","structured-output","tool-call","slow-complete"]',
   AGENT_PLATFORM_RAGFLOW_URL: runtimeRagflowUrl,
   AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-runtime-e2e-key',
 }
@@ -49,6 +50,13 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: [
+    {
+      command: `uv run uvicorn tests.fixtures.mcp_stub:app --host 127.0.0.1 --port ${runtimeMcpStubPort}`,
+      cwd: `${repositoryRoot}/backend`,
+      url: `http://127.0.0.1:${runtimeMcpStubPort}/health`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+    },
     {
       command: `uv run uvicorn tests.fixtures.ragflow_stub:app --host 127.0.0.1 --port ${runtimeRagflowPort}`,
       cwd: `${repositoryRoot}/backend`,

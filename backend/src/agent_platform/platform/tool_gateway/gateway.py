@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
-from .errors import ToolExecutionError, ToolInvocationClaimRejected
+from .errors import ToolExecutionError, ToolExecutionFailure, ToolInvocationClaimRejected
 from .models import (
     ArgumentSummary,
     AuditEventType,
@@ -17,7 +17,13 @@ from .models import (
     ToolInvocationOutcome,
 )
 from .policy import evaluate_policy
-from .ports import CredentialResolver, ToolAuditSink, ToolDefinitionResolver, ToolExecutor
+from .ports import (
+    CredentialResolver,
+    ExecutionCircuit,
+    ToolAuditSink,
+    ToolDefinitionResolver,
+    ToolExecutor,
+)
 
 
 class ToolGateway:
@@ -28,11 +34,13 @@ class ToolGateway:
         definition_resolver: ToolDefinitionResolver,
         credential_resolver: CredentialResolver,
         audit_sink: ToolAuditSink,
+        execution_circuit: ExecutionCircuit | None = None,
     ) -> None:
         self._executor = executor
         self._definition_resolver = definition_resolver
         self._credential_resolver = credential_resolver
         self._audit_sink = audit_sink
+        self._execution_circuit = execution_circuit
 
     async def invoke(
         self,
@@ -75,6 +83,21 @@ class ToolGateway:
             )
             return ToolInvocationOutcome(decision=policy.decision, reason=policy.reason)
 
+        if self._execution_circuit is not None and not self._execution_circuit.allow(
+            tenant_id=definition.tenant_id, server_id=definition.server_id
+        ):
+            reason = "tool_circuit_open"
+            await self._audit_sink.emit(
+                _audit_event(
+                    event_type=AuditEventType.REJECTED,
+                    invocation=invocation,
+                    definition=definition,
+                    argument_summary=summary,
+                    reason=reason,
+                )
+            )
+            return ToolInvocationOutcome(decision=PolicyDecision.DENY, reason=reason)
+
         try:
             await self._audit_sink.emit(
                 _audit_event(
@@ -89,23 +112,33 @@ class ToolGateway:
                 decision=PolicyDecision.DENY,
                 reason="run_execution_not_allowed",
             )
-        execution_failed = False
+        failure_code: str | None = None
         result: object | None = None
         try:
             credentials = await self._credential_resolver.resolve(
                 tenant_id=invocation.tenant_id,
                 references=definition.credential_references,
             )
-            result = await self._executor.execute(
-                definition=definition,
-                arguments=invocation.arguments,
-                credentials=credentials,
-                invocation_id=invocation.invocation_id,
-            )
         except Exception:
-            execution_failed = True
+            failure_code = "credential_unavailable"
+        else:
+            try:
+                result = await self._executor.execute(
+                    definition=definition,
+                    arguments=invocation.arguments,
+                    credentials=credentials,
+                    invocation_id=invocation.invocation_id,
+                )
+            except ToolExecutionFailure as failure:
+                failure_code = failure.code
+            except Exception:
+                failure_code = "tool_execution_failed"
 
-        if execution_failed:
+        if failure_code is not None:
+            if self._execution_circuit is not None:
+                self._execution_circuit.record_failure(
+                    tenant_id=definition.tenant_id, server_id=definition.server_id
+                )
             await self._audit_sink.emit(
                 _audit_event(
                     event_type=AuditEventType.COMPLETED,
@@ -113,11 +146,15 @@ class ToolGateway:
                     definition=definition,
                     argument_summary=summary,
                     succeeded=False,
-                    reason="tool_execution_failed",
+                    reason=failure_code,
                 )
             )
-            raise ToolExecutionError("Tool execution failed")
+            raise ToolExecutionError(failure_code)
 
+        if self._execution_circuit is not None:
+            self._execution_circuit.record_success(
+                tenant_id=definition.tenant_id, server_id=definition.server_id
+            )
         await self._audit_sink.emit(
             _audit_event(
                 event_type=AuditEventType.COMPLETED,

@@ -334,6 +334,28 @@ class SqlAlchemyToolAuditReader:
         )
         return result.scalar_one_or_none() is not None
 
+    async def list_recent(
+        self,
+        *,
+        tenant_id: UUID,
+        tool_id: UUID | None = None,
+        tool_ids: list[UUID] | None = None,
+        limit: int = 50,
+    ) -> list[ToolAuditRecord]:
+        statement = select(ToolAuditRecord).where(ToolAuditRecord.tenant_id == tenant_id)
+        if tool_id is not None:
+            statement = statement.where(ToolAuditRecord.tool_id == tool_id)
+        if tool_ids is not None:
+            if not tool_ids:
+                return []
+            statement = statement.where(ToolAuditRecord.tool_id.in_(tool_ids))
+        result = await self._session.execute(
+            statement.order_by(
+                ToolAuditRecord.occurred_at.desc(), ToolAuditRecord.id.desc()
+            ).limit(limit)
+        )
+        return list(result.scalars())
+
 
 class SqlAlchemyAuditEventRepository:
     def __init__(

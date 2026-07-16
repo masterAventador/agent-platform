@@ -33,7 +33,7 @@ from agent_platform.api.routes.model_gateway import router as model_gateway_rout
 from agent_platform.api.routes.observability import router as observability_router
 from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
-from agent_platform.api.routes.tools import mcp_router, tool_router
+from agent_platform.api.routes.tools import invocation_router, mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
 from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.config import AppSettings
@@ -47,6 +47,8 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
 from agent_platform.infrastructure.database.repositories.audit import (
     purge_expired_audit_events,
 )
+from agent_platform.infrastructure.mcp.probe import MCPCatalogProbe
+from agent_platform.infrastructure.mcp.resolver import AllowlistStdioExecutionPolicy
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
     create_bounded_minio_client,
@@ -54,6 +56,10 @@ from agent_platform.infrastructure.object_storage.artifacts import (
 from agent_platform.infrastructure.object_storage.minio import (
     MinioClient,
     MinioSkillStorage,
+)
+from agent_platform.infrastructure.secrets import (
+    LocalFileCredentialResolver,
+    LocalFileCredentialStore,
 )
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
@@ -77,6 +83,10 @@ from agent_platform.platform.knowledge.errors import (
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.skills.ports import SkillStorage
+from agent_platform.platform.tools.ports import (
+    McpConnectionProbe,
+    ToolCredentialResolver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +127,9 @@ def create_app(
     skill_storage: SkillStorage | None = None,
     artifact_storage: ArtifactStorageProvider | None = None,
     telemetry: Telemetry | None = None,
+    mcp_connection_probe: McpConnectionProbe | None = None,
+    tool_credential_store: LocalFileCredentialStore | None = None,
+    tool_credential_resolver: ToolCredentialResolver | None = None,
 ) -> FastAPI:
     initialize_database_metadata()
     app_settings = settings or AppSettings()
@@ -296,6 +309,27 @@ def create_app(
     app.state.knowledge_provider_registry = KnowledgeProviderRegistry([knowledge_provider])
     app.state.skill_storage = skill_storage
     app.state.artifact_storage = artifact_storage
+    if mcp_connection_probe is None:
+        mcp_connection_probe = MCPCatalogProbe(
+            timeout_seconds=app_settings.mcp_connection_timeout_seconds,
+            stdio_policy=AllowlistStdioExecutionPolicy(
+                app_settings.mcp_stdio_allowed_commands
+            ),
+        )
+    credentials_repository_root = app_settings.local_credentials_repository_root or "."
+    if tool_credential_store is None:
+        tool_credential_store = LocalFileCredentialStore(
+            credentials_file=app_settings.local_credentials_file,
+            repository_root=credentials_repository_root,
+        )
+    if tool_credential_resolver is None:
+        tool_credential_resolver = LocalFileCredentialResolver(
+            credentials_file=app_settings.local_credentials_file,
+            repository_root=credentials_repository_root,
+        )
+    app.state.mcp_connection_probe = mcp_connection_probe
+    app.state.tool_credential_store = tool_credential_store
+    app.state.tool_credential_resolver = tool_credential_resolver
     app.include_router(auth_router)
     app.include_router(audit_router)
     app.include_router(employees_router)
@@ -307,6 +341,7 @@ def create_app(
     app.include_router(skills_router)
     app.include_router(mcp_router)
     app.include_router(tool_router)
+    app.include_router(invocation_router)
     app.include_router(model_gateway_router)
     app.include_router(observability_router)
     app.include_router(workbench_router)

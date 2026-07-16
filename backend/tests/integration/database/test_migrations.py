@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -651,7 +652,96 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0027"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0028"
+
+
+def test_tool_lifecycle_migration_adds_versioning_sync_and_connection_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "tool-lifecycle.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "20260716_0024")
+    tenant_id = str(uuid4())
+    user_id = str(uuid4())
+    server_id = str(uuid4())
+    tool_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) "
+            "VALUES (?, 'T', 't', CURRENT_TIMESTAMP)",
+            (tenant_id,),
+        )
+        connection.execute(
+            "INSERT INTO users (id, email, email_verified, password_hash, created_at) "
+            "VALUES (?, 'tool-migration@example.com', 0, 'x', CURRENT_TIMESTAMP)",
+            (user_id,),
+        )
+        connection.execute(
+            "INSERT INTO mcp_servers "
+            "(id, tenant_id, name, transport, endpoint, command, args, secret_reference, "
+            "enabled, created_by, created_at, updated_at) "
+            "VALUES (?, ?, 'legacy', 'streamable_http', 'https://mcp.example.com', NULL, "
+            "'[]', NULL, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (server_id, tenant_id, user_id),
+        )
+        connection.execute(
+            "INSERT INTO tools "
+            "(id, tenant_id, server_id, name, description, input_schema, risk_level, "
+            "enabled, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'legacy.tool', '', '{}', 'read', 1, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (tool_id, tenant_id, server_id),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        server_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(mcp_servers)")
+        }
+        tool_columns = {row[1] for row in connection.execute("PRAGMA table_info(tools)")}
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        legacy_tool = connection.execute(
+            "SELECT origin, approval_policy, upstream_missing, version FROM tools WHERE id = ?",
+            (tool_id,),
+        ).fetchone()
+        backfilled_versions = connection.execute(
+            "SELECT version, change_source FROM tool_versions WHERE tool_id = ?",
+            (tool_id,),
+        ).fetchall()
+
+    assert {
+        "connection_status",
+        "connection_tested_at",
+        "connection_error_code",
+        "last_synced_at",
+    }.issubset(server_columns)
+    assert {"origin", "approval_policy", "upstream_missing", "version"}.issubset(tool_columns)
+    assert {"tool_versions", "mcp_sync_reports"}.issubset(tables)
+    assert legacy_tool == ("manual", "risk_based", 0, 1)
+    assert backfilled_versions == [(1, "initial")]
+
+    command.downgrade(config, "20260716_0024")
+    with sqlite3.connect(database_path) as connection:
+        tables_after = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        tool_columns_after = {
+            row[1] for row in connection.execute("PRAGMA table_info(tools)")
+        }
+    assert {"tool_versions", "mcp_sync_reports"}.isdisjoint(tables_after)
+    assert "approval_policy" not in tool_columns_after
 
 
 def test_capability_entitlement_migration_creates_and_removes_table(tmp_path: Path) -> None:
@@ -895,6 +985,125 @@ def _load_model_gateway_migration() -> ModuleType:
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_tool_lifecycle_backfill_succeeds_on_real_postgres_with_existing_tools() -> None:
+    """C09 回填必须在真实 PostgreSQL（JSON 列返回 dict）上成功。
+
+    SQLite 把 JSON 列读成字符串掩盖了 dict 绑定问题，因此该回归必须跑真库。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    base_url = os.getenv("TEST_DATABASE_URL")
+    if base_url is None:
+        pytest.skip("需要 TEST_DATABASE_URL 才运行真实 PostgreSQL 集成测试")
+
+    url = make_url(base_url)
+    scratch_database = f"c09_tool_migration_{uuid4().hex[:12]}"
+    admin_url = url.set(
+        drivername="postgresql+psycopg", database=url.database or "postgres"
+    )
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as connection:
+        connection.execute(sa.text(f'CREATE DATABASE "{scratch_database}"'))
+    try:
+        scratch_url = url.set(database=scratch_database)
+        config = Config(BACKEND_ROOT / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", scratch_url.render_as_string(False))
+
+        command.upgrade(config, "20260716_0024")
+
+        seed_engine = create_engine(
+            scratch_url.set(drivername="postgresql+psycopg")
+        )
+        tenant_id = uuid4()
+        user_id = uuid4()
+        server_id = uuid4()
+        tool_id = uuid4()
+        with seed_engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tenants (id, name, slug, created_at) "
+                    "VALUES (:id, 'T', :slug, now())"
+                ),
+                {"id": tenant_id, "slug": f"t-{tenant_id.hex[:8]}"},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO users (id, email, email_verified, password_hash, created_at) "
+                    "VALUES (:id, :email, false, 'x', now())"
+                ),
+                {"id": user_id, "email": f"{user_id.hex[:8]}@example.com"},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO mcp_servers "
+                    "(id, tenant_id, name, transport, endpoint, command, args, "
+                    "secret_reference, enabled, created_by, created_at, updated_at) "
+                    "VALUES (:id, :tenant_id, 'legacy', 'streamable_http', "
+                    "'https://mcp.example.com', NULL, :args, NULL, true, :created_by, "
+                    "now(), now())"
+                ).bindparams(sa.bindparam("args", type_=sa.JSON())),
+                {"id": server_id, "tenant_id": tenant_id, "created_by": user_id, "args": []},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO tools "
+                    "(id, tenant_id, server_id, name, description, input_schema, "
+                    "risk_level, enabled, created_at, updated_at) "
+                    "VALUES (:id, :tenant_id, :server_id, 'legacy.tool', 'd', "
+                    ":input_schema, 'read', true, now(), now())"
+                ).bindparams(sa.bindparam("input_schema", type_=sa.JSON())),
+                {
+                    "id": tool_id,
+                    "tenant_id": tenant_id,
+                    "server_id": server_id,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                    },
+                },
+            )
+        seed_engine.dispose()
+
+        command.upgrade(config, "head")
+
+        verify_engine = create_engine(scratch_url.set(drivername="postgresql+psycopg"))
+        with verify_engine.connect() as connection:
+            backfilled = connection.execute(
+                sa.text(
+                    "SELECT version, change_source, risk_level, approval_policy, "
+                    "input_schema FROM tool_versions WHERE tool_id = :tool_id"
+                ),
+                {"tool_id": tool_id},
+            ).fetchall()
+        verify_engine.dispose()
+
+        assert len(backfilled) == 1
+        version, change_source, risk_level, approval_policy, input_schema = backfilled[0]
+        assert (version, change_source, risk_level, approval_policy) == (
+            1,
+            "initial",
+            "read",
+            "risk_based",
+        )
+        assert input_schema == {
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+        }
+    finally:
+        # asyncpg/alembic 的连接可能尚未完全释放，先强断再删库。
+        with admin_engine.connect() as connection:
+            connection.execute(
+                sa.text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :name AND pid <> pg_backend_pid()"
+                ),
+                {"name": scratch_database},
+            )
+            connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{scratch_database}"'))
+        admin_engine.dispose()
 
 
 def test_audit_hmac_migration_backfills_chain_head_seal(

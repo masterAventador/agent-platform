@@ -45,6 +45,17 @@ class InMemoryToolRepository:
     async def update_tool(self, tool: Tool) -> None:
         self.tools[(tool.tenant_id, tool.id)] = tool
 
+    async def add_tool_version(self, version) -> None:
+        del version
+
+    async def get_tool_version(self, *, tenant_id, tool_id, version):
+        del tenant_id, tool_id, version
+        return None
+
+    async def list_tool_versions(self, *, tenant_id, tool_id):
+        del tenant_id, tool_id
+        return []
+
 
 @pytest.mark.asyncio
 async def test_registers_server_and_discovered_tool_without_remote_execution() -> None:

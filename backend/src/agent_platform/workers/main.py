@@ -32,8 +32,14 @@ from agent_platform.infrastructure.llm.litellm import (
     ModelGatewayReadiness,
     ModelGatewayReadinessError,
 )
-from agent_platform.infrastructure.mcp.executor import MCPToolExecutor
-from agent_platform.infrastructure.mcp.resolver import DatabaseMCPClientResolver
+from agent_platform.infrastructure.mcp.executor import (
+    MCPToolExecutor,
+    ResilientToolExecutor,
+)
+from agent_platform.infrastructure.mcp.resolver import (
+    AllowlistStdioExecutionPolicy,
+    DatabaseMCPClientResolver,
+)
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
     create_bounded_minio_client,
@@ -48,6 +54,7 @@ from agent_platform.observability.metrics import OperationalComponent, Operation
 from agent_platform.observability.telemetry import configure_telemetry
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.tool_gateway import (
+    InMemoryToolCircuitBreaker,
     ToolDefinition,
     ToolGateway,
 )
@@ -391,10 +398,25 @@ def _build_runtime_resolver(
     )
     tool_reader = _SessionToolReader(session_factory)
     gateway = ToolGateway(
-        executor=MCPToolExecutor(DatabaseMCPClientResolver(tool_reader)),
+        executor=ResilientToolExecutor(
+            MCPToolExecutor(
+                DatabaseMCPClientResolver(
+                    tool_reader,
+                    stdio_policy=AllowlistStdioExecutionPolicy(
+                        settings.mcp_stdio_allowed_commands
+                    ),
+                    timeout_seconds=settings.tool_invocation_timeout_seconds,
+                )
+            ),
+            max_read_retries=settings.tool_invocation_max_read_retries,
+        ),
         definition_resolver=tool_reader,
         credential_resolver=adapters.credential_resolver,
         audit_sink=adapters.audit_sink,
+        execution_circuit=InMemoryToolCircuitBreaker(
+            failure_threshold=settings.tool_circuit_failure_threshold,
+            cooldown_seconds=settings.tool_circuit_cooldown_seconds,
+        ),
     )
     minio = create_bounded_minio_client(settings)
     knowledge_provider = RagFlowClient(

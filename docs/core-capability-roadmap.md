@@ -66,7 +66,7 @@
 | 动态输入输出 | 已完成 | `input_schema` 已驱动动态表单、前后端运行时校验和文件输入；`output_schema` 已驱动结构化卡片、表格与 JSON 展示，并在 Worker 与真实运行时边界执行受控校验 | C06 |
 | 知识运行时 | 已完成 | 员工绑定、版本化检索配置（召回/阈值/重排/元数据过滤）、运行时 RAG 注入与可追溯引用已合入主线并通过真实 RAGFlow 验收 | C07 |
 | Skill 生命周期 | 已完成 | 草稿、版本、安全审核、发布、下线、删除、回滚、内置安装、引用保护、差异和使用关系界面已闭环 | C08 |
-| Tool/MCP 生命周期 | 部分完成 | 缺自动发现同步、连接测试、编辑删除和凭据产品化 | C09 |
+| Tool/MCP 生命周期 | 待集成 | C09 分支已补连接测试、自动发现同步、编辑删除、版本化与凭据产品化，等待主线合并验收 | C09 |
 | 长期记忆 | 未实现 | 无 Memory 领域、数据库、API、运行时和用户管理能力 | C10 |
 | 工作流/混合员工 | 未开放 | 前端强制禁用，生产 Workflow Registry 没有可用流程 | C11 |
 | 定时任务 | 未实现 | 配置字段存在但强制关闭，无调度、历史和失败治理 | C12 |
@@ -286,7 +286,7 @@
 
 ### C09 Tool/MCP 完整生命周期与凭据产品化
 
-**状态：`🚧 进行中`**
+**状态：`🧪 待集成`（等待主代理验收合并；审批中心协议待 C13、生产凭据服务待 C18）**
 
 **开始日期：2026-07-16**
 
@@ -300,6 +300,24 @@
 - 工具调用超时、重试、熔断、错误转换和审计完整；
 - 客户端可查看连接状态、同步差异、调用记录和失败原因；
 - HTTP/stdio、恶意 Server、凭据脱敏和审批 E2E 通过。
+
+2026-07-16 实现记录（本任务提交，待主代理验收）：
+
+- **生命周期**：MCP Server 增加连接测试（`POST /mcp-servers/{id}/connection-test`）、自动发现同步（`POST /{id}/sync`，按 name 对齐、新增/变更/上游移除差异语义、每 Server 保留最近 20 条同步报告）、编辑（PATCH，transport 不可变）、删除（对齐 C08 引用保护：被员工草稿/已发布版本引用时 409）；同步在 Server 行锁内应用（并发互斥），新发现工具 fail-closed 默认 `enabled=false + risk=external`，上游移除的 discovered 工具标记 `upstream_missing` 保护而非删除，调用点由 Gateway 以 `tool_upstream_missing` 拒绝；
+- **版本化与审批策略**：`tools` 增加 `origin/approval_policy/upstream_missing/version`，新增 `tool_versions` 快照表（initial/update/sync/rollback 变更来源），定义变更自动升版本、支持回滚为新版本；审批策略 `risk_based/always/never` 三档，destructive+never 在校验层拒绝且策略引擎纵深防御强制审批；
+- **凭据产品化**：复用 `infrastructure/secrets/` 本地凭据服务，新增 `LocalFileCredentialStore`（0600、原子替换、flock 互斥、仓库外强制），`PUT/DELETE /mcp-servers/{id}/credentials` 使用服务端生成的 `local://mcp-servers/{id}` 引用；凭据仅在探测/执行边界短时解析，API 响应、审计与日志不回显明文（API 级契约验收覆盖）；
+- **网关韧性**：`ResilientToolExecutor` 稳定错误码转换（tool_timeout/tool_remote_error/credential_unavailable 等）+ 仅只读工具有界重试（副作用工具绝不自动重试）；每 (tenant, server) 内存熔断器（阈值/冷却可配、容量有界），熔断拒绝发生在 STARTED claim 之前，不改既有 invocation claim/TOCTOU 崩溃安全协议；stdio 传输经 `AllowlistStdioExecutionPolicy`（默认全拒绝，`AGENT_PLATFORM_MCP_STDIO_ALLOWED_COMMANDS` 显式放行）；
+- **调用记录**：新增 `GET /tool-invocations`（tenant 隔离、按 tool/server 过滤），前端工具页展示连接状态、同步差异弹窗、版本历史/回滚、调用记录与失败原因；员工可用工具过滤补充 `upstream_missing`；
+- **运行语义修正**：员工绑定的工具被禁用/上游移除时不再让整个任务在准备阶段失败，改为组装后在调用点由 Gateway 拒绝并写 `tool.rejected` 审计（已删除引用仍 fail-closed）；
+- **验收**：`tests/fixtures/mcp_stub.py`（官方 FastMCP 协议栈 + 故障注入控制端点）支撑三层真实边界验收——API 级恶意/超慢/畸形 Server 与凭据脱敏（`tests/integration/mcp/test_lifecycle_api_with_real_stub.py`）、Playwright 真实用户路径（`e2e/tools.spec.ts`：注册→连接测试→同步→差异→凭据配置→脱敏断言）、真实 Worker 端到端（`e2e/runtime.spec.ts`：员工任务经 Tool Gateway 调用 stub 工具成功，禁用后调用被拒且审计与界面记录可见）；
+- **待集成**：审批策略与独立审批中心的协议对接（C13）；生产级凭据服务 Vault/KMS 与轮换（C18，当前本地凭据服务仅限开发/演示）；stdio 真实拉起进程的端到端验收依赖部署侧允许清单配置，当前以单元/契约层验证 allowlist 语义。
+- **已知取舍 / follow-up**（2026-07-16 质量复审后记录）：
+  - 员工编辑器的可绑定校验（`are_bindable`）尚未把 `upstream_missing` 计入不可绑定条件——上游已移除的工具仍出现在绑定候选（运行时调用点会拒绝，安全不受影响），属于 UX 不一致，待后续对齐；
+  - `tool_versions` 随显式更新/回滚/同步变更增长且无裁剪策略；增长由人工操作驱动、速率可控，暂不设上限，量级出现问题时再补保留策略；
+  - 凭据配置为“先写本地凭据文件、后提交 DB `secret_reference`”两步操作：DB 提交失败会留下孤立的凭据文件条目（不泄露、不影响正确性，重新配置即覆盖），生产凭据服务（C18）引入事务性/对账机制时一并解决；
+  - 同步遇到与 MANUAL 工具同名的上游工具时静默跳过（不覆盖管理员定义、计入未变化），暂未在同步报告中单列“冲突”类别，需要更强可观测性时再扩展报告结构。
+
+验证命令（本任务实际执行）：`uv run pytest tests/unit tests/contract tests/integration/tools tests/integration/mcp tests/integration/database -q`、`TEST_DATABASE_URL=<真实PG> uv run pytest tests/integration/database/test_migrations.py -q`（含既有 tool 行回填的真实 PostgreSQL 迁移回归）、`uv run ruff check . && uv run mypy`、`pnpm exec vitest run`、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 `pnpm exec playwright test e2e/tools.spec.ts`（PLAYWRIGHT_COMPOSE_PROJECT_NAME + 随机端口）、`pnpm e2e:runtime`。
 
 ### C10 平台级长期记忆
 
