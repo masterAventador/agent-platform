@@ -98,12 +98,6 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
                 "PRAGMA table_info(audit_chain_states)"
             ).fetchall()
         }
-        audit_chain_state_columns = {
-            row[1]
-            for row in connection.execute(
-                "PRAGMA table_info(audit_chain_states)"
-            ).fetchall()
-        }
         policy_columns = {
             row[1]
             for row in connection.execute(
@@ -304,14 +298,6 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "ix_audit_events_tenant_action",
         "ix_audit_events_tenant_resource",
     } == audit_event_indexes
-    assert {
-        "tenant_id",
-        "head_sequence",
-        "head_hash",
-        "retained_from_sequence",
-        "retention_previous_hash",
-        "updated_at",
-    } == audit_chain_state_columns
     assert {
         "tenant_id",
         "head_sequence",
