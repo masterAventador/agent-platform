@@ -5,6 +5,7 @@
         "run.started",
         "run.progress",
         "message.output",
+        "knowledge.retrieved",
         "plan.updated",
         "skill.loaded",
         "tool.started",

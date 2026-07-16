@@ -1051,9 +1051,7 @@ async def test_knowledge_event_survives_redelivery_without_duplicate_or_loss(fac
     assert queue.acknowledged == ["knowledge-stream-retry"]
     async with factory() as session:
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
-    knowledge_events = [
-        event for event in events if event.type is EventType.KNOWLEDGE_RETRIEVED
-    ]
+    knowledge_events = [event for event in events if event.type is EventType.KNOWLEDGE_RETRIEVED]
     assert len(knowledge_events) == 1
     assert knowledge_events[0].payload["citation_count"] == 1
 
