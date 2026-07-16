@@ -1,12 +1,19 @@
 import asyncio
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.infrastructure.database.repositories.runtime_ownership import (
     RuntimeOwnershipBusy,
 )
+from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.workers import main as worker_main_module
 from agent_platform.workers.main import (
@@ -20,6 +27,10 @@ from agent_platform.workers.main import (
     wait_for_runtime_recovery,
 )
 from agent_platform.workers.run_worker import WorkerFenced
+from agent_platform.workers.runtime_composition import (
+    PermanentRuntimePreparationError,
+    TransientRuntimePreparationError,
+)
 
 
 class RecordingWorker:
@@ -295,6 +306,62 @@ def test_worker_configuration_error_never_leaks_the_gateway_url() -> None:
     rendered_error = "\n".join(rendered_errors)
     assert "password" not in rendered_error
     assert "gateway-url-secret" not in rendered_error
+
+
+@pytest.mark.asyncio
+async def test_production_worker_assembly_wires_knowledge_runtime_for_bound_employees() -> None:
+    """生产装配路径必须注入知识 Provider：RAGFlow 不可达时是瞬态失败，而非永久定义错误。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    settings = AppSettings(
+        llm_gateway_api_key="internal-test-key",
+        sandbox_controller_secret="sandbox-secret-16chars",
+        ragflow_url="http://127.0.0.1:9",
+        ragflow_api_key="test-ragflow-key",
+    )
+    resolver = _build_runtime_resolver(settings=settings, session_factory=session_factory)
+    knowledge_base_id = uuid4()
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    async with session_factory() as session:
+        session.add(
+            KnowledgeBaseRecord(
+                id=knowledge_base_id,
+                tenant_id=run.tenant_id,
+                name="制度库",
+                description="员工制度",
+                provider="ragflow",
+                provider_id="dataset-1",
+                created_by=run.created_by,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    try:
+        with pytest.raises(TransientRuntimePreparationError) as captured:
+            await resolver.resolve(
+                run,
+                {
+                    "work_mode": "autonomous",
+                    "model": {"kind": "gateway_alias", "alias": "general-purpose"},
+                    "skill_ids": [],
+                    "tool_ids": [],
+                    "knowledge_base_ids": [str(knowledge_base_id)],
+                },
+            )
+        assert not isinstance(captured.value, PermanentRuntimePreparationError)
+    finally:
+        await resolver.aclose()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
