@@ -19,10 +19,15 @@ export default defineConfig({
     'rbac.demo-seed.spec.ts',
     'runtime.spec.ts',
     'runtime-recovery.spec.ts',
+    'knowledge-runtime.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
   fullyParallel: true,
+  // 多 worker 缩容路径存在 worker 进程退出挂起（300s 后被 force-kill，
+  // 套件状态被标 failed；单 worker 全量 2.6 分钟干净退出）。定位到具体
+  // 句柄泄漏前固定单 worker，保证套件状态位可信。
+  workers: 1,
   retries: 0,
   reporter: 'list',
   use: {
