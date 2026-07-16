@@ -353,6 +353,7 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 - 本地开发采用“常驻开发栈 + 一次性正式验收栈”双轨流程：日常开发、定向回归和 Tauri 调试默认复用固定名称的 `agent-platform-dev` 开发栈；里程碑闭环、完整本机部署验证和发版前才使用随机名称、随机端口、全新数据且结束后自动销毁的隔离验收栈；
 - `agent-platform-dev` 的运行目录固定为仓库内 `.local/mvp-profile/agent-platform-dev`，必须通过 `infra/platform/mvp-profile.sh` 管理，不得另起一套手工 Compose 编排；开发栈的数据库、缓存、对象存储和 LiteLLM Stub 默认保留，以便跨测试轮次复用；
 - 日常修改后只重建或重启受影响的 API、Worker、前端或桌面测试进程，禁止为了单个选择器、前端交互或 Tauri 测试问题反复创建整套随机隔离栈；只有变更基础设施、迁移、跨服务契约，或进入正式完成判定时才运行完整 `infra/platform/test-mvp-profile.sh`；
+- 常驻开发栈重建或数据卷重置后，必须从宿主机对发布端口重放幂等 Demo Seed（`AGENT_PLATFORM_DATABASE_URL=...127.0.0.1:<发布端口>/agent_platform uv run python -m agent_platform.bootstrap.demo_seed`），交付用户前的冒烟必须确认 Seed 已重放——栈启动流程目前只跑迁移不跑 Seed，漏放会导致新功能的 Demo 数据（如能力授权）缺失；
 - 常驻开发栈的日常功能验收、定向回归和 Tauri 核心流程默认复用 Demo Seed 固定测试账号（`demo@example.com` / `agent-platform-demo`），禁止每轮重新注册随机用户；新增业务数据使用唯一名称或稳定隔离标识，断言不得依赖上轮残留。只有认证/注册本身、租户隔离、并发隔离等必须验证多身份的专项测试才能创建额外账号；一次性全新验收栈先幂等初始化同一套测试账号再复用，正式完成证据仍必须来自该隔离验收栈，不能只以常驻开发栈通过代替；
 - Demo 阶段 Tauri 的“记住账号密码”使用 App 私有数据目录，不调用系统钥匙串，避免 macOS 授权弹窗干扰用户；该例外只覆盖固定 Demo 登录信息，高敏 Token、企业密钥和正式环境凭据仍必须使用系统安全存储，且任何凭据都不得写入浏览器 `localStorage`；
 - FastAPI、Agent Worker 和前端可以按当前任务需要直接使用 uv、pnpm 热更新，或复用 `agent-platform-dev` 中对应容器；PostgreSQL、Redis、MinIO、RAGFlow 及观测组件使用 Docker Compose；
