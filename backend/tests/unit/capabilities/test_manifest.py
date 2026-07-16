@@ -321,7 +321,8 @@ def test_manifest_rejects_core_api_route_root(core_route_root: str) -> None:
 def test_reserved_core_api_route_roots_match_the_running_app_contract() -> None:
     from agent_platform.api.app import create_app
 
-    openapi_paths = create_app().openapi().get("paths")
+    app = create_app()
+    openapi_paths = app.openapi().get("paths")
     assert isinstance(openapi_paths, dict)
     app_route_roots = {
         path.removeprefix("/api/v1/").partition("/")[0]
@@ -329,7 +330,9 @@ def test_reserved_core_api_route_roots_match_the_running_app_contract() -> None:
         if path.startswith("/api/v1/")
     }
 
-    assert app_route_roots == CORE_API_ROUTE_ROOTS
+    installed_capability_roots = set(app.state.capability_host.installed_capability_ids)
+    assert installed_capability_roots.isdisjoint(CORE_API_ROUTE_ROOTS)
+    assert app_route_roots == CORE_API_ROUTE_ROOTS | installed_capability_roots
 
 
 @pytest.mark.parametrize(

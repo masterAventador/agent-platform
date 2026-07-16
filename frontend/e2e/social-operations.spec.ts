@@ -12,17 +12,24 @@ async function mockCapabilityRegistry(
   tenantEntitled: boolean,
   frontendEntries = ['social.routes.v1'],
 ) {
+  const entry = tenantEntitled
+    ? {
+      capability_id: 'social-operations',
+      deployment_installed: true,
+      tenant_entitled: true,
+      frontend_entries: frontendEntries,
+      permissions: socialPermissions,
+    }
+    : {
+      capability_id: 'social-operations',
+      deployment_installed: true,
+      tenant_entitled: false,
+    }
   await page.route('**/api/v1/capabilities/registry', (route) => route.fulfill({
     contentType: 'application/json',
     json: {
       schema_version: '1.0',
-      capabilities: [{
-        capability_id: 'social-operations',
-        deployment_installed: true,
-        tenant_entitled: tenantEntitled,
-        frontend_entries: frontendEntries,
-        permissions: socialPermissions,
-      }],
+      capabilities: [entry],
     },
   }))
 }

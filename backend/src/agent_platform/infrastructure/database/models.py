@@ -23,6 +23,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
     EmployeeVersionRecord,
 )
+from agent_platform.infrastructure.database.repositories.entitlements import (
+    CapabilityEntitlementRecord,
+)
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.infrastructure.database.repositories.model_gateway import (
     ModelGatewayProvisioningCommandRecord,
@@ -76,6 +79,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     TaskAttachmentRecord,
     ArtifactRecord,
     ArtifactStorageOperationRecord,
+    CapabilityEntitlementRecord,
 )
 
 
