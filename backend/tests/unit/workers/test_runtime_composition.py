@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.platform.knowledge.errors import (
+    InvalidKnowledgeProviderResponse,
+    KnowledgeProviderUnavailable,
+)
 from agent_platform.platform.knowledge.models import KnowledgeCitation, KnowledgeSearchResult
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.runs.entities import Run
@@ -20,11 +24,14 @@ from agent_platform.sandbox.ports import RunExecutionEnvironment
 from agent_platform.workers import runtime_composition as runtime_composition_module
 from agent_platform.workers.runtime_composition import (
     ComposedRuntimeResolver,
+    InvalidKnowledgeRuntimeResponse,
     ModelGatewayUnavailable,
+    PermanentRuntimePreparationError,
     PlatformModelResolver,
     PlatformRuntimeSelector,
     PublishedModel,
     PublishedRuntimeCapabilities,
+    TransientRuntimePreparationError,
     UntrustedRuntimeDefinition,
     extend_runtime_definition,
 )
@@ -167,6 +174,47 @@ class RecordingKnowledgeProvider:
                 ),
             ],
         )
+
+
+class FailingKnowledgeProvider:
+    provider_name = "fake-knowledge"
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def retrieve(
+        self,
+        *,
+        question: str,
+        dataset_ids: list[str],
+        page_size: int = 10,
+        metadata_condition: dict[str, object] | None = None,
+    ) -> KnowledgeSearchResult:
+        del question, dataset_ids, page_size, metadata_condition
+        raise self.error
+
+
+async def seed_knowledge_base(
+    session_factory,
+    *,
+    run: Run,
+    knowledge_base_id: UUID,
+    provider_id: str,
+) -> None:
+    async with session_factory() as session:
+        session.add(
+            KnowledgeBaseRecord(
+                id=knowledge_base_id,
+                tenant_id=run.tenant_id,
+                name="制度库",
+                description="员工制度",
+                provider="fake-knowledge",
+                provider_id=provider_id,
+                created_by=run.created_by,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
 
 
 @pytest_asyncio.fixture
@@ -422,29 +470,10 @@ async def test_composed_resolver_retrieves_bound_knowledge_and_filters_provider_
 
     prepared = await resolver.resolve(
         run,
-        autonomous_definition(
-            knowledge_base_ids=[str(knowledge_base_id)],
-            knowledge_retrieval={
-                "limit": 2,
-                "metadata_condition": {
-                    "logic": "and",
-                    "conditions": [{"key": "department", "op": "eq", "value": "HR"}],
-                },
-            },
-        ),
+        autonomous_definition(knowledge_base_ids=[str(knowledge_base_id)]),
     )
 
-    assert provider.retrieve_calls == [
-        (
-            "年假有几天",
-            [provider_dataset_id],
-            2,
-            {
-                "logic": "and",
-                "conditions": [{"key": "department", "op": "eq", "value": "HR"}],
-            },
-        )
-    ]
+    assert provider.retrieve_calls == [("年假有几天", [provider_dataset_id], 5, None)]
     assert prepared.knowledge_context is not None
     assert [citation.chunk_id for citation in prepared.knowledge_context.citations] == [
         "allowed-chunk"
@@ -477,6 +506,101 @@ async def test_missing_published_knowledge_reference_fails_before_sandbox_side_e
     with pytest.raises(UntrustedRuntimeDefinition, match="published knowledge"):
         await resolver.resolve(run, autonomous_definition(knowledge_base_ids=[str(uuid4())]))
 
+    assert manager.scope is None
+
+
+@pytest.mark.asyncio
+async def test_knowledge_provider_outage_is_transient_and_never_a_permanent_definition_error(
+    session_factory,
+) -> None:
+    knowledge_base_id = uuid4()
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    await seed_knowledge_base(
+        session_factory,
+        run=run,
+        knowledge_base_id=knowledge_base_id,
+        provider_id="dataset-allowed",
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(),
+        model_resolver=model_resolver,
+        knowledge_provider_registry=KnowledgeProviderRegistry(
+            [
+                FailingKnowledgeProvider(
+                    KnowledgeProviderUnavailable("connection refused to 10.0.0.9:9380")
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(TransientRuntimePreparationError) as captured:
+        await resolver.resolve(
+            run,
+            autonomous_definition(knowledge_base_ids=[str(knowledge_base_id)]),
+        )
+
+    assert not isinstance(captured.value, PermanentRuntimePreparationError)
+    assert "10.0.0.9" not in str(captured.value)
+    assert manager.scope is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_knowledge_provider_response_fails_with_a_stable_controlled_code(
+    session_factory,
+) -> None:
+    knowledge_base_id = uuid4()
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    await seed_knowledge_base(
+        session_factory,
+        run=run,
+        knowledge_base_id=knowledge_base_id,
+        provider_id="dataset-allowed",
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(),
+        model_resolver=model_resolver,
+        knowledge_provider_registry=KnowledgeProviderRegistry(
+            [
+                FailingKnowledgeProvider(
+                    InvalidKnowledgeProviderResponse("chunks 字段缺失: raw=<html>upstream</html>")
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(InvalidKnowledgeRuntimeResponse) as captured:
+        await resolver.resolve(
+            run,
+            autonomous_definition(knowledge_base_ids=[str(knowledge_base_id)]),
+        )
+
+    assert isinstance(captured.value, PermanentRuntimePreparationError)
+    assert captured.value.code == "invalid_knowledge_provider_response"
+    assert "<html>" not in str(captured.value)
     assert manager.scope is None
 
 

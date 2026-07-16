@@ -45,7 +45,10 @@ from agent_platform.platform.artifacts.services import (
     ArtifactService,
     TaskAttachmentService,
 )
-from agent_platform.platform.knowledge.errors import KnowledgeProviderUnavailable
+from agent_platform.platform.knowledge.errors import (
+    InvalidKnowledgeProviderResponse,
+    KnowledgeProviderUnavailable,
+)
 from agent_platform.platform.knowledge.models import KnowledgeCitation
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.models import (
@@ -153,6 +156,16 @@ class ModelGatewayUnavailable(PermanentRuntimePreparationError):
     code = "model_gateway_unavailable"
 
 
+class InvalidKnowledgeRuntimeResponse(PermanentRuntimePreparationError):
+    """知识供应商返回了平台无法安全解释的响应；消息不携带原始响应内容。"""
+
+    code = "invalid_knowledge_provider_response"
+
+
+class TransientRuntimePreparationError(RuntimeError):
+    """运行时准备依赖暂时不可用；由队列重投递重试，消息不携带底层连接细节。"""
+
+
 class PublishedModel(GatewayModelReference):
     pass
 
@@ -172,10 +185,7 @@ class RuntimeKnowledgeContext:
         return TypeAdapter(dict[str, JsonValue]).validate_python(payload)
 
 
-@dataclass(frozen=True, slots=True)
-class KnowledgeRetrievalOptions:
-    limit: int = 5
-    metadata_condition: dict[str, JsonValue] | None = None
+DEFAULT_KNOWLEDGE_RETRIEVAL_LIMIT = 5
 
 
 def _parse_skill_versions(
@@ -197,22 +207,6 @@ def _parse_skill_versions(
             raise UntrustedRuntimeDefinition("invalid skill version reference")
         parsed.append(PublishedSkillVersion(skill_id=skill_id, version=version))
     return tuple(parsed)
-
-
-def _parse_knowledge_retrieval(value: object) -> KnowledgeRetrievalOptions:
-    if value is None:
-        return KnowledgeRetrievalOptions()
-    if not isinstance(value, dict):
-        raise UntrustedRuntimeDefinition("knowledge_retrieval must be an object")
-    limit = TypeAdapter(int).validate_python(value.get("limit", 5))
-    if limit < 1 or limit > 30:
-        raise UntrustedRuntimeDefinition("knowledge_retrieval limit is out of range")
-    metadata_condition = (
-        TypeAdapter(dict[str, JsonValue]).validate_python(value["metadata_condition"])
-        if value.get("metadata_condition") is not None
-        else None
-    )
-    return KnowledgeRetrievalOptions(limit=limit, metadata_condition=metadata_condition)
 
 
 def _knowledge_query_from_input(input_data: Mapping[str, JsonValue]) -> str:
@@ -492,7 +486,6 @@ class ComposedRuntimeResolver:
         model = self._model_resolver.resolve(capabilities.model)
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
-            definition=definition,
             capabilities=capabilities,
         )
         scope = SandboxScope(
@@ -527,7 +520,6 @@ class ComposedRuntimeResolver:
         model = self._model_resolver.resolve(capabilities.model)
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
-            definition=definition,
             capabilities=capabilities,
         )
         scope = SandboxScope(
@@ -555,7 +547,6 @@ class ComposedRuntimeResolver:
         self,
         *,
         run: Run,
-        definition: dict[str, object],
         capabilities: PublishedRuntimeCapabilities,
     ) -> RuntimeKnowledgeContext | None:
         if not capabilities.knowledge_base_ids:
@@ -571,7 +562,6 @@ class ComposedRuntimeResolver:
         if {base.id for base in knowledge_bases} != set(capabilities.knowledge_base_ids):
             raise UntrustedRuntimeDefinition("published knowledge is unavailable")
 
-        options = _parse_knowledge_retrieval(definition.get("knowledge_retrieval"))
         question = _knowledge_query_from_input(run.input_data)
         citations: list[KnowledgeCitation] = []
         grouped: dict[str, list[str]] = {}
@@ -584,11 +574,16 @@ class ComposedRuntimeResolver:
                 result = await provider.retrieve(
                     question=question,
                     dataset_ids=dataset_ids,
-                    page_size=options.limit,
-                    metadata_condition=options.metadata_condition,
+                    page_size=DEFAULT_KNOWLEDGE_RETRIEVAL_LIMIT,
                 )
             except KnowledgeProviderUnavailable:
-                raise UntrustedRuntimeDefinition("published knowledge is unavailable") from None
+                raise TransientRuntimePreparationError(
+                    "knowledge provider is temporarily unavailable"
+                ) from None
+            except InvalidKnowledgeProviderResponse:
+                raise InvalidKnowledgeRuntimeResponse(
+                    "knowledge provider returned an uninterpretable response"
+                ) from None
             allowed_dataset_ids = set(dataset_ids)
             citations.extend(
                 citation
