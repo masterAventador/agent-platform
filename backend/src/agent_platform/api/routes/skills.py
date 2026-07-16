@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
 from agent_platform.platform.skills.builtin import BuiltinSkillInstaller
 from agent_platform.platform.skills.bundle import MAX_ARCHIVE_BYTES, SkillBundleError
@@ -221,6 +222,18 @@ async def create_skill(
                 created_by=user.id,
                 content=await _content(bundle),
             )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="skill.created",
+                resource_type="skill",
+                resource_id=skill.id,
+                metadata={
+                    "latest_version": skill.latest_version,
+                    "source": skill.source,
+                },
+            )
             await session.commit()
         except (SkillBundleError, SkillNameAlreadyExists) as error:
             _raise_skill_error(error)
@@ -274,6 +287,19 @@ async def install_builtin_skills(
                 storage=cast(SkillStorage, request.app.state.skill_storage),
                 root=_builtin_root(),
             ).install_all(tenant_id=access.tenant.id, created_by=user.id)
+            for skill in skills:
+                await emit_audit_event(
+                    session,
+                    tenant_id=access.tenant.id,
+                    actor_user_id=user.id,
+                    action="skill.installed",
+                    resource_type="skill",
+                    resource_id=skill.id,
+                    metadata={
+                        "latest_version": skill.latest_version,
+                        "source": skill.source,
+                    },
+                )
             await session.commit()
         except SkillReviewBlocked as error:
             _raise_skill_error(error)
@@ -340,6 +366,15 @@ async def add_skill_version(
                 created_by=user.id,
                 content=await _content(bundle),
             )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="skill.version_created",
+                resource_type="skill",
+                resource_id=skill_id,
+                metadata={"version": version.version},
+            )
             await session.commit()
         except (SkillBundleError, SkillNameMismatch, SkillNotFound) as error:
             _raise_skill_error(error)
@@ -386,7 +421,7 @@ async def publish_skill_version(
     tenant_id: TenantHeader = None,
 ) -> SkillResponse:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -397,6 +432,15 @@ async def publish_skill_version(
                 tenant_id=access.tenant.id,
                 skill_id=skill_id,
                 version_number=version,
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="skill.published",
+                resource_type="skill",
+                resource_id=skill.id,
+                metadata={"published_version": skill.published_version},
             )
             await session.commit()
         except (SkillNotFound, SkillVersionNotFound, SkillReviewBlocked) as error:
@@ -412,7 +456,7 @@ async def offline_skill(
     tenant_id: TenantHeader = None,
 ) -> SkillResponse:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -422,6 +466,15 @@ async def offline_skill(
             skill = await _service(request, session).offline(
                 tenant_id=access.tenant.id,
                 skill_id=skill_id,
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="skill.offlined",
+                resource_type="skill",
+                resource_id=skill.id,
+                metadata={"status": skill.lifecycle_status.value},
             )
             await session.commit()
         except (SkillNotFound, SkillAlreadyDeleted) as error:
@@ -437,7 +490,7 @@ async def delete_skill(
     tenant_id: TenantHeader = None,
 ) -> Response:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -447,6 +500,14 @@ async def delete_skill(
             await _service(request, session).delete(
                 tenant_id=access.tenant.id,
                 skill_id=skill_id,
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="skill.deleted",
+                resource_type="skill",
+                resource_id=skill_id,
             )
             await session.commit()
         except (SkillNotFound, SkillInUse) as error:

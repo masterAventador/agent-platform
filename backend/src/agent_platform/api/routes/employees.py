@@ -6,6 +6,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
@@ -242,6 +243,18 @@ async def create_employee(
                 created_by=user.id,
                 draft=payload.to_draft(),
             )
+            await emit_audit_event(
+                database_session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="employee.created",
+                resource_type="employee",
+                resource_id=employee.id,
+                metadata={
+                    "runtime_type": employee.draft.runtime_type.value,
+                    "visibility": employee.draft.visibility.value,
+                },
+            )
             await database_session.commit()
         except (
             EmployeeNameAlreadyExists,
@@ -370,6 +383,15 @@ async def publish_employee(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,
                 published_by=user.id,
+            )
+            await emit_audit_event(
+                database_session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="employee.published",
+                resource_type="employee",
+                resource_id=employee.id,
+                metadata={"published_version": employee.published_version},
             )
             await database_session.commit()
         except (

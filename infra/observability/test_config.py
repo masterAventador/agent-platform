@@ -8,6 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "infra" / "compose" / "observability.yml"
 COLLECTOR_CONFIG_PATH = ROOT / "infra" / "observability" / "otel-collector.yml"
+ALERT_RULES_PATH = ROOT / "infra" / "observability" / "alert-rules.yml"
 
 COLLECTOR_IMAGE = "otel/opentelemetry-collector-contrib:0.156.0"
 JAEGER_IMAGE = "jaegertracing/all-in-one:1.76.0"
@@ -66,7 +67,7 @@ def test_compose_contract() -> None:
     assert mounts == ["../observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro"]
 
 
-def test_collector_accepts_otlp_and_only_exports_traces() -> None:
+def test_collector_accepts_otlp_and_exports_traces_metrics_and_logs() -> None:
     config = load_yaml(COLLECTOR_CONFIG_PATH)
 
     receiver = config["receivers"]["otlp"]
@@ -82,14 +83,22 @@ def test_collector_accepts_otlp_and_only_exports_traces() -> None:
         "endpoint": "jaeger:4317",
         "tls": {"insecure": True},
     }
+    assert config["exporters"]["debug/metrics"] == {"verbosity": "basic"}
+    assert config["exporters"]["debug/logs"] == {"verbosity": "basic"}
 
     service = config["service"]
     assert service["extensions"] == ["health_check"]
     pipelines = service["pipelines"]
-    assert set(pipelines) == {"traces"}, "metrics and logs must not be exported yet"
+    assert set(pipelines) == {"traces", "metrics", "logs"}
     assert pipelines["traces"]["receivers"] == ["otlp"]
     assert pipelines["traces"]["processors"] == ["batch"]
     assert pipelines["traces"]["exporters"] == ["otlp/jaeger"]
+    assert pipelines["metrics"]["receivers"] == ["otlp"]
+    assert pipelines["metrics"]["processors"] == ["batch"]
+    assert pipelines["metrics"]["exporters"] == ["debug/metrics"]
+    assert pipelines["logs"]["receivers"] == ["otlp"]
+    assert pipelines["logs"]["processors"] == ["batch"]
+    assert pipelines["logs"]["exporters"] == ["debug/logs"]
 
     assert config["extensions"]["health_check"]["endpoint"] == "0.0.0.0:13133"
     assert config["processors"] == {"batch": {}}
@@ -102,8 +111,58 @@ def test_health_script_cannot_remove_core_orphans() -> None:
     assert "http://127.0.0.1:${jaeger_ui_port}/" in script
 
 
+def test_alert_rules_cover_c14_operability_domains() -> None:
+    rules = load_yaml(ALERT_RULES_PATH)
+    groups = rules.get("groups")
+    assert isinstance(groups, list)
+    alert_names: set[str] = set()
+    expressions: dict[str, str] = {}
+    for group in groups:
+        assert isinstance(group, dict)
+        for rule in group.get("rules", []):
+            assert isinstance(rule, dict)
+            alert = rule.get("alert")
+            expr = rule.get("expr")
+            assert isinstance(alert, str)
+            assert isinstance(expr, str)
+            alert_names.add(alert)
+            expressions[alert] = expr
+            annotations = rule.get("annotations")
+            labels = rule.get("labels")
+            assert isinstance(annotations, dict)
+            assert isinstance(labels, dict)
+            assert labels.get("service") == "agent-platform"
+            assert "summary" in annotations
+
+    assert {
+        "AgentPlatformApiHighErrorRate",
+        "AgentPlatformApiLatencyHigh",
+        "AgentPlatformWorkerRunFailures",
+        "AgentPlatformQueueDeadLetters",
+        "AgentPlatformModelGatewayFailures",
+        "AgentPlatformRagFlowFailures",
+        "AgentPlatformSandboxFailures",
+        "AgentPlatformClientErrors",
+        "AgentPlatformAuditIngestionFailures",
+    }.issubset(alert_names)
+    combined = "\n".join(expressions.values())
+    for metric_name in [
+        "agent_platform_api_server_requests_total",
+        "agent_platform_api_server_duration_milliseconds_bucket",
+        "agent_platform_worker_runs_failed_total",
+        "agent_platform_queue_dead_letters_total",
+        "agent_platform_model_gateway_requests_total",
+        "agent_platform_ragflow_requests_total",
+        "agent_platform_sandbox_operations_total",
+        "agent_platform_client_errors_total",
+        "agent_platform_audit_events_failed_total",
+    ]:
+        assert metric_name in combined
+
+
 if __name__ == "__main__":
     test_compose_contract()
-    test_collector_accepts_otlp_and_only_exports_traces()
+    test_collector_accepts_otlp_and_exports_traces_metrics_and_logs()
     test_health_script_cannot_remove_core_orphans()
+    test_alert_rules_cover_c14_operability_domains()
     print("observability configuration contract: OK")

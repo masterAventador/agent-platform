@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from agent_platform.api.dependencies.authentication import build_auth_service
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.tenants import (
     SqlAlchemyWorkspaceRepository,
 )
@@ -107,6 +108,55 @@ async def register(payload: CredentialsRequest, request: Request) -> UserRespons
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 user.id
             )
+            if workspaces:
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.member_added",
+                    resource_type="tenant_membership",
+                    resource_id=user.id,
+                    metadata={"role": workspaces[0].role.value},
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.role_assigned",
+                    resource_type="tenant_membership",
+                    resource_id=user.id,
+                    metadata={
+                        "role": workspaces[0].role.value,
+                        "permission_count": len(permissions_for_role(workspaces[0].role)),
+                    },
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="auth.registered",
+                    resource_type="user",
+                    resource_id=user.id,
+                    metadata={"workspace_count": len(workspaces)},
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.member_added",
+                    resource_type="tenant_member",
+                    resource_id=user.id,
+                    metadata={"role": workspaces[0].role.value},
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.role_assigned",
+                    resource_type="tenant_member",
+                    resource_id=user.id,
+                    metadata={"role": workspaces[0].role.value},
+                )
             await database_session.commit()
         except (
             RegistrationUnavailable,
@@ -132,6 +182,16 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 issued_session.user.id
             )
+            if workspaces:
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=issued_session.user.id,
+                    action="auth.login_succeeded",
+                    resource_type="user",
+                    resource_id=issued_session.user.id,
+                    metadata={"workspace_count": len(workspaces)},
+                )
             await database_session.commit()
         except (InvalidCredentials, RateLimitExceeded) as error:
             _raise_auth_error(error)

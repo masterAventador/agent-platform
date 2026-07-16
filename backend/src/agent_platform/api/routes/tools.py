@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
 from agent_platform.platform.tenants.permissions import TenantPermission
 from agent_platform.platform.tools.entities import (
@@ -163,6 +164,19 @@ async def create_mcp_server(
                 secret_reference=payload.secret_reference,
                 enabled=payload.enabled,
             )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="mcp_server.created",
+                resource_type="mcp_server",
+                resource_id=server.id,
+                metadata={
+                    "transport": server.transport.value,
+                    "enabled": server.enabled,
+                    "has_credentials": server.secret_reference is not None,
+                },
+            )
             await session.commit()
         except RegistryNameAlreadyExists as error:
             _raise_registry_error(error)
@@ -193,7 +207,7 @@ async def set_mcp_server_enabled(
     tenant_id: TenantHeader = None,
 ) -> McpServerResponse:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -202,6 +216,15 @@ async def set_mcp_server_enabled(
         try:
             server = await _service(session).set_server_enabled(
                 tenant_id=access.tenant.id, server_id=server_id, enabled=payload.enabled
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="mcp_server.updated",
+                resource_type="mcp_server",
+                resource_id=server.id,
+                metadata={"enabled": server.enabled},
             )
             await session.commit()
         except McpServerNotFound as error:
@@ -215,7 +238,7 @@ async def create_tool(
     payload: ToolCreate, request: Request, tenant_id: TenantHeader = None
 ) -> ToolResponse:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -230,6 +253,19 @@ async def create_tool(
                 input_schema=payload.input_schema,
                 risk_level=payload.risk_level,
                 enabled=payload.enabled,
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="tool.created",
+                resource_type="tool",
+                resource_id=tool.id,
+                metadata={
+                    "server_id": str(tool.server_id),
+                    "risk_level": tool.risk_level.value,
+                    "enabled": tool.enabled,
+                },
             )
             await session.commit()
         except (McpServerNotFound, RegistryNameAlreadyExists) as error:
@@ -265,7 +301,7 @@ async def set_tool_enabled(
     tenant_id: TenantHeader = None,
 ) -> ToolResponse:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -274,6 +310,15 @@ async def set_tool_enabled(
         try:
             tool = await _service(session).set_tool_enabled(
                 tenant_id=access.tenant.id, tool_id=tool_id, enabled=payload.enabled
+            )
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="tool.updated",
+                resource_type="tool",
+                resource_id=tool.id,
+                metadata={"enabled": tool.enabled},
             )
             await session.commit()
         except ToolNotFound as error:

@@ -83,7 +83,7 @@ Proxy 使用镜像默认非 root 用户，并显式启用只读根文件系统�
 
 ## 本机链路追踪
 
-观测栈由独立 Compose project 提供，可与核心依赖并行启动，停止观测栈不会把 PostgreSQL、Redis 或 MinIO 当成 orphan 清理。它只接收 OTLP traces；metrics 和 logs 尚未配置导出。
+观测栈由独立 Compose project 提供，可与核心依赖并行启动，停止观测栈不会把 PostgreSQL、Redis 或 MinIO 当成 orphan 清理。它接收 OTLP traces、metrics 和 logs：traces 转发到 Jaeger，metrics/logs 走 Collector debug exporter，当前本机开发阶段保持临时、无持久化存储。C14 同时维护 Prometheus 兼容的参考告警规则 `infra/observability/alert-rules.yml`，覆盖 API、Worker、队列、模型网关、RAGFlow、Sandbox、客户端和审计写入失败等关键域；后续组件新增指标时必须沿用其中稳定指标名或同步更新规则与契约测试。
 
 - OpenTelemetry Collector Contrib：`0.156.0`
 - Jaeger all-in-one：`1.76.0`

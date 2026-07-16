@@ -96,6 +96,11 @@ const DeadLettersPage = lazy(() =>
     default: module.DeadLettersPage,
   })),
 )
+const AuditObservabilityPage = lazy(() =>
+  import('../features/operations/pages/AuditObservabilityPage').then((module) => ({
+    default: module.AuditObservabilityPage,
+  })),
+)
 export function App() {
   return (
     <Suspense fallback={<RouteLoading />}>
@@ -248,7 +253,10 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             <Link to="/skills">Skill 中心</Link>
             {capabilities.canManageTools && <Link to="/tools">工具与 MCP</Link>}
             {capabilities.canManageOperations && (
-              <Link to="/operations/dead-letters">任务运维</Link>
+              <>
+                <Link to="/operations/dead-letters">任务运维</Link>
+                <Link to="/operations/audit-observability">审计与观测</Link>
+              </>
             )}
             {availableModules.flatMap(({ descriptor }) => descriptor.navigation).map((entry) => (
               <Link key={entry.path} to={entry.path}>{entry.label}</Link>
@@ -410,6 +418,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 title="无权访问死信管理"
               >
                 <DeadLettersPage />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/operations/audit-observability"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.operationsManage}
+                title="无权访问审计与观测"
+              >
+                <AuditObservabilityPage />
               </WorkspaceCapabilityGate>
             )}
           />

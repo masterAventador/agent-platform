@@ -1,21 +1,24 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
 from redis.asyncio import Redis
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.api.middleware.request_body_limit import (
     FileUploadRequestBodyLimitMiddleware,
 )
 from agent_platform.api.routes.artifacts import router as artifacts_router
+from agent_platform.api.routes.audit import router as audit_router
 from agent_platform.api.routes.auth import router as auth_router
 from agent_platform.api.routes.conversations import router as conversations_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
@@ -46,6 +49,10 @@ from agent_platform.infrastructure.security.passwords import Argon2PasswordHashe
 from agent_platform.infrastructure.security.rate_limits import RedisAuthRateLimiter
 from agent_platform.infrastructure.security.tokens import SessionTokenManager
 from agent_platform.knowledge.ragflow import RagFlowClient
+from agent_platform.observability.correlation import (
+    bind_correlation_id,
+    reset_correlation_id,
+)
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
 from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 from agent_platform.platform.artifacts.services import ArtifactService
@@ -59,6 +66,33 @@ from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.skills.ports import SkillStorage
 
 logger = logging.getLogger(__name__)
+
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+
+async def _wait_for_database_ready(
+    session_factory: SessionFactory,
+    *,
+    retry_delay_seconds: float = 1.0,
+) -> None:
+    waiting_logged = False
+    while True:
+        try:
+            async with session_factory() as session:
+                await session.execute(text("SELECT 1 FROM artifact_storage_operations LIMIT 1"))
+            if waiting_logged:
+                logger.info("artifact_storage_reconciliation_database_ready")
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not waiting_logged:
+                waiting_logged = True
+                logger.warning(
+                    "artifact_storage_reconciliation_waiting_for_schema",
+                    extra={"error_type": type(exc).__name__},
+                )
+            await asyncio.sleep(retry_delay_seconds)
 
 
 def create_app(
@@ -113,6 +147,7 @@ def create_app(
     configured_artifact_storage = artifact_storage
 
     async def reconcile_artifact_storage() -> None:
+        await _wait_for_database_ready(configured_session_factory)
         next_unbound_cleanup_at = 0.0
         while True:
             try:
@@ -180,6 +215,18 @@ def create_app(
                 app_telemetry.shutdown()
 
     app = FastAPI(title="Agent Platform", version="0.1.0", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def assign_correlation_id(request: Request, call_next):  # type: ignore[no-untyped-def]
+        correlation_id = uuid4().hex
+        token = bind_correlation_id(correlation_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = correlation_id
+            return response
+        finally:
+            reset_correlation_id(token)
+
     app.add_middleware(FileUploadRequestBodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -205,6 +252,7 @@ def create_app(
     app.state.skill_storage = skill_storage
     app.state.artifact_storage = artifact_storage
     app.include_router(auth_router)
+    app.include_router(audit_router)
     app.include_router(employees_router)
     app.include_router(conversations_router)
     app.include_router(runs_router)
