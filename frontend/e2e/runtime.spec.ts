@@ -201,37 +201,9 @@ test('用户可以取消正在调用模型的真实 Worker 任务且运行停止
   expect(existsSync(slowModelSideEffectFile)).toBe(false)
 })
 
-// C09：真实 Worker 通过 Tool Gateway 调用本地 MCP stub；禁用后调用被拒并留下审计与界面记录。
-test('员工任务可调用 MCP 工具且禁用后调用被拒', async ({ page }) => {
-  test.setTimeout(240_000)
-  const stubPort = process.env.PLAYWRIGHT_RUNTIME_MCP_STUB_PORT ?? '18941'
-  const stubBase = `http://127.0.0.1:${stubPort}`
-  await page.request.post(`${stubBase}/__control/profile`, { data: { profile: 'v1' } })
-  await page.request.post(`${stubBase}/__control/mode`, { data: { mode: 'normal' } })
-  await page.request.post(`${stubBase}/__control/auth`, { data: { token: null } })
-  await registerAndLogin(page)
-  // 注册 stub Server 并自动发现工具
-  await page.getByRole('link', { name: '工具与 MCP' }).click()
-  await page.getByRole('button', { name: '注册 MCP Server' }).click()
-  await page.getByLabel('Server 名称').fill('运行时工具 MCP')
-  await page.getByLabel('服务地址').fill(`${stubBase}/mcp`)
-  await page.getByRole('dialog').getByRole('button', { name: '注册 Server' }).click()
-  const serverRow = page.getByRole('row', { name: /运行时工具 MCP Streamable HTTP/ })
-  await serverRow.getByRole('button', { name: '同步工具' }).click()
-  const syncDialog = page.getByRole('dialog')
-  await expect(syncDialog.getByText('同步结果')).toBeVisible()
-  await syncDialog.getByRole('button', { name: 'Close' }).click()
-  // 把发现的工具调成只读（免审批）并启用
-  const toolRow = page.getByRole('row', { name: /search_customers 运行时工具 MCP/ })
-  await toolRow.getByRole('button', { name: /编\s*辑/ }).click()
-  const editDialog = page.getByRole('dialog')
-  await editDialog.getByLabel('风险等级').click()
-  await page.getByText('只读', { exact: true }).last().click()
-  await editDialog.getByRole('button', { name: '保存修改' }).click()
-  await toolRow.getByRole('button', { name: /启\s*用/ }).click()
-  await expect(toolRow).toContainText('已启用')
-  // 创建绑定该工具的员工（tool-call 是 Worker 夹具专用 alias）
 test('活跃任务期间追加消息会在当前任务终结后自动跑下一轮并写回时间线', async ({ page }) => {
+  await registerAndLogin(page)
+
   // slow-complete 是 Worker 夹具专用 alias：模型延迟数秒后完成，
   // 保证第二条消息确定性地落在第一轮活跃窗口内（queued_after_current 路径）。
   await page.route(/\/api\/v1\/employees$/, async (route) => {
@@ -245,8 +217,159 @@ test('活跃任务期间追加消息会在当前任务终结后自动跑下一�
       headers: { ...request.headers(), 'content-type': 'application/json' },
       postData: JSON.stringify({
         ...payload,
-        model: { kind: 'gateway_alias', alias: 'tool-call' },
         model: { kind: 'gateway_alias', alias: 'slow-complete' },
+      }),
+    })
+  })
+
+  await page.getByRole('link', { name: '数字员工' }).click()
+  await page.getByRole('button', { name: '创建数字员工' }).click()
+  await page.getByLabel('员工名称').fill('自动续跑验收专员')
+  await page.getByLabel('岗位说明').fill('验证会话自动续跑派生')
+  await page.getByLabel('系统指令').fill(`无论用户输入什么，只回复：${expectedOutput}`)
+  await expect(page.getByRole('checkbox', { name: '支持对话' })).toBeChecked()
+  await page.getByRole('button', { name: '保存草稿' }).click()
+  await page.getByRole('button', { name: '发布员工' }).click()
+  await expect(page.getByText('已发布', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: '开始会话' }).click()
+  await expect(page).toHaveURL(/\/conversations\/[0-9a-f-]+$/)
+  const conversationId = new URL(page.url()).pathname.split('/').at(-1)
+  expect(conversationId).toMatch(/^[0-9a-f-]{36}$/)
+
+  await page.getByLabel('追加消息').fill('第一轮：先给出结论')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText('第一轮：先给出结论')).toBeVisible()
+  await expect(page.getByText('执行中', { exact: true })).toBeVisible()
+
+  // 第一轮仍在活跃期间（模型延迟完成窗口）追加第二条消息 → 进入排队续跑
+  await page.getByLabel('追加消息').fill('第二轮：继续补充风险')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText('第二轮：继续补充风险')).toBeVisible()
+
+  // 排队意图已持久化为 followup 命令（证明确实走了 queued_after_current 路径）
+  expect(queryRuntimeDatabase(
+    `SELECT count(*)::text FROM run_commands rc JOIN runs r ON r.id = rc.run_id WHERE r.conversation_id = '${conversationId}' AND rc.action = 'followup'`,
+  )).toBe('1')
+
+  // 第一轮终结后自动派生第二轮：时间线出现两轮模型输出，两个任务全部完成
+  await expect(page.getByText(expectedOutput, { exact: true })).toHaveCount(2)
+  await expect(page.getByText('已完成', { exact: true })).toHaveCount(2)
+
+  const runsState = queryRuntimeDatabase(
+    `SELECT count(*)::text || '|' || count(*) FILTER (WHERE status = 'completed')::text FROM runs WHERE conversation_id = '${conversationId}'`,
+  )
+  expect(runsState).toBe('2|2')
+  expect(queryRuntimeDatabase(
+    `SELECT count(*)::text FROM run_commands rc JOIN runs r ON r.id = rc.run_id WHERE r.conversation_id = '${conversationId}' AND rc.action = 'followup' AND rc.processed_at IS NOT NULL`,
+  )).toBe('1')
+  // 排队消息已绑定到自动派生的第二轮 Run
+  expect(queryRuntimeDatabase(
+    `SELECT count(*)::text FROM conversation_messages WHERE conversation_id = '${conversationId}' AND role = 'user' AND run_id IS NULL`,
+  )).toBe('0')
+})
+
+test('用户可以在会话页直接取消正在执行的关联任务并看到终态', async ({ page }) => {
+  await registerAndLogin(page)
+
+  // slow-cancel 是 Worker 夹具专用 alias，不通过只开放平台模型的生产 UI 暴露。
+  await page.route(/\/api\/v1\/employees$/, async (route) => {
+    const request = route.request()
+    if (request.method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const payload = request.postDataJSON() as Record<string, unknown>
+    await route.continue({
+      headers: { ...request.headers(), 'content-type': 'application/json' },
+      postData: JSON.stringify({
+        ...payload,
+        model: { kind: 'gateway_alias', alias: 'slow-cancel' },
+      }),
+    })
+  })
+
+  await page.getByRole('link', { name: '数字员工' }).click()
+  await page.getByRole('button', { name: '创建数字员工' }).click()
+  await page.getByLabel('员工名称').fill('会话取消验收专员')
+  await page.getByLabel('岗位说明').fill('验证会话内取消活跃任务')
+  await page.getByLabel('系统指令').fill('等待模型回复，除非用户取消任务。')
+  await page.getByRole('button', { name: '保存草稿' }).click()
+  await page.getByRole('button', { name: '发布员工' }).click()
+  await expect(page.getByText('已发布', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: '开始会话' }).click()
+  await expect(page).toHaveURL(/\/conversations\/[0-9a-f-]+$/)
+  const conversationId = new URL(page.url()).pathname.split('/').at(-1)
+
+  await page.getByLabel('追加消息').fill('启动后保持运行，等待我在会话里取消')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText('执行中', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: '取消任务' }).click()
+  await expect(page.getByText('已取消', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '取消任务' })).toHaveCount(0)
+
+  expect(queryRuntimeDatabase(
+    `SELECT status FROM runs WHERE conversation_id = '${conversationId}'`,
+  )).toBe('cancelled')
+  // 无排队消息时取消不会派生新一轮
+  expect(queryRuntimeDatabase(
+    `SELECT count(*)::text FROM runs WHERE conversation_id = '${conversationId}'`,
+  )).toBe('1')
+
+  // 会话页保留任务详情入口
+  await page.getByRole('link', { name: '任务详情' }).click()
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByText('任务已取消', { exact: true })).toBeVisible()
+})
+
+// C09：真实 Worker 通过 Tool Gateway 调用本地 MCP stub；禁用后调用被拒并留下审计与界面记录。
+test('员工任务可调用 MCP 工具且禁用后调用被拒', async ({ page }) => {
+  test.setTimeout(240_000)
+  const stubPort = process.env.PLAYWRIGHT_RUNTIME_MCP_STUB_PORT ?? '18941'
+  const stubBase = `http://127.0.0.1:${stubPort}`
+  await page.request.post(`${stubBase}/__control/profile`, { data: { profile: 'v1' } })
+  await page.request.post(`${stubBase}/__control/mode`, { data: { mode: 'normal' } })
+  await page.request.post(`${stubBase}/__control/auth`, { data: { token: null } })
+
+  await registerAndLogin(page)
+
+  // 注册 stub Server 并自动发现工具
+  await page.getByRole('link', { name: '工具与 MCP' }).click()
+  await page.getByRole('button', { name: '注册 MCP Server' }).click()
+  await page.getByLabel('Server 名称').fill('运行时工具 MCP')
+  await page.getByLabel('服务地址').fill(`${stubBase}/mcp`)
+  await page.getByRole('dialog').getByRole('button', { name: '注册 Server' }).click()
+  const serverRow = page.getByRole('row', { name: /运行时工具 MCP Streamable HTTP/ })
+  await serverRow.getByRole('button', { name: '同步工具' }).click()
+  const syncDialog = page.getByRole('dialog')
+  await expect(syncDialog.getByText('同步结果')).toBeVisible()
+  await syncDialog.getByRole('button', { name: 'Close' }).click()
+
+  // 把发现的工具调成只读（免审批）并启用
+  const toolRow = page.getByRole('row', { name: /search_customers 运行时工具 MCP/ })
+  await toolRow.getByRole('button', { name: /编\s*辑/ }).click()
+  const editDialog = page.getByRole('dialog')
+  await editDialog.getByLabel('风险等级').click()
+  await page.getByText('只读', { exact: true }).last().click()
+  await editDialog.getByRole('button', { name: '保存修改' }).click()
+  await toolRow.getByRole('button', { name: /启\s*用/ }).click()
+  await expect(toolRow).toContainText('已启用')
+
+  // 创建绑定该工具的员工（tool-call 是 Worker 夹具专用 alias）
+  await page.route(/\/api\/v1\/employees$/, async (route) => {
+    const request = route.request()
+    if (request.method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const payload = request.postDataJSON() as Record<string, unknown>
+    await route.continue({
+      headers: { ...request.headers(), 'content-type': 'application/json' },
+      postData: JSON.stringify({
+        ...payload,
+        model: { kind: 'gateway_alias', alias: 'tool-call' },
       }),
     })
   })
@@ -264,6 +387,7 @@ test('活跃任务期间追加消息会在当前任务终结后自动跑下一�
   await page.getByRole('button', { name: '发布员工' }).click()
   await expect(page.getByText('已发布', { exact: true })).toBeVisible()
   const employeeUrl = page.url()
+
   // 启用状态下任务完成且工具真实执行
   await page.getByRole('button', { name: '发起任务' }).click()
   await page.getByLabel('任务内容').fill('查询 acme 客户信息')
@@ -273,10 +397,12 @@ test('活跃任务期间追加消息会在当前任务终结后自动跑下一�
   await expect(
     page.getByText('Tool call completed in the real worker.', { exact: true }),
   ).toBeVisible()
+
   // 禁用工具后新任务调用被拒
   await page.getByRole('link', { name: '工具与 MCP' }).click()
   await toolRow.getByRole('button', { name: /禁\s*用/ }).click()
   await expect(toolRow).toContainText('已禁用')
+
   await page.goto(employeeUrl)
   await page.getByRole('button', { name: '发起任务' }).click()
   await page.getByLabel('任务内容').fill('再次查询 acme 客户信息')
@@ -286,12 +412,14 @@ test('活跃任务期间追加消息会在当前任务终结后自动跑下一�
   await expect(
     page.getByText('Tool call was denied by the platform.', { exact: true }),
   ).toBeVisible()
+
   // 调用记录界面能看到成功与拒绝原因
   await page.getByRole('link', { name: '工具与 MCP' }).click()
   const recordsCard = page.locator('.tool-registry-card', { hasText: '工具调用记录' })
   await expect(recordsCard.getByText('已拒绝').first()).toBeVisible()
   await expect(recordsCard.getByText('tool_disabled').first()).toBeVisible()
   await expect(recordsCard.getByText('已完成').first()).toBeVisible()
+
   // 审计事实：STARTED/COMPLETED 与拒绝记录都持久化
   expect(Number(queryRuntimeDatabase(
     "SELECT count(*) FROM tool_audit_events WHERE event_type = 'tool.rejected' AND reason = 'tool_disabled' AND tool_name = 'search_customers'",
@@ -299,69 +427,4 @@ test('活跃任务期间追加消息会在当前任务终结后自动跑下一�
   expect(Number(queryRuntimeDatabase(
     "SELECT count(*) FROM tool_audit_events WHERE event_type = 'tool.completed' AND succeeded AND tool_name = 'search_customers'",
   ))).toBeGreaterThan(0)
-  await page.getByLabel('员工名称').fill('自动续跑验收专员')
-  await page.getByLabel('岗位说明').fill('验证会话自动续跑派生')
-  await page.getByLabel('系统指令').fill(`无论用户输入什么，只回复：${expectedOutput}`)
-  await expect(page.getByRole('checkbox', { name: '支持对话' })).toBeChecked()
-  await page.getByRole('button', { name: '开始会话' }).click()
-  await expect(page).toHaveURL(/\/conversations\/[0-9a-f-]+$/)
-  const conversationId = new URL(page.url()).pathname.split('/').at(-1)
-  expect(conversationId).toMatch(/^[0-9a-f-]{36}$/)
-  await page.getByLabel('追加消息').fill('第一轮：先给出结论')
-  await page.getByRole('button', { name: '发送' }).click()
-  await expect(page.getByText('第一轮：先给出结论')).toBeVisible()
-  await expect(page.getByText('执行中', { exact: true })).toBeVisible()
-  // 第一轮仍在活跃期间（模型延迟完成窗口）追加第二条消息 → 进入排队续跑
-  await page.getByLabel('追加消息').fill('第二轮：继续补充风险')
-  await expect(page.getByText('第二轮：继续补充风险')).toBeVisible()
-  // 排队意图已持久化为 followup 命令（证明确实走了 queued_after_current 路径）
-  expect(queryRuntimeDatabase(
-    `SELECT count(*)::text FROM run_commands rc JOIN runs r ON r.id = rc.run_id WHERE r.conversation_id = '${conversationId}' AND rc.action = 'followup'`,
-  )).toBe('1')
-  // 第一轮终结后自动派生第二轮：时间线出现两轮模型输出，两个任务全部完成
-  await expect(page.getByText(expectedOutput, { exact: true })).toHaveCount(2)
-  await expect(page.getByText('已完成', { exact: true })).toHaveCount(2)
-  const runsState = queryRuntimeDatabase(
-    `SELECT count(*)::text || '|' || count(*) FILTER (WHERE status = 'completed')::text FROM runs WHERE conversation_id = '${conversationId}'`,
-  )
-  expect(runsState).toBe('2|2')
-    `SELECT count(*)::text FROM run_commands rc JOIN runs r ON r.id = rc.run_id WHERE r.conversation_id = '${conversationId}' AND rc.action = 'followup' AND rc.processed_at IS NOT NULL`,
-  // 排队消息已绑定到自动派生的第二轮 Run
-    `SELECT count(*)::text FROM conversation_messages WHERE conversation_id = '${conversationId}' AND role = 'user' AND run_id IS NULL`,
-  )).toBe('0')
-})
-test('用户可以在会话页直接取消正在执行的关联任务并看到终态', async ({ page }) => {
-  await registerAndLogin(page)
-  // slow-cancel 是 Worker 夹具专用 alias，不通过只开放平台模型的生产 UI 暴露。
-  await page.route(/\/api\/v1\/employees$/, async (route) => {
-    const request = route.request()
-    if (request.method() !== 'POST') {
-      await route.continue()
-      return
-    }
-    const payload = request.postDataJSON() as Record<string, unknown>
-    await route.continue({
-      headers: { ...request.headers(), 'content-type': 'application/json' },
-      postData: JSON.stringify({
-        ...payload,
-        model: { kind: 'gateway_alias', alias: 'slow-cancel' },
-      }),
-    })
-  })
-  await page.getByRole('link', { name: '数字员工' }).click()
-  await page.getByRole('button', { name: '创建数字员工' }).click()
-  await page.getByLabel('员工名称').fill('会话取消验收专员')
-  await page.getByLabel('岗位说明').fill('验证会话内取消活跃任务')
-  await page.getByLabel('系统指令').fill('等待模型回复，除非用户取消任务。')
-  await page.getByLabel('追加消息').fill('启动后保持运行，等待我在会话里取消')
-  await page.getByRole('button', { name: '取消任务' }).click()
-  await expect(page.getByText('已取消', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '取消任务' })).toHaveCount(0)
-    `SELECT status FROM runs WHERE conversation_id = '${conversationId}'`,
-  )).toBe('cancelled')
-  // 无排队消息时取消不会派生新一轮
-    `SELECT count(*)::text FROM runs WHERE conversation_id = '${conversationId}'`,
-  // 会话页保留任务详情入口
-  await page.getByRole('link', { name: '任务详情' }).click()
-  await expect(page.getByText('任务已取消', { exact: true })).toBeVisible()
 })

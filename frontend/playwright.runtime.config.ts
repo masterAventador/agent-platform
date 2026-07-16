@@ -54,6 +54,10 @@ export default defineConfig({
       command: `uv run uvicorn tests.fixtures.mcp_stub:app --host 127.0.0.1 --port ${runtimeMcpStubPort}`,
       cwd: `${repositoryRoot}/backend`,
       url: `http://127.0.0.1:${runtimeMcpStubPort}/health`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+    },
+    {
       command: `uv run uvicorn tests.fixtures.ragflow_stub:app --host 127.0.0.1 --port ${runtimeRagflowPort}`,
       cwd: `${repositoryRoot}/backend`,
       url: `${runtimeRagflowUrl}/health`,
