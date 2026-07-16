@@ -139,24 +139,6 @@ async def register(payload: CredentialsRequest, request: Request) -> UserRespons
                     resource_id=user.id,
                     metadata={"workspace_count": len(workspaces)},
                 )
-                await emit_audit_event(
-                    database_session,
-                    tenant_id=workspaces[0].tenant.id,
-                    actor_user_id=user.id,
-                    action="tenant.member_added",
-                    resource_type="tenant_member",
-                    resource_id=user.id,
-                    metadata={"role": workspaces[0].role.value},
-                )
-                await emit_audit_event(
-                    database_session,
-                    tenant_id=workspaces[0].tenant.id,
-                    actor_user_id=user.id,
-                    action="tenant.role_assigned",
-                    resource_type="tenant_member",
-                    resource_id=user.id,
-                    metadata={"role": workspaces[0].role.value},
-                )
             await database_session.commit()
         except (
             RegistrationUnavailable,

@@ -1,3 +1,4 @@
+from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,7 +10,7 @@ from zipfile import ZipFile
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
@@ -192,6 +193,33 @@ async def test_audit_events_capture_auth_employee_and_run_actions(
         "requested_action": "cancel",
         "reason_present": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_registration_emits_exactly_one_audit_event_per_semantic(
+    audit_harness: AuditHarness,
+) -> None:
+    credentials = {
+        "email": f"audit-dedupe-{uuid4()}@example.com",
+        "password": "correct horse battery staple",
+    }
+    register = await audit_harness.client.post("/api/v1/auth/register", json=credentials)
+    assert register.status_code == 201
+    tenant_id = UUID(register.json()["workspaces"][0]["id"])
+
+    async with audit_harness.session_factory() as session:
+        result = await session.execute(
+            select(AuditEventRecord).where(AuditEventRecord.tenant_id == tenant_id)
+        )
+        events = list(result.scalars())
+
+    assert Counter((event.action, event.resource_type) for event in events) == Counter(
+        {
+            ("auth.registered", "user"): 1,
+            ("tenant.member_added", "tenant_membership"): 1,
+            ("tenant.role_assigned", "tenant_membership"): 1,
+        }
+    )
 
 
 @pytest.mark.asyncio
