@@ -3,10 +3,15 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agent_platform.platform.audit.hashing import (
+    INSECURE_DEV_AUDIT_HMAC_KEY,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     validate_gateway_alias,
 )
+
+_AUDIT_HMAC_KEY_MIN_LENGTH = 32
 
 
 class AppSettings(BaseSettings):
@@ -54,6 +59,8 @@ class AppSettings(BaseSettings):
     artifact_storage_tombstone_rescan_seconds: int = Field(default=5, ge=1, le=60)
     artifact_unbound_file_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
     artifact_unbound_file_cleanup_interval_seconds: int = Field(default=300, ge=5, le=86_400)
+    # 审计哈希链 HMAC 密钥：只经环境变量注入，绝不落数据库、绝不进日志。
+    audit_hmac_key: SecretStr = SecretStr("")
     audit_retention_days: int = Field(default=180, ge=1, le=3_650)
     audit_retention_sweep_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
     audit_retention_sweep_batch_limit: int = Field(default=1_000, ge=1, le=10_000)
@@ -126,6 +133,20 @@ class AppSettings(BaseSettings):
             raise ValueError("production auth cookies must be Secure and SameSite=None for Tauri")
         if "*" in self.cors_allowed_origins:
             raise ValueError("credentialed CORS must use exact origins")
+        audit_key = self.audit_hmac_key.get_secret_value()
+        if self.app_environment in ("staging", "production"):
+            if (
+                len(audit_key) < _AUDIT_HMAC_KEY_MIN_LENGTH
+                or audit_key == INSECURE_DEV_AUDIT_HMAC_KEY
+            ):
+                raise ValueError(
+                    "staging/production requires an explicit audit HMAC key of at least "
+                    f"{_AUDIT_HMAC_KEY_MIN_LENGTH} characters (dev key is rejected)"
+                )
+        elif not audit_key:
+            # 开发/测试环境允许回退到公开弱密钥，保证本机开箱可用；仍然是 HMAC，
+            # 不存在无密钥哈希路径。
+            self.audit_hmac_key = SecretStr(INSECURE_DEV_AUDIT_HMAC_KEY)
         if self.artifact_storage_provider == "tencent-cos" and (
             not self.cos_region
             or not self.cos_secret_id.get_secret_value()

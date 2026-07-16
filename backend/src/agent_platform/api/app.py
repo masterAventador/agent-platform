@@ -60,6 +60,7 @@ from agent_platform.observability.correlation import (
 from agent_platform.observability.telemetry import Telemetry, configure_telemetry
 from agent_platform.platform.artifacts.ports import ArtifactStorageProvider
 from agent_platform.platform.artifacts.services import ArtifactService
+from agent_platform.platform.audit.hashing import configure_audit_hashing
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
@@ -111,6 +112,7 @@ def create_app(
 ) -> FastAPI:
     initialize_database_metadata()
     app_settings = settings or AppSettings()
+    configure_audit_hashing(app_settings.audit_hmac_key.get_secret_value())
     app_telemetry = telemetry or configure_telemetry(app_settings)
     app_telemetry.instrument_libraries()
     owned_engine = None
