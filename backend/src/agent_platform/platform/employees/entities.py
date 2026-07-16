@@ -1,8 +1,10 @@
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
+
+from agent_platform.platform.knowledge.retrieval import validate_knowledge_retrieval_config
 
 
 class RuntimeType(StrEnum):
@@ -38,6 +40,7 @@ class EmployeeDraft:
     knowledge_base_ids: list[UUID]
     approval_policy: dict[str, object]
     release_strategy: dict[str, object]
+    knowledge_retrieval: dict[str, object] = field(default_factory=dict)
 
     def normalized(self) -> "EmployeeDraft":
         return replace(
@@ -62,6 +65,9 @@ class EmployeeDraft:
             "skill_ids": [str(skill_id) for skill_id in self.skill_ids],
             "tool_ids": [str(tool_id) for tool_id in self.tool_ids],
             "knowledge_base_ids": [str(knowledge_id) for knowledge_id in self.knowledge_base_ids],
+            "knowledge_retrieval": validate_knowledge_retrieval_config(
+                self.knowledge_retrieval
+            ).model_dump(mode="json"),
             "approval_policy": self.approval_policy,
             "release_strategy": self.release_strategy,
         }

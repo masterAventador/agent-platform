@@ -13,6 +13,7 @@ class EventType(StrEnum):
     RUN_STARTED = "run.started"
     RUN_PROGRESS = "run.progress"
     MESSAGE_OUTPUT = "message.output"
+    KNOWLEDGE_RETRIEVED = "knowledge.retrieved"
     PLAN_UPDATED = "plan.updated"
     SKILL_LOADED = "skill.loaded"
     TOOL_STARTED = "tool.started"

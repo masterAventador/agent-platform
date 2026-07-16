@@ -11,6 +11,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
+from agent_platform.infrastructure.database.repositories.knowledge import (
+    SqlAlchemyKnowledgeBaseRepository,
+)
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
 from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
 from agent_platform.platform.dynamic_io import InvalidDynamicSchema, validate_employee_io_schemas
@@ -24,12 +27,17 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.employees.errors import (
     EmployeeConfigurationUnavailable,
+    EmployeeKnowledgeBaseNotBindable,
     EmployeeNameAlreadyExists,
     EmployeeNotFound,
     EmployeeSkillNotBindable,
     EmployeeToolNotBindable,
 )
 from agent_platform.platform.employees.services import EmployeeService
+from agent_platform.platform.knowledge.retrieval import (
+    InvalidKnowledgeRetrievalConfig,
+    validate_knowledge_retrieval_config,
+)
 from agent_platform.platform.models import GatewayModelReference
 from agent_platform.platform.tenants.permissions import (
     TenantPermission,
@@ -73,6 +81,7 @@ class EmployeeDefinitionBase(BaseModel):
     skill_ids: list[UUID] = Field(default_factory=list)
     tool_ids: list[UUID] = Field(default_factory=list)
     knowledge_base_ids: list[UUID] = Field(default_factory=list)
+    knowledge_retrieval: object = Field(default_factory=dict)
     approval_policy: dict[str, object] = Field(default_factory=dict)
     release_strategy: dict[str, object] = Field(default_factory=_default_release_strategy)
 
@@ -96,10 +105,12 @@ class EmployeeDefinitionRequest(EmployeeDefinitionBase):
             skill_ids=self.skill_ids,
             tool_ids=self.tool_ids,
             knowledge_base_ids=self.knowledge_base_ids,
+            knowledge_retrieval=validate_knowledge_retrieval_config(
+                self.knowledge_retrieval
+            ).model_dump(mode="json"),
             approval_policy=self.approval_policy,
             release_strategy=self.release_strategy,
         )
-
 
 
 class EmployeeDefinitionResponse(EmployeeDefinitionBase):
@@ -151,6 +162,7 @@ def _service(database_session: AsyncSession) -> EmployeeService:
         versions=SqlAlchemyEmployeeVersionRepository(database_session),
         skills=SqlAlchemySkillRepository(database_session),
         tools=SqlAlchemyToolRepository(database_session),
+        knowledge_bases=SqlAlchemyKnowledgeBaseRepository(database_session),
     )
 
 
@@ -175,6 +187,14 @@ def _raise_employee_error(error: Exception) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "tool_not_bindable", "message": "只能绑定本企业已启用的 Tool"},
         ) from error
+    if isinstance(error, EmployeeKnowledgeBaseNotBindable):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "employee_knowledge_base_not_bindable",
+                "message": "数字员工只能绑定当前企业可用的知识库",
+            },
+        ) from error
     if isinstance(error, EmployeeConfigurationUnavailable):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -190,6 +210,16 @@ def _raise_employee_error(error: Exception) -> None:
                 "code": "invalid_employee_schema",
                 "message": "员工输入或输出 Schema 无效",
                 "schema": error.issue.schema_name,
+                "path": list(error.issue.path),
+                "reason": error.issue.message,
+            },
+        ) from error
+    if isinstance(error, InvalidKnowledgeRetrievalConfig):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "invalid_knowledge_retrieval",
+                "message": "员工知识检索配置无效",
                 "path": list(error.issue.path),
                 "reason": error.issue.message,
             },
@@ -260,7 +290,9 @@ async def create_employee(
             EmployeeNameAlreadyExists,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            EmployeeKnowledgeBaseNotBindable,
             InvalidDynamicSchema,
+            InvalidKnowledgeRetrievalConfig,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
@@ -280,9 +312,7 @@ async def list_employees(
             required_permission=None,
         )
         employees = await _service(database_session).list_all(tenant_id=access.tenant.id)
-        if not role_has_permission(
-            role=access.role, permission=TenantPermission.EMPLOYEES_MANAGE
-        ):
+        if not role_has_permission(role=access.role, permission=TenantPermission.EMPLOYEES_MANAGE):
             employees = [employee for employee in employees if _is_member_visible(employee)]
     return [EmployeeResponse.from_entity(employee) for employee in employees]
 
@@ -347,7 +377,9 @@ async def update_employee(
             EmployeeNameAlreadyExists,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            EmployeeKnowledgeBaseNotBindable,
             InvalidDynamicSchema,
+            InvalidKnowledgeRetrievalConfig,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
@@ -379,6 +411,7 @@ async def publish_employee(
                 output_schema=draft.draft.output_schema,
                 file_upload_enabled=draft.draft.capabilities.get("file_upload"),
             )
+            validate_knowledge_retrieval_config(draft.draft.knowledge_retrieval)
             employee = await _service(database_session).publish(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,
@@ -399,7 +432,9 @@ async def publish_employee(
             EmployeeConfigurationUnavailable,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            EmployeeKnowledgeBaseNotBindable,
             InvalidDynamicSchema,
+            InvalidKnowledgeRetrievalConfig,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error

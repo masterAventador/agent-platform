@@ -16,6 +16,7 @@ from pydantic import (
 from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import (
@@ -24,6 +25,7 @@ from agent_platform.platform.knowledge.models import (
     KnowledgeDocument,
     KnowledgeSearchResult,
 )
+from agent_platform.platform.knowledge.retrieval import KnowledgeRetrievalConfig
 
 
 class _RagFlowEnvelope(BaseModel):
@@ -59,11 +61,14 @@ class _RagFlowDocumentListPayload(BaseModel):
 
 
 class _RagFlowCitationPayload(BaseModel):
+    """真实 v0.25.6 检索响应经官方 key_mapping 后的 chunk 形态：
+    文档名在 document_keyword，document_metadata 仅在请求 include_metadata 时注入。"""
+
     model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
 
     id: str = Field(min_length=1)
     document_id: str = Field(min_length=1)
-    document_name: str = Field(min_length=1)
+    document_keyword: str = Field(min_length=1)
     dataset_id: str = Field(min_length=1)
     content: str
     similarity: FiniteFloat
@@ -172,6 +177,14 @@ class RagFlowClient:
             json={"document_ids": document_ids},
         )
 
+    async def delete_documents(self, *, dataset_id: str, document_ids: list[str]) -> None:
+        await self._request(
+            "DELETE",
+            f"/api/v1/datasets/{dataset_id}/documents",
+            operation="delete_documents",
+            json={"ids": document_ids},
+        )
+
     async def list_documents(self, *, dataset_id: str) -> list[KnowledgeDocument]:
         data = await self._request(
             "GET",
@@ -191,17 +204,24 @@ class RagFlowClient:
         *,
         question: str,
         dataset_ids: list[str],
-        page_size: int = 10,
-        metadata_condition: dict[str, JsonValue] | None = None,
+        options: KnowledgeRetrievalConfig | None = None,
     ) -> KnowledgeSearchResult:
+        resolved = options or KnowledgeRetrievalConfig()
         payload: dict[str, Any] = {
             "question": question,
             "dataset_ids": dataset_ids,
             "page": 1,
-            "page_size": page_size,
+            "page_size": resolved.page_size,
+            "similarity_threshold": resolved.similarity_threshold,
+            "vector_similarity_weight": resolved.vector_similarity_weight,
+            "top_k": resolved.top_k,
+            "keyword": resolved.keyword,
+            "include_metadata": True,
         }
-        if metadata_condition is not None:
-            payload["metadata_condition"] = metadata_condition
+        if resolved.rerank_id is not None:
+            payload["rerank_id"] = resolved.rerank_id
+        if resolved.metadata_condition is not None:
+            payload["metadata_condition"] = resolved.metadata_condition.model_dump(mode="json")
         data = await self._request(
             "POST",
             "/api/v1/retrieval",
@@ -230,6 +250,14 @@ class RagFlowClient:
         try:
             response = await self._client.request(method, path, headers=self._headers, **kwargs)
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            self._record_metric(operation, "failed", started)
+            status_code = error.response.status_code
+            if 400 <= status_code < 500:
+                raise KnowledgeProviderRequestRejected(
+                    f"知识供应商拒绝了请求（HTTP {status_code}）"
+                ) from error
+            raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
         except httpx.HTTPError as error:
             self._record_metric(operation, "failed", started)
             raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
@@ -249,7 +277,9 @@ class RagFlowClient:
             raise
         if validated.code != 0:
             self._record_metric(operation, "failed", started)
-            raise KnowledgeProviderUnavailable("知识供应商拒绝了请求")
+            raise KnowledgeProviderRequestRejected(
+                f"知识供应商拒绝了请求（业务错误码 {validated.code}）"
+            )
         self._record_metric(operation, "succeeded", started)
         return validated.data
 
@@ -291,7 +321,7 @@ class RagFlowClient:
         return KnowledgeCitation(
             chunk_id=data.id,
             document_id=data.document_id,
-            document_name=data.document_name,
+            document_name=data.document_keyword,
             dataset_id=data.dataset_id,
             content=data.content,
             score=data.similarity,

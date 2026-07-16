@@ -34,3 +34,16 @@
 .run-input {
   white-space: pre-wrap;
 }
+
+.run-knowledge-citations {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.run-knowledge-citation {
+  padding: 8px 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fafafa;
+}

@@ -15,6 +15,7 @@ from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.tenants import TenantMembershipRecord
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import (
@@ -36,8 +37,13 @@ class FakeKnowledgeProvider:
         self.provider_name = provider_name
         self.calls: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.deleted_documents: list[tuple[str, list[str]]] = []
         self.parsed: list[tuple[str, list[str]]] = []
         self.create_error: Exception | None = None
+        self.fail_upload_at: int | None = None
+        self.parse_error: Exception | None = None
+        self.delete_documents_error_once: Exception | None = None
+        self._document_sequence = 0
 
     async def create_dataset(
         self, *, name: str, description: str = "", chunk_method: str = "naive"
@@ -56,13 +62,29 @@ class FakeKnowledgeProvider:
     ):
         del content_type
         self.calls.append(("upload", dataset_id))
+        self._document_sequence += 1
+        if self.fail_upload_at is not None and self._document_sequence >= self.fail_upload_at:
+            raise KnowledgeProviderUnavailable("上传中断")
         return KnowledgeDocument(
-            provider_id="document-1", name=filename, status="UNSTART", size_bytes=len(content)
+            provider_id=f"document-{self._document_sequence}",
+            name=filename,
+            status="UNSTART",
+            size_bytes=len(content),
         )
 
     async def start_parsing(self, *, dataset_id: str, document_ids: list[str]) -> None:
         self.calls.append(("parse", dataset_id))
+        if self.parse_error is not None:
+            raise self.parse_error
         self.parsed.append((dataset_id, document_ids))
+
+    async def delete_documents(self, *, dataset_id: str, document_ids: list[str]) -> None:
+        self.calls.append(("delete_documents", dataset_id))
+        if self.delete_documents_error_once is not None:
+            error = self.delete_documents_error_once
+            self.delete_documents_error_once = None
+            raise error
+        self.deleted_documents.append((dataset_id, document_ids))
 
     async def list_documents(self, *, dataset_id: str):
         self.calls.append(("list", dataset_id))
@@ -73,10 +95,9 @@ class FakeKnowledgeProvider:
         *,
         question: str,
         dataset_ids: list[str],
-        page_size: int = 10,
-        metadata_condition=None,
+        options=None,
     ):
-        del question, page_size, metadata_condition
+        del question, options
         self.calls.append(("retrieve", dataset_ids[0]))
         return KnowledgeSearchResult(
             total=1,
@@ -155,6 +176,178 @@ async def test_tenant_knowledge_base_document_and_retrieval_flow(knowledge_clien
     )
     assert deleted.status_code == 204
     assert len(provider.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_document_lifecycle_supports_batch_retry_update_and_delete(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    credentials = {
+        "email": "knowledge-doc-lifecycle@example.com",
+        "password": "correct horse battery staple",
+    }
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "文档生命周期知识库"},
+    )
+    assert created.status_code == 201
+    knowledge_base = created.json()
+
+    batch = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("policy-a.txt", b"policy a", "text/plain")),
+            ("files", ("policy-b.txt", b"policy b", "text/plain")),
+        ],
+    )
+    assert batch.status_code == 200
+    assert [document["provider_id"] for document in batch.json()] == [
+        "document-1",
+        "document-2",
+    ]
+    assert provider.parsed[-1][1] == ["document-1", "document-2"]
+
+    retry = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-1/retry",
+        headers=headers,
+    )
+    assert retry.status_code == 204
+    assert provider.parsed[-1][1] == ["document-1"]
+
+    updated = await client.put(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-1",
+        headers=headers,
+        files={"file": ("policy-a-v2.txt", b"policy a v2", "text/plain")},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["provider_id"] == "document-3"
+    assert [call[0] for call in provider.calls[-3:]] == [
+        "upload",
+        "parse",
+        "delete_documents",
+    ]
+    assert len({call[1] for call in provider.calls[-3:]}) == 1
+    assert provider.deleted_documents[-1][1] == ["document-1"]
+    assert provider.parsed[-1][1] == ["document-3"]
+
+    deleted = await client.delete(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-2",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+    assert provider.deleted_documents[-1][1] == ["document-2"]
+
+
+async def _login_and_create_base(client, email: str) -> tuple[dict[str, str], str]:
+    credentials = {"email": email, "password": "correct horse battery staple"}
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "补偿测试知识库"},
+    )
+    assert created.status_code == 201
+    return headers, created.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_rejects_more_documents_than_the_limit(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(client, "batch-limit@example.com")
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[("files", (f"doc-{index}.txt", b"content", "text/plain")) for index in range(21)],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "document_batch_too_large"
+    assert all(call[0] != "upload" for call in provider.calls)
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_midway_failure_compensates_uploaded_documents(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "batch-compensation@example.com"
+    )
+    provider.fail_upload_at = 3
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("doc-a.txt", b"a", "text/plain")),
+            ("files", ("doc-b.txt", b"b", "text/plain")),
+            ("files", ("doc-c.txt", b"c", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+    assert provider.parsed == []
+    assert provider.deleted_documents[-1][1] == ["document-1", "document-2"]
+
+
+@pytest.mark.asyncio
+async def test_batch_parse_failure_compensates_uploaded_documents(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "batch-parse-compensation@example.com"
+    )
+    provider.parse_error = KnowledgeProviderUnavailable("解析请求失败")
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("doc-a.txt", b"a", "text/plain")),
+            ("files", ("doc-b.txt", b"b", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 503
+    assert provider.parsed == []
+    assert provider.deleted_documents[-1][1] == ["document-1", "document-2"]
+
+
+@pytest.mark.asyncio
+async def test_replace_failure_compensates_the_new_document(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "replace-compensation@example.com"
+    )
+    uploaded = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
+        headers=headers,
+        files={"file": ("policy.txt", b"v1", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    provider.delete_documents_error_once = KnowledgeProviderUnavailable("删除旧文档失败")
+
+    response = await client.put(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/document-1",
+        headers=headers,
+        files={"file": ("policy-v2.txt", b"v2", "text/plain")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+    # 补偿删除新上传的 document-2，旧 document-1 保持原状
+    assert provider.deleted_documents[-1][1] == ["document-2"]
 
 
 @pytest.mark.asyncio
@@ -266,6 +459,41 @@ async def test_knowledge_provider_failures_return_stable_api_error(
 
 
 @pytest.mark.asyncio
+async def test_knowledge_provider_rejection_returns_permanent_bad_gateway_error(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    credentials = {
+        "email": "provider-rejected@example.com",
+        "password": "correct horse battery staple",
+    }
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    provider.create_error = KnowledgeProviderRequestRejected("知识供应商拒绝了请求（HTTP 401）")
+
+    response = await client.post(
+        "/api/v1/knowledge-bases",
+        headers={"X-Tenant-ID": tenant_id},
+        json={"name": "被拒绝知识库"},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": {
+            "code": "knowledge_provider_rejected",
+            "message": "知识服务拒绝了请求，请检查知识服务配置或知识库状态",
+        }
+    }
+    assert (
+        await client.get(
+            "/api/v1/knowledge-bases",
+            headers={"X-Tenant-ID": tenant_id},
+        )
+    ).json() == []
+
+
+@pytest.mark.asyncio
 async def test_existing_base_never_routes_provider_a_id_to_provider_b(knowledge_client) -> None:
     client, provider_a, app = knowledge_client
     credentials = {
@@ -311,6 +539,6 @@ async def test_existing_base_never_routes_provider_a_id_to_provider_b(knowledge_
     assert provider_b.calls == []
     assert all(response.status_code == 503 for response in requests)
     assert all(
-        response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+        response.json()["detail"]["code"] == "knowledge_provider_not_configured"
         for response in requests
     )

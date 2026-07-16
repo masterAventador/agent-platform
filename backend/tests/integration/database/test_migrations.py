@@ -651,7 +651,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0026"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0027"
 
 
 def test_capability_entitlement_migration_creates_and_removes_table(tmp_path: Path) -> None:

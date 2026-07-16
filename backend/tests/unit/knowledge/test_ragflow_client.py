@@ -6,8 +6,108 @@ import pytest
 from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
+from agent_platform.platform.knowledge.retrieval import validate_knowledge_retrieval_config
+
+
+@pytest.mark.asyncio
+async def test_ragflow_retrieve_parses_the_real_v0_25_6_chunk_shape() -> None:
+    """真实 v0.25.6 检索响应经 key_mapping 后的字段是 document_keyword，
+    没有 document_name；document_metadata 仅在请求携带 include_metadata 时注入。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/retrieval"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "total": 1,
+                    "chunks": [
+                        {
+                            "id": "chunk-real",
+                            "content": "年假为十天",
+                            "content_ltks": "年假 为 十天",
+                            "document_id": "doc-1",
+                            "document_keyword": "handbook.pdf",
+                            "dataset_id": "ds-1",
+                            "important_keywords": [""],
+                            "positions": [""],
+                            "similarity": 0.91,
+                            "term_similarity": 1.0,
+                            "vector_similarity": 0.88,
+                        }
+                    ],
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
+        client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
+        result = await client.retrieve(question="年假有几天", dataset_ids=["ds-1"])
+
+    citation = result.citations[0]
+    assert citation.chunk_id == "chunk-real"
+    assert citation.document_name == "handbook.pdf"
+    assert citation.dataset_id == "ds-1"
+    assert citation.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_ragflow_retrieve_sends_all_v0_25_6_retrieval_options() -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"total": 0, "chunks": []}})
+
+    options = validate_knowledge_retrieval_config(
+        {
+            "page_size": 7,
+            "similarity_threshold": 0.4,
+            "vector_similarity_weight": 0.6,
+            "top_k": 128,
+            "keyword": True,
+            "rerank_id": "BAAI/bge-reranker-v2-m3",
+            "metadata_condition": {
+                "logic": "and",
+                "conditions": [
+                    {"name": "department", "comparison_operator": "=", "value": "HR"},
+                ],
+            },
+        }
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
+        client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
+        await client.retrieve(question="年假有几天", dataset_ids=["ds-1"], options=options)
+        await client.retrieve(question="年假有几天", dataset_ids=["ds-1"])
+
+    configured, defaulted = bodies
+    assert configured["page"] == 1
+    assert configured["page_size"] == 7
+    assert configured["similarity_threshold"] == 0.4
+    assert configured["vector_similarity_weight"] == 0.6
+    assert configured["top_k"] == 128
+    assert configured["keyword"] is True
+    assert configured["rerank_id"] == "BAAI/bge-reranker-v2-m3"
+    assert configured["include_metadata"] is True
+    assert configured["metadata_condition"] == {
+        "logic": "and",
+        "conditions": [
+            {"name": "department", "comparison_operator": "=", "value": "HR"},
+        ],
+    }
+    assert defaulted["page_size"] == 5
+    assert defaulted["similarity_threshold"] == 0.2
+    assert defaulted["vector_similarity_weight"] == 0.3
+    assert defaulted["top_k"] == 1024
+    assert defaulted["keyword"] is False
+    assert "rerank_id" not in defaulted
+    assert "metadata_condition" not in defaulted
 
 
 @pytest.mark.asyncio
@@ -18,6 +118,8 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
         requests.append(request)
         if request.url.path == "/api/v1/datasets":
             return httpx.Response(200, json={"code": 0, "data": {"id": "ds-1", "name": "制度库"}})
+        if request.method == "DELETE" and request.url.path.endswith("/documents"):
+            return httpx.Response(200, json={"code": 0})
         if request.url.path.endswith("/documents"):
             return httpx.Response(
                 200,
@@ -46,7 +148,7 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
                             {
                                 "id": "chunk-1",
                                 "document_id": "doc-1",
-                                "document_name": "handbook.pdf",
+                                "document_keyword": "handbook.pdf",
                                 "dataset_id": "ds-1",
                                 "content": "年假为十天",
                                 "similarity": 0.91,
@@ -72,10 +174,23 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
             dataset_id=dataset.provider_id,
             document_ids=[document.provider_id],
         )
+        await client.delete_documents(
+            dataset_id=dataset.provider_id,
+            document_ids=[document.provider_id],
+        )
         result = await client.retrieve(
             question="年假有几天",
             dataset_ids=[dataset.provider_id],
-            metadata_condition={"logic": "and", "conditions": []},
+            options=validate_knowledge_retrieval_config(
+                {
+                    "metadata_condition": {
+                        "logic": "and",
+                        "conditions": [
+                            {"name": "department", "comparison_operator": "=", "value": "HR"},
+                        ],
+                    },
+                }
+            ),
         )
 
     assert client.provider_name == "ragflow"
@@ -83,28 +198,68 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
     assert document.status == "UNSTART"
     assert result.citations[0].content == "年假为十天"
     assert all(request.headers["authorization"] == "Bearer secret" for request in requests)
+    delete_request = next(
+        request
+        for request in requests
+        if request.method == "DELETE" and "/documents" in str(request.url)
+    )
+    assert json.loads(delete_request.content) == {"ids": ["doc-1"]}
     retrieval_body = json.loads(requests[-1].content)
     assert retrieval_body["metadata_condition"]["logic"] == "and"
 
 
 @pytest.mark.asyncio
-async def test_ragflow_error_envelope_does_not_leak_provider_response() -> None:
+async def test_ragflow_business_error_envelope_rejects_permanently_without_leaking() -> None:
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"code": 102, "message": "invalid dataset"})
     )
     async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
         client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
-        with pytest.raises(KnowledgeProviderUnavailable) as exception:
+        with pytest.raises(KnowledgeProviderRequestRejected) as exception:
             await client.create_dataset(name="broken")
     assert "invalid dataset" not in str(exception.value)
+    assert "102" in str(exception.value)
 
 
 @pytest.mark.asyncio
-async def test_ragflow_connection_failure_maps_to_provider_unavailable() -> None:
-    def fail_to_connect(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+async def test_ragflow_4xx_status_is_permanent_rejection_without_leaking_response(
+    status_code: int,
+) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            status_code,
+            json={"code": 109, "message": "secret upstream detail"},
+        )
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
+        client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
+        with pytest.raises(KnowledgeProviderRequestRejected) as exception:
+            await client.retrieve(question="年假有几天", dataset_ids=["ds-1"])
+    assert str(status_code) in str(exception.value)
+    assert "secret upstream detail" not in str(exception.value)
 
-    transport = httpx.MockTransport(fail_to_connect)
+
+def _raise_connect_error(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+def _raise_read_timeout(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("read timed out", request=request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler",
+    [
+        _raise_connect_error,
+        _raise_read_timeout,
+        lambda request: httpx.Response(500, json={"message": "internal error"}),
+        lambda request: httpx.Response(503, json={"message": "upstream restarting"}),
+    ],
+)
+async def test_ragflow_transport_and_server_failures_stay_transient_unavailable(handler) -> None:
+    transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
         client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
         with pytest.raises(KnowledgeProviderUnavailable):
@@ -193,7 +348,7 @@ async def test_ragflow_invalid_citation_fields_map_to_invalid_provider_response(
                             {
                                 "id": "chunk-1",
                                 "document_id": "doc-1",
-                                "document_name": "policy.txt",
+                                "document_keyword": "policy.txt",
                                 "dataset_id": "ds-1",
                                 "content": content,
                                 "similarity": similarity,

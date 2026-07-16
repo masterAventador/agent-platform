@@ -10,11 +10,13 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.employees.errors import (
     EmployeeConfigurationUnavailable,
+    EmployeeKnowledgeBaseNotBindable,
     EmployeeNotFound,
     EmployeeSkillNotBindable,
     EmployeeToolNotBindable,
 )
 from agent_platform.platform.employees.ports import (
+    EmployeeKnowledgeBasePolicy,
     EmployeeRepository,
     EmployeeSkillPolicy,
     EmployeeToolPolicy,
@@ -30,11 +32,13 @@ class EmployeeService:
         versions: EmployeeVersionRepository,
         skills: EmployeeSkillPolicy,
         tools: EmployeeToolPolicy,
+        knowledge_bases: EmployeeKnowledgeBasePolicy,
     ) -> None:
         self._employees = employees
         self._versions = versions
         self._skills = skills
         self._tools = tools
+        self._knowledge_bases = knowledge_bases
 
     async def create(
         self,
@@ -45,6 +49,10 @@ class EmployeeService:
     ) -> Employee:
         await self._ensure_skills_bindable(tenant_id=tenant_id, skill_ids=draft.skill_ids)
         await self._ensure_tools_bindable(tenant_id=tenant_id, tool_ids=draft.tool_ids)
+        await self._ensure_knowledge_bases_bindable(
+            tenant_id=tenant_id,
+            knowledge_base_ids=draft.knowledge_base_ids,
+        )
         employee = Employee.create(tenant_id=tenant_id, created_by=created_by, draft=draft)
         await self._employees.add(employee)
         return employee
@@ -58,6 +66,10 @@ class EmployeeService:
     ) -> Employee:
         await self._ensure_skills_bindable(tenant_id=tenant_id, skill_ids=draft.skill_ids)
         await self._ensure_tools_bindable(tenant_id=tenant_id, tool_ids=draft.tool_ids)
+        await self._ensure_knowledge_bases_bindable(
+            tenant_id=tenant_id,
+            knowledge_base_ids=draft.knowledge_base_ids,
+        )
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
         updated = employee.update(draft)
         await self._employees.update(updated)
@@ -84,6 +96,10 @@ class EmployeeService:
         await self._ensure_tools_bindable(
             tenant_id=tenant_id,
             tool_ids=employee.draft.tool_ids,
+        )
+        await self._ensure_knowledge_bases_bindable(
+            tenant_id=tenant_id,
+            knowledge_base_ids=employee.draft.knowledge_base_ids,
         )
         published, version = employee.publish(
             published_by=published_by,
@@ -131,3 +147,15 @@ class EmployeeService:
     ) -> None:
         if not await self._tools.are_bindable(tenant_id=tenant_id, tool_ids=tool_ids):
             raise EmployeeToolNotBindable
+
+    async def _ensure_knowledge_bases_bindable(
+        self,
+        *,
+        tenant_id: UUID,
+        knowledge_base_ids: list[UUID],
+    ) -> None:
+        if not await self._knowledge_bases.are_bindable(
+            tenant_id=tenant_id,
+            knowledge_base_ids=knowledge_base_ids,
+        ):
+            raise EmployeeKnowledgeBaseNotBindable

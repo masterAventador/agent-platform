@@ -70,6 +70,8 @@ from agent_platform.platform.audit.hashing import configure_audit_hashing
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderNotConfigured,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
@@ -331,6 +333,36 @@ def create_app(
                 "detail": {
                     "code": "knowledge_provider_unavailable",
                     "message": "知识服务暂时不可用，请稍后重试",
+                }
+            },
+        )
+
+    @app.exception_handler(KnowledgeProviderNotConfigured)
+    async def handle_knowledge_provider_not_configured(
+        _: Request,
+        __: KnowledgeProviderNotConfigured,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": {
+                    "code": "knowledge_provider_not_configured",
+                    "message": "知识服务供应商未在当前部署配置，请联系平台管理员",
+                }
+            },
+        )
+
+    @app.exception_handler(KnowledgeProviderRequestRejected)
+    async def handle_knowledge_provider_rejection(
+        _: Request,
+        __: KnowledgeProviderRequestRejected,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={
+                "detail": {
+                    "code": "knowledge_provider_rejected",
+                    "message": "知识服务拒绝了请求，请检查知识服务配置或知识库状态",
                 }
             },
         )

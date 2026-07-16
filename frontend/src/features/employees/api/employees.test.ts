@@ -34,6 +34,15 @@ const definition: EmployeeWriteDefinition = {
   skill_ids: [],
   tool_ids: [],
   knowledge_base_ids: [],
+  knowledge_retrieval: {
+    page_size: 5,
+    similarity_threshold: 0.2,
+    vector_similarity_weight: 0.3,
+    top_k: 1024,
+    keyword: false,
+    rerank_id: null,
+    metadata_condition: null,
+  },
   approval_policy: {},
   release_strategy: { mode: 'all' },
 }

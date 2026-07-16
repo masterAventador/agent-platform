@@ -6,7 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeVar
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
@@ -124,6 +124,7 @@ class WorkerFenced(RuntimeError):
 
 logger = logging.getLogger(__name__)
 RuntimeOperationResult = TypeVar("RuntimeOperationResult")
+_KNOWLEDGE_EVENT_NAMESPACE = UUID("8f3c1af2-6c1d-4be0-9dbb-1a4a9d8f5f77")
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,11 +369,14 @@ class RunWorker:
         assert version is not None
 
         cancellation_command_ids: tuple[UUID, ...] = ()
+        knowledge_event: PlatformEvent | None = None
         pending_result = self._pending_results.get(run.id)
         if pending_result is not None:
             if pending_result.command_id != message.command_id:
                 raise RuntimeAlreadyPrepared(run.id)
             runtime = self._required_runtime(run.id)
+            # 事件流重收集时必须重建知识事件；确定性 event_id 保证已持久化时被去重。
+            knowledge_event = self._knowledge_event(run, self._prepared_runtimes[run.id])
             state = pending_result.state
             history = list(pending_result.history) if pending_result.history is not None else None
         elif message.action == "start":
@@ -407,6 +411,7 @@ class RunWorker:
             self._prepared_runtimes[run.id] = prepared
             self._active_runs[run.id] = run
             runtime = prepared.runtime
+            knowledge_event = self._knowledge_event(run, prepared)
             try:
                 marked_running = await self._mark_running(
                     run,
@@ -513,6 +518,8 @@ class RunWorker:
                     history=None,
                 )
                 raise
+        if knowledge_event is not None:
+            history = self._insert_knowledge_event(history, knowledge_event)
 
         try:
             persisted_status = await self._persist_runtime_result(
@@ -1687,6 +1694,10 @@ class RunWorker:
 
     @staticmethod
     def _runtime_request(run: Run, prepared: PreparedRuntime) -> RuntimeStartRequest:
+        input_data = dict(run.input_data)
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is not None:
+            input_data["knowledge_context"] = knowledge_context.as_input_payload()
         return RuntimeStartRequest(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -1696,8 +1707,49 @@ class RunWorker:
             employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
                 prepared.employee_definition
             ),
-            input_data=run.input_data,
+            input_data=TypeAdapter(dict[str, JsonValue]).validate_python(input_data),
         )
+
+    @staticmethod
+    def _knowledge_event(run: Run, prepared: PreparedRuntime) -> PlatformEvent | None:
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is None:
+            return None
+        payload = {
+            "citation_count": len(knowledge_context.citations),
+            **knowledge_context.as_input_payload(),
+        }
+        event = PlatformEvent.create(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            run_id=run.id,
+            sequence=1,
+            event_type=EventType.KNOWLEDGE_RETRIEVED,
+            payload=TypeAdapter(dict[str, JsonValue]).validate_python(payload),
+        )
+        # 重投递会重新生成本事件；event_id 必须按 run 确定，依托持久化 event_id 去重。
+        return event.model_copy(
+            update={
+                "event_id": uuid5(
+                    _KNOWLEDGE_EVENT_NAMESPACE,
+                    f"{EventType.KNOWLEDGE_RETRIEVED.value}:{run.id}",
+                )
+            }
+        )
+
+    @staticmethod
+    def _insert_knowledge_event(
+        history: list[PlatformEvent],
+        knowledge_event: PlatformEvent,
+    ) -> list[PlatformEvent]:
+        if any(event.type is EventType.KNOWLEDGE_RETRIEVED for event in history):
+            return history
+        started_index = next(
+            (index for index, event in enumerate(history) if event.type is EventType.RUN_STARTED),
+            -1,
+        )
+        insert_at = started_index + 1 if started_index >= 0 else 0
+        return [*history[:insert_at], knowledge_event, *history[insert_at:]]
 
     async def _claim_ownership(self, run: Run) -> RuntimeOwnership:
         async with self._session_factory() as session:

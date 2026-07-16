@@ -49,6 +49,7 @@ from agent_platform.platform.conversations.entities import (
     ConversationMessageRole,
 )
 from agent_platform.platform.employees.entities import EmployeeVersion
+from agent_platform.platform.knowledge.models import KnowledgeCitation
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
@@ -71,7 +72,11 @@ from agent_platform.workers.run_worker import (
     RunWorker,
     WorkerFenced,
 )
-from agent_platform.workers.runtime_composition import UntrustedRuntimeDefinition
+from agent_platform.workers.runtime_composition import (
+    KnowledgeRuntimeRequestRejected,
+    RuntimeKnowledgeContext,
+    UntrustedRuntimeDefinition,
+)
 
 
 def fail_conversation_projection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,6 +382,7 @@ class CompletedRecoverRuntime(RestorableRuntime):
 class Prepared:
     runtime: CompletingRuntime
     employee_definition: dict[str, object]
+    knowledge_context: RuntimeKnowledgeContext | None = None
     close_calls: int = 0
     close_error: Exception | None = None
     renew_calls: int = 0
@@ -454,6 +460,12 @@ class PermanentFailingResolver:
     async def resolve(self, run: Run, definition: dict[str, object]) -> Prepared:
         del run, definition
         raise UntrustedRuntimeDefinition("secret definition detail")
+
+
+class KnowledgeRejectedFailingResolver:
+    async def resolve(self, run: Run, definition: dict[str, object]) -> Prepared:
+        del run, definition
+        raise KnowledgeRuntimeRequestRejected("provider rejected with secret upstream detail")
 
 
 class TransientFailingResolver:
@@ -864,6 +876,225 @@ async def test_worker_executes_run_and_persists_events_and_terminal_state(factor
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert [event.type for event in events] == [EventType.RUN_STARTED, EventType.RUN_COMPLETED]
         assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_injects_retrieved_knowledge_and_persists_citation_event(factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"runtime_type": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    runtime = CompletingRuntime()
+    resolver = Resolver(runtime)
+    delivery = RunQueueDelivery(
+        delivery_id="knowledge-1-0",
+        message=RunQueueMessage(
+            command_id=command.id,
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action="start",
+        ),
+    )
+    resolver_knowledge = RuntimeKnowledgeContext(
+        citations=(
+            KnowledgeCitation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_name="handbook.pdf",
+                dataset_id="dataset-1",
+                content="年假十天",
+                score=0.91,
+                metadata={"department": "HR"},
+            ),
+        )
+    )
+
+    async def resolve_with_knowledge(run_arg: Run, definition: dict[str, object]) -> Prepared:
+        prepared = await Resolver.resolve(resolver, run_arg, definition)
+        prepared.knowledge_context = resolver_knowledge
+        return prepared
+
+    resolver.resolve = resolve_with_knowledge  # type: ignore[method-assign]
+
+    await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(delivery),
+        runtime_resolver=resolver,
+        consumer_name="test-worker",
+    ).run_once(block_ms=1)
+
+    assert runtime.requests[0].input_data["knowledge_context"] == {
+        "citations": [
+            {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "document_name": "handbook.pdf",
+                "dataset_id": "dataset-1",
+                "content": "年假十天",
+                "score": 0.91,
+                "metadata": {"department": "HR"},
+            }
+        ]
+    }
+    async with factory() as session:
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+    assert [event.type for event in events] == [
+        EventType.RUN_STARTED,
+        EventType.KNOWLEDGE_RETRIEVED,
+        EventType.RUN_COMPLETED,
+    ]
+    assert events[1].payload == {
+        "citation_count": 1,
+        "citations": [
+            {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "document_name": "handbook.pdf",
+                "dataset_id": "dataset-1",
+                "content": "年假十天",
+                "score": 0.91,
+                "metadata": {"department": "HR"},
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_knowledge_event_survives_redelivery_without_duplicate_or_loss(factory) -> None:
+    """流收集瞬态失败后重投递：knowledge.retrieved 事件必须恰好持久化一次。"""
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "autonomous"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    resolver = Resolver(StreamFailingRuntime())
+    knowledge_context = RuntimeKnowledgeContext(
+        citations=(
+            KnowledgeCitation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_name="handbook.pdf",
+                dataset_id="dataset-1",
+                content="年假十天",
+                score=0.91,
+                metadata={},
+            ),
+        )
+    )
+    original_resolve = resolver.resolve
+
+    async def resolve_with_knowledge(run_arg: Run, definition: dict[str, object]) -> Prepared:
+        prepared = await original_resolve(run_arg, definition)
+        prepared.knowledge_context = knowledge_context
+        return prepared
+
+    resolver.resolve = resolve_with_knowledge  # type: ignore[method-assign]
+    queue = MessageQueue(
+        [
+            RunQueueDelivery(
+                delivery_id=delivery_id,
+                message=RunQueueMessage(
+                    command_id=command.id,
+                    run_id=run.id,
+                    tenant_id=run.tenant_id,
+                    action="start",
+                ),
+            )
+            for delivery_id in ("knowledge-stream-error", "knowledge-stream-retry")
+        ]
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=resolver,
+        consumer_name="test-worker",
+    )
+
+    with pytest.raises(RuntimeError, match="transient event stream failure"):
+        await worker.run_once(block_ms=1)
+
+    await worker.run_once(block_ms=1)
+
+    assert queue.acknowledged == ["knowledge-stream-retry"]
+    async with factory() as session:
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+    knowledge_events = [event for event in events if event.type is EventType.KNOWLEDGE_RETRIEVED]
+    assert len(knowledge_events) == 1
+    assert knowledge_events[0].payload["citation_count"] == 1
+
+
+def test_knowledge_event_id_is_deterministic_per_run_for_persistent_dedup() -> None:
+    """同一 run 重复生成的 knowledge 事件必须复用同一 event_id，依托持久去重。"""
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    prepared = Prepared(
+        runtime=CompletingRuntime(),
+        employee_definition={},
+        knowledge_context=RuntimeKnowledgeContext(citations=()),
+    )
+
+    first = RunWorker._knowledge_event(run, prepared)
+    second = RunWorker._knowledge_event(run, prepared)
+
+    assert first is not None and second is not None
+    assert first.event_id == second.event_id
+
+    other_run = Run.create(
+        tenant_id=run.tenant_id,
+        employee_id=run.employee_id,
+        employee_version=1,
+        created_by=run.created_by,
+        input_data={},
+    )
+    other = RunWorker._knowledge_event(other_run, prepared)
+    assert other is not None
+    assert other.event_id != first.event_id
 
 
 @pytest.mark.asyncio
@@ -2119,6 +2350,66 @@ async def test_permanent_preparation_failure_is_persisted_and_acknowledged(facto
     assert [(message.role, message.content, message.run_id) for message in messages] == [
         (ConversationMessageRole.ERROR, "invalid_runtime_definition", run.id)
     ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_knowledge_provider_fails_permanently_without_redelivery(factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    delivery = RunQueueDelivery(
+        delivery_id="knowledge-rejected-1",
+        message=RunQueueMessage(
+            command_id=command.id,
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action="start",
+        ),
+    )
+    queue = OneMessageQueue(delivery)
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=KnowledgeRejectedFailingResolver(),
+        consumer_name="test-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["knowledge-rejected-1"]
+    assert queue.dead_lettered == []
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        assert persisted is not None
+        assert persisted.status is RunStatus.FAILED
+        assert persisted.error_code == "knowledge_provider_rejected"
+        assert persisted.error_message is None
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        assert events[-1].payload == {"code": "knowledge_provider_rejected"}
+        assert "secret upstream detail" not in repr(events)
 
 
 @pytest.mark.asyncio
