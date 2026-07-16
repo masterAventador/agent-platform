@@ -114,6 +114,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '审计与观测' })).toBeInTheDocument()
     expect(await screen.findByRole('link', { name: '设备与平台账号' })).toHaveAttribute(
       'href',
       '/video/account',

@@ -18,6 +18,10 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
 
 service:
   extensions:
@@ -30,3 +34,17 @@ service:
         - batch
       exporters:
         - otlp/jaeger
+    metrics:
+      receivers:
+        - otlp
+      processors:
+        - batch
+      exporters:
+        - prometheus
+    logs:
+      receivers:
+        - otlp
+      processors:
+        - batch
+      exporters:
+        - otlphttp/loki

@@ -20,6 +20,8 @@ services:
     depends_on:
       jaeger:
         condition: service_started
+      loki:
+        condition: service_started
     ports:
       - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
       - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"
@@ -28,6 +30,64 @@ services:
       - ../observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
     read_only: true
     tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/tmp/prometheus
+    depends_on:
+      otel-collector:
+        condition: service_started
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_UI_PORT:-9090}:9090"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ../observability/loki.yml:/etc/loki/local-config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    depends_on:
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
+      prometheus:
+        condition: service_started
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
+    ports:
+      - "127.0.0.1:${GRAFANA_UI_PORT:-3000}:3000"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    read_only: true
+    tmpfs:
+      - /var/lib/grafana
       - /tmp
     security_opt:
       - no-new-privileges:true

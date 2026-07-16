@@ -40,6 +40,7 @@ class EventSourceStub {
   readonly url: string
   readonly withCredentials: boolean
   readonly addEventListener = vi.fn()
+  readonly removeEventListener = vi.fn()
   readonly close = vi.fn()
 
   constructor(url: string | URL, options?: EventSourceInit) {

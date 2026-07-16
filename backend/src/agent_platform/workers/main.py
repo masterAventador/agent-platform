@@ -8,6 +8,7 @@ from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol, cast
 from uuid import UUID
 
@@ -42,6 +43,8 @@ from agent_platform.infrastructure.object_storage.minio import (
     MinioSkillStorage,
 )
 from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue
+from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
+from agent_platform.observability.telemetry import configure_telemetry
 from agent_platform.platform.tool_gateway import (
     ToolDefinition,
     ToolGateway,
@@ -99,6 +102,7 @@ async def serve(
     block_ms: int = 5_000,
     retry_backoff_seconds: float = 1.0,
     heartbeat_interval_seconds: float | None = None,
+    metrics: OperationalMetrics | None = None,
 ) -> None:
     health.live = True
     health.ready = True
@@ -116,11 +120,33 @@ async def serve(
     try:
         while not stop_event.is_set():
             try:
-                await worker.run_once(block_ms=block_ms)
+                started = perf_counter()
+                processed = await worker.run_once(block_ms=block_ms)
+                if processed and metrics is not None:
+                    metrics.record(
+                        component=OperationalComponent.WORKER,
+                        operation="run",
+                        outcome="succeeded",
+                        duration_ms=(perf_counter() - started) * 1_000,
+                    )
             except WorkerFenced:
+                if metrics is not None:
+                    metrics.record(
+                        component=OperationalComponent.WORKER,
+                        operation="run",
+                        outcome="failed",
+                        duration_ms=(perf_counter() - started) * 1_000,
+                    )
                 logger.error("worker_runtime_ownership_fenced")
                 stop_event.set()
             except Exception as error:
+                if metrics is not None:
+                    metrics.record(
+                        component=OperationalComponent.WORKER,
+                        operation="run",
+                        outcome="failed",
+                        duration_ms=(perf_counter() - started) * 1_000,
+                    )
                 logger.error(
                     "worker_delivery_processing_failed error_type=%s",
                     type(error).__name__,
@@ -198,10 +224,13 @@ async def run_worker_service(
 
     initialize_database_metadata()
     app_settings = settings or AppSettings()
+    telemetry = configure_telemetry(app_settings)
+    telemetry.instrument_libraries()
     if runtime_resolver is None and model_resolver is None:
         await _assert_model_gateway_ready(
             settings=app_settings,
             readiness=gateway_readiness,
+            metrics=telemetry.operational_metrics,
         )
     if runtime_resolver is None:
         _assert_runtime_adapters_configured(app_settings)
@@ -215,6 +244,7 @@ async def run_worker_service(
         pending_min_idle_ms=app_settings.queue_pending_min_idle_ms,
         dead_letter_stream_name=app_settings.run_queue_dead_letter_stream_name,
         max_delivery_attempts=app_settings.queue_max_delivery_attempts,
+        metrics=telemetry.operational_metrics,
     )
     service_stop = stop_event or asyncio.Event()
     service_health = health or WorkerHealth()
@@ -232,6 +262,7 @@ async def run_worker_service(
                 session_factory=session_factory,
                 model_resolver=model_resolver,
                 checkpointer=checkpointer,
+                metrics=telemetry.operational_metrics,
             )
         else:
             resolver = runtime_resolver
@@ -259,6 +290,7 @@ async def run_worker_service(
             health=service_health,
             retry_backoff_seconds=app_settings.worker_retry_backoff_seconds,
             heartbeat_interval_seconds=app_settings.runtime_heartbeat_seconds,
+            metrics=telemetry.operational_metrics,
         )
     finally:
         ready_file.unlink(missing_ok=True)
@@ -266,6 +298,7 @@ async def run_worker_service(
         await checkpoint_stack.aclose()
         await redis.aclose()
         await engine.dispose()
+        telemetry.shutdown()
 
 
 async def check_worker_configuration(settings: AppSettings | None = None) -> None:
@@ -334,6 +367,7 @@ def _build_runtime_resolver(
     session_factory: async_sessionmaker[AsyncSession],
     model_resolver: PlatformModelResolver | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
+    metrics: OperationalMetrics | None = None,
 ) -> RuntimeResolver:
     if model_resolver is None:
         try:
@@ -348,7 +382,11 @@ def _build_runtime_resolver(
             )
         except ModelGatewayConfigurationError as error:
             raise WorkerConfigurationError("model gateway is not configured") from error
-    adapters = _load_runtime_adapters(settings, session_factory=session_factory)
+    adapters = _load_runtime_adapters(
+        settings,
+        session_factory=session_factory,
+        metrics=metrics,
+    )
     tool_reader = _SessionToolReader(session_factory)
     gateway = ToolGateway(
         executor=MCPToolExecutor(DatabaseMCPClientResolver(tool_reader)),
@@ -390,12 +428,14 @@ async def _assert_model_gateway_ready(
     *,
     settings: AppSettings,
     readiness: ModelGatewayReadiness | None = None,
+    metrics: OperationalMetrics | None = None,
 ) -> None:
     try:
         probe = readiness or LiteLLMGatewayReadinessProbe(
             base_url=settings.llm_gateway_url,
             api_key=settings.llm_gateway_api_key,
             timeout_seconds=settings.llm_gateway_readiness_timeout_seconds,
+            metrics=metrics,
         )
         await probe.assert_ready(settings.llm_gateway_allowed_aliases)
     except (ModelGatewayConfigurationError, ModelGatewayReadinessError) as error:
@@ -413,11 +453,13 @@ def _load_runtime_adapters(
     settings: AppSettings,
     *,
     session_factory: async_sessionmaker[AsyncSession],
+    metrics: OperationalMetrics | None = None,
 ) -> BuiltinRuntimeAdapters:
     try:
         return create_runtime_adapters(
             settings=settings,
             session_factory=session_factory,
+            metrics=metrics,
         )
     except (RuntimeAdapterConfigurationError, ValueError) as error:
         raise WorkerConfigurationError("builtin runtime adapters are not configured") from error

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import re
+from time import perf_counter
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -10,6 +11,7 @@ import httpx
 from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from deepagents.backends.sandbox import BaseSandbox
 
+from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 from agent_platform.sandbox.ports import ProviderSandbox, SandboxAcquireRequest
 
 _SANDBOX_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -168,6 +170,7 @@ class LocalControllerSandboxProvider:
         bearer_secret: str,
         transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         request_timeout_seconds: float = 130.0,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         parts = urlsplit(base_url)
         try:
@@ -193,22 +196,30 @@ class LocalControllerSandboxProvider:
         self._request_timeout = httpx.Timeout(request_timeout_seconds)
         self._transport = transport
         self._backends: dict[str, LocalControllerBackend] = {}
+        self._metrics = metrics
 
     async def acquire(self, request: SandboxAcquireRequest) -> ProviderSandbox:
-        async with self._async_client() as client:
-            response = await client.post(
-                "/v1/sandboxes",
-                json={
-                    "lease_id": str(request.lease_id),
-                    "sandbox_epoch": request.sandbox_epoch,
-                },
-            )
-            response.raise_for_status()
-            return self._sandbox(
-                response.json()["sandbox_id"],
-                lease_id=request.lease_id,
-                sandbox_epoch=request.sandbox_epoch,
-            )
+        started = perf_counter()
+        try:
+            async with self._async_client() as client:
+                response = await client.post(
+                    "/v1/sandboxes",
+                    json={
+                        "lease_id": str(request.lease_id),
+                        "sandbox_epoch": request.sandbox_epoch,
+                    },
+                )
+                response.raise_for_status()
+                sandbox = self._sandbox(
+                    response.json()["sandbox_id"],
+                    lease_id=request.lease_id,
+                    sandbox_epoch=request.sandbox_epoch,
+                )
+        except Exception:
+            self._record_metric("acquire", "failed", started)
+            raise
+        self._record_metric("acquire", "succeeded", started)
+        return sandbox
 
     async def reconnect(
         self,
@@ -217,28 +228,50 @@ class LocalControllerSandboxProvider:
         lease_id: UUID,
         sandbox_epoch: int,
     ) -> ProviderSandbox:
-        async with self._async_client(
-            lease_id=lease_id,
-            sandbox_epoch=sandbox_epoch,
-        ) as client:
-            response = await client.get(f"/v1/sandboxes/{sandbox_id}")
-            response.raise_for_status()
-            return self._sandbox(
-                response.json()["sandbox_id"],
+        started = perf_counter()
+        try:
+            async with self._async_client(
                 lease_id=lease_id,
                 sandbox_epoch=sandbox_epoch,
-            )
+            ) as client:
+                response = await client.get(f"/v1/sandboxes/{sandbox_id}")
+                response.raise_for_status()
+                sandbox = self._sandbox(
+                    response.json()["sandbox_id"],
+                    lease_id=lease_id,
+                    sandbox_epoch=sandbox_epoch,
+                )
+        except Exception:
+            self._record_metric("reconnect", "failed", started)
+            raise
+        self._record_metric("reconnect", "succeeded", started)
+        return sandbox
 
     async def delete(self, *, sandbox_id: str, lease_id: UUID, sandbox_epoch: int) -> None:
-        async with self._async_client(
-            lease_id=lease_id,
-            sandbox_epoch=sandbox_epoch,
-        ) as client:
-            response = await client.delete(f"/v1/sandboxes/{sandbox_id}")
-            response.raise_for_status()
-        backend = self._backends.pop(sandbox_id, None)
-        if backend is not None:
-            await backend.aclose()
+        started = perf_counter()
+        try:
+            async with self._async_client(
+                lease_id=lease_id,
+                sandbox_epoch=sandbox_epoch,
+            ) as client:
+                response = await client.delete(f"/v1/sandboxes/{sandbox_id}")
+                response.raise_for_status()
+            backend = self._backends.pop(sandbox_id, None)
+            if backend is not None:
+                await backend.aclose()
+        except Exception:
+            self._record_metric("delete", "failed", started)
+            raise
+        self._record_metric("delete", "succeeded", started)
+
+    def _record_metric(self, operation: str, outcome: str, started: float) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                component=OperationalComponent.SANDBOX,
+                operation=operation,
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1_000,
+            )
 
     async def discover(self, *, lease_id: UUID, sandbox_epoch: int) -> list[str]:
         async with self._async_client() as client:
