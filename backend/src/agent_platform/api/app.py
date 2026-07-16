@@ -1,11 +1,11 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from fastapi import FastAPI, Request, status
+from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
@@ -70,6 +70,7 @@ def create_app(
     skill_storage: SkillStorage | None = None,
     artifact_storage: ArtifactStorageProvider | None = None,
     telemetry: Telemetry | None = None,
+    extra_routers: Sequence[APIRouter] = (),
 ) -> FastAPI:
     initialize_database_metadata()
     app_settings = settings or AppSettings()
@@ -215,6 +216,8 @@ def create_app(
     app.include_router(mcp_router)
     app.include_router(tool_router)
     app.include_router(model_gateway_router)
+    for router in extra_routers:
+        app.include_router(router)
     app.include_router(workbench_router)
 
     @app.exception_handler(KnowledgeProviderUnavailable)
