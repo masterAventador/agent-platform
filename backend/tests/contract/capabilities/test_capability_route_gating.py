@@ -225,3 +225,55 @@ async def test_core_flows_remain_available_without_capability(
     assert skills.status_code == 200
     tools = await core_only_harness.client.get("/api/v1/tools", headers=headers)
     assert tools.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_audit_flush_failure_after_business_success_returns_500(
+    capability_harness: CapabilityHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """业务成功但审计桥接失败时必须显式 500，禁止静默丢审计。
+
+    已知不一致语义（记录于 roadmap C17）：能力服务的业务副作用（内存/SQLite 状态）
+    已发生，客户端却收到 500；重试同一 device_id 会得到 409。设备注册幂等化是 follow-up。
+    """
+
+    current = await capability_harness.register_and_login(f"owner-{uuid4()}@example.com")
+    tenant_id = current["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    await _grant_social(capability_harness, headers)
+
+    import agent_platform.api.dependencies.capabilities as capability_dependencies
+
+    async def broken_emit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("audit store unavailable")
+
+    monkeypatch.setattr(capability_dependencies, "emit_audit_event", broken_emit)
+
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=capability_harness.app, raise_app_exceptions=False)
+    payload = _register_device_payload()
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        cookies=capability_harness.client.cookies,
+    ) as raw_client:
+        response = await raw_client.post(
+            "/api/v1/social-operations/devices/register",
+            headers=headers,
+            json=payload,
+        )
+        assert response.status_code == 500
+        assert response.json()["detail"]["code"] == "capability_audit_flush_failed"
+
+    # 审计事件必须没有落库（失败即失败，不允许半写）。
+    events = await capability_harness.client.get(
+        "/api/v1/audit/events",
+        headers=headers,
+        params={"action": "social.device.registered"},
+    )
+    assert events.status_code == 200
+    assert [
+        event for event in events.json() if event["action"] == "social.device.registered"
+    ] == []

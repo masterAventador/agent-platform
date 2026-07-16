@@ -43,6 +43,7 @@ class CapabilityRequestContext:
     tenant_id: UUID
     user_id: UUID
     permissions: frozenset[str]
+    session_factory: object = None
     audit_events: list[CapabilityAuditEvent] = field(default_factory=list)
 
 

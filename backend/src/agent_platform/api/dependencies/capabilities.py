@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import AbstractAsyncContextManager, suppress
 from datetime import UTC, datetime
-from typing import Any
+from functools import wraps
+from typing import Any, cast
 from uuid import UUID
 
-from fastapi import HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.routing import APIRoute
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.capabilities.manifest import CapabilityManifest
 from agent_platform.capabilities.request_context import (
     CapabilityRequestContext,
     bind_capability_request_context,
+    require_capability_request_context,
     reset_capability_request_context,
 )
 from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
@@ -26,6 +32,7 @@ from agent_platform.platform.users.entities import User
 logger = logging.getLogger(__name__)
 
 CapabilityGateDependency = Callable[[Request], AsyncIterator[None]]
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
 def parse_tenant_header(request: Request) -> UUID | None:
@@ -128,42 +135,82 @@ def create_capability_gate(
             tenant_id=access.tenant.id,
             user_id=user.id,
             permissions=permissions,
+            session_factory=request.app.state.session_factory,
         )
         token = bind_capability_request_context(context)
-        endpoint_failed = False
         try:
             yield
-        except BaseException:
-            endpoint_failed = True
-            raise
         finally:
             reset_capability_request_context(token)
-            try:
-                await _flush_capability_audit_events(request, context)
-            except Exception:
-                logger.exception(
-                    "capability_audit_flush_failed",
-                    extra={"capability_id": manifest.capability_id},
+            if context.audit_events:
+                # 审计必须在响应发出前由 endpoint 包装层落库（见
+                # wrap_capability_router）；此处残留说明装配错误，禁止静默丢失。
+                logger.error(
+                    "capability_audit_events_left_unflushed",
+                    extra={
+                        "capability_id": manifest.capability_id,
+                        "event_count": len(context.audit_events),
+                    },
                 )
-                if not endpoint_failed:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": "capability_audit_flush_failed",
-                            "message": "能力审计写入失败，操作结果不可确认",
-                        },
-                    ) from None
 
     return capability_gate  # type: ignore[return-value]
 
 
-async def _flush_capability_audit_events(
-    request: Request,
-    context: CapabilityRequestContext,
-) -> None:
+def wrap_capability_router(router: APIRouter) -> APIRouter:
+    """Rebuild a capability router so audit flush happens before the response.
+
+    本版 FastAPI 的 yield 依赖 teardown 在响应发送之后执行，无法把审计失败
+    转成 5xx；因此在 endpoint 层包装：业务成功 → flush 失败必须 500。
+    """
+
+    wrapped_router = APIRouter()
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            raise TypeError("capability routers must only contain API routes")
+        wrapped_router.add_api_route(
+            route.path,
+            _wrap_capability_endpoint(route.endpoint),
+            methods=sorted(route.methods or set()),
+            status_code=route.status_code,
+            name=route.name,
+        )
+    return wrapped_router
+
+
+def _wrap_capability_endpoint(endpoint: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(endpoint)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            result = await run_in_threadpool(endpoint, *args, **kwargs)
+        except BaseException:
+            # 失败路径尽力落库已发生的审计事件，但不掩盖业务异常。
+            with suppress(Exception):
+                await flush_pending_capability_audit_events()
+            raise
+        try:
+            await flush_pending_capability_audit_events()
+        except Exception:
+            logger.exception("capability_audit_flush_failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "capability_audit_flush_failed",
+                    "message": "能力审计写入失败，操作结果不可确认",
+                },
+            ) from None
+        return result
+
+    return wrapped
+
+
+async def flush_pending_capability_audit_events() -> None:
+    context = require_capability_request_context()
     if not context.audit_events:
         return
-    async with request.app.state.session_factory() as database_session:
+    session_factory = cast(SessionFactory | None, context.session_factory)
+    if session_factory is None:
+        raise RuntimeError("capability request context has no session factory")
+    async with session_factory() as database_session:
         for event in context.audit_events:
             if event.tenant_id != context.tenant_id:
                 raise RuntimeError("capability audit event crossed tenant boundary")
@@ -177,3 +224,4 @@ async def _flush_capability_audit_events(
                 metadata={key: value for key, value in event.details},
             )
         await database_session.commit()
+    context.audit_events.clear()

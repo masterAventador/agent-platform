@@ -155,6 +155,7 @@ async def grant_entitlement(
     tenant_id: TenantHeader = None,
 ) -> EntitlementResponse:
     _require_known_capability(request, capability_id)
+    _require_installed_capability(request, capability_id)
     now = datetime.now(UTC)
     try:
         validate_entitlement_source(payload.source)
@@ -250,4 +251,16 @@ def _require_known_capability(request: Request, capability_id: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "capability_unknown", "message": "未知能力"},
+        )
+
+
+def _require_installed_capability(request: Request, capability_id: str) -> None:
+    host = request.app.state.capability_host
+    if capability_id not in host.installed_capability_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "capability_not_installed",
+                "message": "当前部署未安装此能力，无法授予",
+            },
         )

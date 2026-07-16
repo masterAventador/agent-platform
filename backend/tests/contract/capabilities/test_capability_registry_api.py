@@ -306,9 +306,11 @@ async def test_grant_validation_and_authorization_failures(
 
 
 @pytest.mark.asyncio
-async def test_video_studio_entitlement_can_be_granted_but_stays_uninstalled(
+async def test_grant_rejects_capability_not_installed_in_deployment(
     capability_harness: CapabilityHarness,
 ) -> None:
+    """L3 硬化：Entitlement 只能授予当前部署已安装的能力，fail-closed。"""
+
     owner = await capability_harness.register_and_login(f"owner-{uuid4()}@example.com")
     tenant_id = owner["workspaces"][0]["id"]
     headers = {"X-Tenant-ID": tenant_id}
@@ -318,7 +320,15 @@ async def test_video_studio_entitlement_can_be_granted_but_stays_uninstalled(
         headers=headers,
         json={},
     )
-    assert grant.status_code == 200
+    assert grant.status_code == 409
+    assert grant.json()["detail"]["code"] == "capability_not_installed"
+
+    listed = await capability_harness.client.get(
+        "/api/v1/capabilities/entitlements",
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    assert listed.json() == []
 
     registry = await capability_harness.client.get(
         "/api/v1/capabilities/registry",
@@ -332,3 +342,19 @@ async def test_video_studio_entitlement_can_be_granted_but_stays_uninstalled(
     me = await capability_harness.client.get("/api/v1/auth/me")
     permissions = set(me.json()["workspaces"][0]["permissions"])
     assert not any(permission.startswith("video.") for permission in permissions)
+
+
+@pytest.mark.asyncio
+async def test_core_only_profile_rejects_all_entitlement_grants(
+    core_only_harness: CapabilityHarness,
+) -> None:
+    owner = await core_only_harness.register_and_login(f"owner-{uuid4()}@example.com")
+    tenant_id = owner["workspaces"][0]["id"]
+
+    grant = await core_only_harness.client.put(
+        "/api/v1/capabilities/entitlements/social-operations",
+        headers={"X-Tenant-ID": tenant_id},
+        json={},
+    )
+    assert grant.status_code == 409
+    assert grant.json()["detail"]["code"] == "capability_not_installed"

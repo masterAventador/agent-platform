@@ -14,7 +14,10 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from agent_platform.api.dependencies.capabilities import create_capability_gate
+from agent_platform.api.dependencies.capabilities import (
+    create_capability_gate,
+    wrap_capability_router,
+)
 from agent_platform.api.middleware.request_body_limit import (
     FileUploadRequestBodyLimitMiddleware,
 )
@@ -312,7 +315,7 @@ def create_app(
     app.state.capability_catalog = installed_capabilities.catalog
     for registration in installed_capabilities.registrations:
         app.include_router(
-            registration.create_router(registration.settings),
+            wrap_capability_router(registration.create_router(registration.settings)),
             dependencies=[Depends(create_capability_gate(registration.manifest))],
         )
 

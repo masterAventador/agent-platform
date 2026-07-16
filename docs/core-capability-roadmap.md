@@ -74,7 +74,7 @@
 | 审计与可观测性 | 进行中 | C14 已合入主线：审计协议、哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口；S7 经 HMAC 密钥签名加固大幅收窄（剩余威胁面：持有服务端密钥的攻击者、整库回滚到历史合法快照——后者需外部锚定，均归 C18）；隔离验收栈完整回归前不标记完成 | C14 |
 | 企业与账号管理 | 部分完成 | 缺成员邀请、角色管理、密码找回、验证、SSO/MFA | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
-| Capability/Entitlement | 未实现 | 无能力注册表、企业授权、交付 Profile 和三层启用校验 | C17 |
+| Capability/Entitlement | 🧪 待集成（`task/c17-entitlements` 分支已实现，待合入主线与 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已在分支落地；Core+视频组合与 Worker 侧接线待 B04 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
 | 协议契约自动化 | 部分完成 | 缺 OpenAPI 快照、TS 生成、事件全量导出和漂移检查 | C19 |
 | 发布、升级与灾备 | 未实现 | 缺签名、公证、自动更新、灰度、备份、恢复、HA 和容灾 | C20 |
@@ -410,7 +410,16 @@
 - Demo Seed 以稳定 ID 幂等授予演示租户 social-operations（source=demo-seed）；
 - 组合矩阵：Core-only 与 Core+social 由契约测试覆盖（Core-only 下登录/员工/知识/Skill/Tool 全部可用、social 路由 404、registry 为空）；Core+视频与目标客户组合待 B04 合入后补；
 - 验证命令：`uv run pytest tests/unit tests/contract tests/integration/database tests/integration/bootstrap -q`（971 passed）、`uv run ruff check .`、`uv run mypy`（0 错误）、`pnpm test`（43 文件 199 用例）、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 Playwright `capability-entitlements.spec.ts + social-operations.spec.ts`（5 passed，随机项目名/端口，验后自动销毁）；
-- 待集成项：① B04 合入后补 video-studio 后端宿主接线与 Core+视频组合矩阵；② Worker 侧尚无能力任务处理器（social.jobs.v1 未在主线实现），`evaluate_capability_availability` 已作为 API/Worker 共用判定源导出，B04/B08 Worker 接入时必须复用；③ 迁移 down_revision 由主代理合并时重链到 `20260716_0025`；④ Sidecar 下载与云凭据签发的未授权拦截随对应能力落地时接入同一 gate。
+- 待集成项：① B04 合入后补 video-studio 后端宿主接线与 Core+视频组合矩阵；② Worker 侧尚无能力任务处理器（social.jobs.v1 未在主线实现），`evaluate_capability_availability` 已作为 API/Worker 共用判定源导出，B04/B08 Worker 接入时必须复用；③ Sidecar 下载与云凭据签发的未授权拦截随对应能力落地时接入同一 gate。
+
+复审修复记录（2026-07-16，双复审后集中修复，本任务提交）：
+
+- C1 迁移多头：已在分支内合并 origin/main（含 C14 HMAC 加固 `20260716_0025`），`20260716_0026` 的 down_revision 重链至 `20260716_0025`，迁移测试 head 断言同步更新；
+- I2 审计桥接语义：实测本版 FastAPI 的 yield 依赖 teardown 在响应发送之后执行，原 teardown 抛 500 会被吞（客户端 201、审计静默丢失）；已改为 endpoint 包装层在响应构造前 flush（`wrap_capability_router`），业务成功但审计写入失败时客户端收到显式 500（`capability_audit_flush_failed`）且审计不落半写。**已知不一致语义**：能力服务的业务副作用（如设备注册的内存/SQLite 状态）此时已持久化，客户端 500 后重试同一 device_id 会得到 409；运维补偿 = 依据 500 响应与 `capability_audit_flush_failed` 日志人工核对，设备注册幂等化（同租户同 device_id 重放返回既有记录）列为 follow-up；
+- I1/L3 硬化：Entitlement 授予新增部署安装校验，对未安装能力（含 Core-only Profile 下所有能力）授予返回 409 `capability_not_installed`，fail-closed；
+- 授权治理定位（主代理拍板）：**当前 Entitlement 由租户 Owner（`workspace.manage`）自助管理，不构成商业购买闸门；平台运营方/计费侧闸门待 C15/C18 收紧**；
+- 完成定义第 7 条中「交付 Profile 变更」的审计：部署安装清单（`AGENT_PLATFORM_INSTALLED_CAPABILITIES`）属部署层环境配置，其变更发生在进程外，无租户内审计主体，归 C18/运维域（部署配置变更留痕）处理；租户可见的授权/撤销已全部接入 C14 审计；
+- 记录项：L1 registry 对未授权租户返回的裸条目（capability_id + 安装布尔）暴露部署拓扑——MVP 接受，前端需要该信息区分「未授权」与「未安装」语义；L2 前端 registry 响应任一条目畸形即整表解析失败（fail-closed 优先，接受单能力故障放大为全部能力不可用）；L4 登录/`/auth/me` 的能力权限附加为每工作区×每能力逐条查询（N+1），当前安装能力数 ≤2 可接受，能力包增多时改批量查询（follow-up）。
 
 完成定义：
 
