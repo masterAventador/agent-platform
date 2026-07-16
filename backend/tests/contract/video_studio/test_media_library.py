@@ -18,9 +18,6 @@ from agent_platform.capabilities.video_studio.media_library import (
 from agent_platform.capabilities.video_studio.persistence import (
     SqlAlchemyMediaLibraryRepository,
 )
-from agent_platform.capabilities.video_studio.registration import (
-    VIDEO_STUDIO_BACKEND_REGISTRATION as VIDEO_STUDIO_REGISTRATION,
-)
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
@@ -92,14 +89,15 @@ async def media_library_api() -> AsyncIterator[
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     load_database_models()
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    # 生产装配：video-studio 经安装清单 + capability gate 挂载，不再测试侧挂路由。
     app = create_app(
-        settings=AppSettings(auth_cookie_secure=False),
+        settings=AppSettings(
+            auth_cookie_secure=False,
+            installed_capabilities=("social-operations", "video-studio"),
+        ),
         session_factory=sessions,
         auth_rate_limiter=AllowAllRateLimiter(),
     )
-    # 三层授权生产装配（C17 gate 接线）完成前，契约测试直接挂载能力路由。
-    for capability_router in VIDEO_STUDIO_REGISTRATION.routers:
-        app.include_router(capability_router)
     verifier = ConfigurableObjectVerifier()
     app.state.video_material_upload_credential_issuer = RecordingCredentialIssuer()
     app.state.video_material_object_verifier = verifier
@@ -116,10 +114,20 @@ async def media_library_api() -> AsyncIterator[
 
 
 async def register(client: AsyncClient, email: str) -> dict[str, Any]:
+    """注册并登录一个新 Owner，同时为其默认工作区授予 video-studio Entitlement。"""
+
     credentials = {"email": email, "password": "correct horse battery staple"}
     assert (await client.post("/api/v1/auth/register", json=credentials)).status_code == 201
     assert (await client.post("/api/v1/auth/login", json=credentials)).status_code == 200
-    return (await client.get("/api/v1/auth/me")).json()
+    identity = (await client.get("/api/v1/auth/me")).json()
+    tenant_id = identity["workspaces"][0]["id"]
+    grant = await client.put(
+        "/api/v1/capabilities/entitlements/video-studio",
+        headers={"X-Tenant-ID": tenant_id},
+        json={},
+    )
+    assert grant.status_code == 200
+    return identity
 
 
 @pytest.mark.asyncio
@@ -654,3 +662,167 @@ async def test_upload_credentials_accept_material_at_exact_size_limit(
     material = accepted.json()["material"]
     assert material["size_bytes"] == MAX_MATERIAL_SIZE_BYTES
     assert material["status"] == "pending_upload"
+
+
+async def _insert_artifact(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: str,
+    created_by: str,
+    size_bytes: int,
+) -> str:
+    """直接落一条成片（Core Artifact）测试数据：run + artifact。"""
+
+    from datetime import UTC, datetime
+
+    from agent_platform.infrastructure.database.repositories.artifacts import ArtifactRecord
+    from agent_platform.infrastructure.database.repositories.runs import RunRecord
+
+    now = datetime.now(UTC)
+    run_id = uuid4()
+    artifact_id = uuid4()
+    async with sessions() as session:
+        session.add(
+            RunRecord(
+                id=run_id,
+                tenant_id=UUID(tenant_id),
+                employee_id=uuid4(),
+                employee_version=1,
+                created_by=UUID(created_by),
+                thread_id=f"contract-thread-{run_id}",
+                input_data={},
+                status="completed",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            ArtifactRecord(
+                id=artifact_id,
+                tenant_id=UUID(tenant_id),
+                run_id=run_id,
+                created_by=UUID(created_by),
+                name="render-output.mp4",
+                media_type="video/mp4",
+                size_bytes=size_bytes,
+                sha256="f" * 64,
+                storage_key=f"artifacts/{tenant_id}/{artifact_id}/render-output.mp4",
+                created_at=now,
+            )
+        )
+        await session.commit()
+    return str(artifact_id)
+
+
+@pytest.mark.asyncio
+async def test_download_task_supports_artifact_source_over_api(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    """成片下载真实链路：创建 → 开始 → 完成；跨租户成片与未知来源受控拒绝。"""
+
+    _, sessions, owner, outsider, _ = media_library_api
+    owner_identity = await register(owner, "artifact-download-owner@example.com")
+    outsider_identity = await register(outsider, "artifact-download-outsider@example.com")
+    tenant_id = owner_identity["workspaces"][0]["id"]
+    outsider_tenant_id = outsider_identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+
+    artifact_id = await _insert_artifact(
+        sessions,
+        tenant_id=tenant_id,
+        created_by=owner_identity["id"],
+        size_bytes=2048,
+    )
+
+    created = await owner.post(
+        "/api/v1/video-studio/download-tasks",
+        headers=headers,
+        json={"source_type": "artifact", "source_id": artifact_id},
+    )
+    assert created.status_code == 201
+    task = created.json()
+    assert task["source_type"] == "artifact"
+    assert task["total_bytes"] == 2048
+    assert task["status"] == "queued"
+
+    assert (
+        await owner.post(
+            f"/api/v1/video-studio/download-tasks/{task['id']}/start",
+            headers=headers,
+        )
+    ).status_code == 200
+    completed = await owner.post(
+        f"/api/v1/video-studio/download-tasks/{task['id']}/complete",
+        headers=headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "succeeded"
+    assert completed.json()["downloaded_bytes"] == 2048
+
+    cross_tenant = await outsider.post(
+        "/api/v1/video-studio/download-tasks",
+        headers={"X-Tenant-ID": outsider_tenant_id},
+        json={"source_type": "artifact", "source_id": artifact_id},
+    )
+    assert cross_tenant.status_code == 404
+
+    unknown_source = await owner.post(
+        "/api/v1/video-studio/download-tasks",
+        headers=headers,
+        json={"source_type": "bogus", "source_id": artifact_id},
+    )
+    assert unknown_source.status_code == 422
+    assert unknown_source.json()["detail"]["code"] == "invalid_video_material_input"
+
+
+@pytest.mark.asyncio
+async def test_sts_issue_failure_maps_to_controlled_503(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    """STS 上游签发失败必须受控 503，而不是把上游异常放大成 500。"""
+
+    from agent_platform.capabilities.video_studio.storage_credentials import (
+        MaterialStorageCredentialsUnavailable,
+    )
+
+    class BrokenIssuer:
+        async def issue_upload_credentials(self, **kwargs):
+            raise MaterialStorageCredentialsUnavailable("腾讯云 STS 临时凭证签发失败")
+
+    app, _, owner, _, _ = media_library_api
+    identity = await register(owner, "sts-failure-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+    app.state.video_material_upload_credential_issuer = BrokenIssuer()
+
+    response = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers={"X-Tenant-ID": tenant_id},
+        json={
+            "name": "sts-broken.mp4",
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": 1000,
+            "sha256": "e" * 64,
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "video_material_sts_unavailable"
+
+    # 失败后素材草稿不得残留为可见素材。
+    listed = await owner.get(
+        "/api/v1/video-studio/materials",
+        headers={"X-Tenant-ID": tenant_id},
+    )
+    assert listed.json()["items"] == []

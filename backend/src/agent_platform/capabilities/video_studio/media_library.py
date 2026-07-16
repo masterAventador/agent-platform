@@ -227,6 +227,47 @@ class MaterialUploadDraft:
     credentials: IssuedUploadCredentials
 
 
+@dataclass(frozen=True, slots=True)
+class MediaLibraryAuditEvent:
+    """素材库关键操作的脱敏审计事件（桥接 C14 统一审计协议）。
+
+    details 只允许携带业务标识与摘要字段，禁止放入临时凭据、
+    session token 或对象摘要（sha256）等敏感内容。
+    """
+
+    event_id: UUID
+    action: str
+    tenant_id: UUID
+    actor_user_id: UUID
+    resource_id: UUID
+    occurred_at: datetime
+    details: tuple[tuple[str, str], ...]
+
+
+class MaterialAuditSink(Protocol):
+    def record(self, event: MediaLibraryAuditEvent) -> None: ...
+
+
+DOWNLOAD_SOURCE_MATERIAL = "material"
+DOWNLOAD_SOURCE_ARTIFACT = "artifact"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedDownloadSource:
+    """成片（Core Artifact）来源解析结果：只暴露下载所需的可信元数据。"""
+
+    size_bytes: int
+
+
+class ArtifactDownloadSourceResolver(Protocol):
+    async def resolve_artifact(
+        self,
+        *,
+        tenant_id: UUID,
+        artifact_id: UUID,
+    ) -> ResolvedDownloadSource | None: ...
+
+
 class MaterialRepository(Protocol):
     async def add_folder(self, folder: MaterialFolder) -> None: ...
 
@@ -405,6 +446,8 @@ class MediaLibraryService:
         object_verifier: MaterialObjectVerifier,
         object_cleaner: MaterialObjectCleaner | None = None,
         preview_issuer: MaterialPreviewUrlIssuer | None = None,
+        audit_sink: MaterialAuditSink | None = None,
+        artifact_source_resolver: ArtifactDownloadSourceResolver | None = None,
         clock: Callable[[], datetime] | None = None,
         upload_credential_ttl: timedelta = DEFAULT_UPLOAD_CREDENTIAL_TTL,
     ) -> None:
@@ -415,6 +458,8 @@ class MediaLibraryService:
         self._object_verifier = object_verifier
         self._object_cleaner = object_cleaner
         self._preview_issuer = preview_issuer
+        self._audit_sink = audit_sink
+        self._artifact_source_resolver = artifact_source_resolver
         self._clock = clock or (lambda: datetime.now(UTC))
         self._upload_credential_ttl = upload_credential_ttl
 
@@ -426,6 +471,8 @@ class MediaLibraryService:
         object_verifier: MaterialObjectVerifier,
         object_cleaner: MaterialObjectCleaner | None = None,
         preview_issuer: MaterialPreviewUrlIssuer | None = None,
+        audit_sink: MaterialAuditSink | None = None,
+        artifact_source_resolver: ArtifactDownloadSourceResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> MediaLibraryService:
         return cls(
@@ -434,7 +481,32 @@ class MediaLibraryService:
             object_verifier=object_verifier,
             object_cleaner=object_cleaner,
             preview_issuer=preview_issuer,
+            audit_sink=audit_sink,
+            artifact_source_resolver=artifact_source_resolver,
             clock=clock,
+        )
+
+    def _record_audit(
+        self,
+        *,
+        action: str,
+        tenant_id: UUID,
+        actor_id: UUID,
+        resource_id: UUID,
+        details: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        self._audit_sink.record(
+            MediaLibraryAuditEvent(
+                event_id=uuid4(),
+                action=action,
+                tenant_id=tenant_id,
+                actor_user_id=actor_id,
+                resource_id=resource_id,
+                occurred_at=self._clock(),
+                details=details,
+            )
         )
 
     async def create_folder(
@@ -507,6 +579,17 @@ class MediaLibraryService:
             expires_at=expires_at,
             allowed_actions=MATERIAL_UPLOAD_ACTIONS,
         )
+        self._record_audit(
+            action="video.material.upload_requested",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=material.id,
+            details=(
+                ("name", material.name),
+                ("kind", material.kind.value),
+                ("size_bytes", str(material.size_bytes)),
+            ),
+        )
         return MaterialUploadDraft(material=material, credentials=credentials)
 
     async def get_material(self, *, tenant_id: UUID, material_id: UUID) -> Material:
@@ -545,7 +628,6 @@ class MediaLibraryService:
         actor_id: UUID,
         material_id: UUID,
     ) -> Material:
-        del actor_id
         material = await self.get_material(tenant_id=tenant_id, material_id=material_id)
         now = self._clock()
         if _as_utc(now) > _as_utc(material.upload_expires_at):
@@ -581,6 +663,16 @@ class MediaLibraryService:
             updated_at=now,
         )
         await self._repository.update_material(completed)
+        self._record_audit(
+            action="video.material.upload_completed",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=completed.id,
+            details=(
+                ("name", completed.name),
+                ("status", completed.status),
+            ),
+        )
         return completed
 
     async def abort_upload(
@@ -631,6 +723,7 @@ class MediaLibraryService:
         self,
         *,
         tenant_id: UUID,
+        actor_id: UUID,
         material_id: UUID,
         reference_type: str,
         reference_id: UUID,
@@ -645,6 +738,16 @@ class MediaLibraryService:
             created_at=self._clock(),
         )
         await self._repository.add_reference(reference)
+        self._record_audit(
+            action="video.material.reference_created",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=material_id,
+            details=(
+                ("reference_type", reference.reference_type),
+                ("reference_id", str(reference.reference_id)),
+            ),
+        )
         return reference
 
     async def list_references(
@@ -660,7 +763,6 @@ class MediaLibraryService:
         )
 
     async def delete_material(self, *, tenant_id: UUID, actor_id: UUID, material_id: UUID) -> None:
-        del actor_id
         material = await self.get_material(tenant_id=tenant_id, material_id=material_id)
         if await self._repository.count_references(tenant_id=tenant_id, material_id=material_id):
             raise MaterialInUseError("素材仍被引用")
@@ -672,6 +774,13 @@ class MediaLibraryService:
                 cleanup_required=True,
                 updated_at=self._clock(),
             )
+        )
+        self._record_audit(
+            action="video.material.deleted",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=material.id,
+            details=(("name", material.name),),
         )
 
     async def cleanup_material_object(
@@ -710,11 +819,23 @@ class MediaLibraryService:
         source_type: str,
         source_id: UUID,
     ) -> DownloadTask:
-        if source_type != "material":
-            raise InvalidMaterialInput("下载来源暂只支持素材")
-        material = await self.get_material(tenant_id=tenant_id, material_id=source_id)
-        if material.status != "available":
-            raise InvalidMaterialInput("素材尚不可下载")
+        if source_type == DOWNLOAD_SOURCE_MATERIAL:
+            material = await self.get_material(tenant_id=tenant_id, material_id=source_id)
+            if material.status != "available":
+                raise InvalidMaterialInput("素材尚不可下载")
+            total_bytes = material.size_bytes
+        elif source_type == DOWNLOAD_SOURCE_ARTIFACT:
+            if self._artifact_source_resolver is None:
+                raise RuntimeError("成片下载来源解析器未配置")
+            source = await self._artifact_source_resolver.resolve_artifact(
+                tenant_id=tenant_id,
+                artifact_id=source_id,
+            )
+            if source is None:
+                raise MaterialNotFoundError("成片不存在")
+            total_bytes = source.size_bytes
+        else:
+            raise InvalidMaterialInput("下载来源类型无效")
         now = self._clock()
         task = DownloadTask(
             id=uuid4(),
@@ -725,7 +846,7 @@ class MediaLibraryService:
             status=DownloadTaskStatus.QUEUED,
             progress=0,
             downloaded_bytes=0,
-            total_bytes=material.size_bytes,
+            total_bytes=total_bytes,
             resume_token=None,
             error_code=None,
             retryable=False,
@@ -736,6 +857,16 @@ class MediaLibraryService:
             completed_at=None,
         )
         await self._repository.add_download_task(task)
+        self._record_audit(
+            action="video.download_task.created",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=task.id,
+            details=(
+                ("source_type", task.source_type),
+                ("source_id", str(task.source_id)),
+            ),
+        )
         return task
 
     async def start_download_task(self, *, tenant_id: UUID, task_id: UUID) -> DownloadTask:
@@ -837,7 +968,7 @@ class MediaLibraryService:
         if task.status not in {DownloadTaskStatus.QUEUED, DownloadTaskStatus.RUNNING}:
             raise InvalidDownloadTaskTransition("只有排队中或运行中的下载任务可以取消")
         now = self._clock()
-        return await self._update_download_task(
+        cancelled = await self._update_download_task(
             replace(
                 task,
                 status=DownloadTaskStatus.CANCELLED,
@@ -846,6 +977,14 @@ class MediaLibraryService:
                 completed_at=now,
             )
         )
+        self._record_audit(
+            action="video.download_task.cancelled",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=cancelled.id,
+            details=(("source_type", cancelled.source_type),),
+        )
+        return cancelled
 
     async def retry_download_task(
         self,
@@ -860,7 +999,7 @@ class MediaLibraryService:
             raise MaterialNotFoundError("下载任务不存在")
         if task.status is not DownloadTaskStatus.FAILED or not task.retryable:
             raise InvalidDownloadTaskTransition("只有可重试的失败任务可以重试")
-        return await self._update_download_task(
+        retried = await self._update_download_task(
             replace(
                 task,
                 requested_by=actor_id,
@@ -872,6 +1011,14 @@ class MediaLibraryService:
                 completed_at=None,
             )
         )
+        self._record_audit(
+            action="video.download_task.retried",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            resource_id=retried.id,
+            details=(("retry_count", str(retried.retry_count)),),
+        )
+        return retried
 
     async def list_download_tasks(self, *, tenant_id: UUID) -> list[DownloadTask]:
         return sorted(

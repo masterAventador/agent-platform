@@ -31,8 +31,10 @@ from agent_platform.capabilities.video_studio.media_library import (
     MaterialKind,
     MaterialReference,
     MaterialReferenceAlreadyExistsError,
+    ResolvedDownloadSource,
 )
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.artifacts import ArtifactRecord
 
 
 class VideoMaterialFolderRecord(Base):
@@ -415,3 +417,31 @@ def _record_to_download_task(record: VideoDownloadTaskRecord) -> DownloadTask:
         updated_at=record.updated_at,
         completed_at=record.completed_at,
     )
+
+
+class SqlAlchemyArtifactDownloadSourceResolver:
+    """成片（Core Artifact）下载来源解析：按租户读取可信产物元数据。
+
+    只依赖 Core 公开的产物存储模型；不读取产物内容，也不放宽租户隔离。
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def resolve_artifact(
+        self,
+        *,
+        tenant_id: UUID,
+        artifact_id: UUID,
+    ) -> ResolvedDownloadSource | None:
+        record = (
+            await self._session.execute(
+                select(ArtifactRecord).where(
+                    ArtifactRecord.tenant_id == tenant_id,
+                    ArtifactRecord.id == artifact_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if record is None:
+            return None
+        return ResolvedDownloadSource(size_bytes=record.size_bytes)

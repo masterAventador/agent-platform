@@ -39,6 +39,9 @@ from agent_platform.capabilities.video_studio.manifest import VIDEO_STUDIO_MANIF
 from agent_platform.capabilities.video_studio.registration import (
     VIDEO_STUDIO_BACKEND_REGISTRATION,
 )
+from agent_platform.capabilities.video_studio.tencent_sts import (
+    TencentStsMaterialUploadCredentialIssuer,
+)
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.models import load_database_models
 
@@ -87,6 +90,11 @@ def load_all_database_models() -> None:
             )
 
 
+def _no_extra_state(settings: AppSettings) -> Mapping[str, object]:
+    del settings
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class BackendCapabilityRegistration:
     """One installed capability plus its backend router factory."""
@@ -94,6 +102,9 @@ class BackendCapabilityRegistration:
     manifest: CapabilityManifest
     settings: AppSettings
     create_router: Callable[[AppSettings], APIRouter]
+    # 能力包生产装配所需的 app.state 注入（如真实云凭据 Provider）；
+    # 未配置的能力保持空字典，对应端点按各自约定失败关闭。
+    create_state: Callable[[AppSettings], Mapping[str, object]] = _no_extra_state
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,8 +137,44 @@ def _create_social_operations_router(settings: AppSettings) -> APIRouter:
     return create_device_account_router(service, actor_provider=_social_operations_actor)
 
 
+def _create_video_studio_router(settings: AppSettings) -> APIRouter:
+    del settings
+    (media_library_router,) = VIDEO_STUDIO_BACKEND_REGISTRATION.routers
+    return media_library_router
+
+
+def _create_video_studio_state(settings: AppSettings) -> Mapping[str, object]:
+    """按部署配置装配真实腾讯 CAM/STS 签发器；配置不全时保持失败关闭。"""
+
+    if (
+        not settings.video_material_cos_bucket
+        or not settings.cos_region
+        or not settings.cos_secret_id.get_secret_value()
+        or not settings.cos_secret_key.get_secret_value()
+    ):
+        return {}
+    return {
+        "video_material_upload_credential_issuer": TencentStsMaterialUploadCredentialIssuer(
+            secret_id=settings.cos_secret_id.get_secret_value(),
+            secret_key=settings.cos_secret_key.get_secret_value(),
+            bucket=settings.video_material_cos_bucket,
+            region=settings.cos_region,
+        )
+    }
+
+
+_BACKEND_STATE_FACTORIES: Final[Mapping[str, Callable[[AppSettings], Mapping[str, object]]]] = (
+    MappingProxyType({"video-studio": _create_video_studio_state})
+)
+
+
 _BACKEND_ROUTER_FACTORIES: Final[Mapping[str, Callable[[AppSettings], APIRouter]]] = (
-    MappingProxyType({"social-operations": _create_social_operations_router})
+    MappingProxyType(
+        {
+            "social-operations": _create_social_operations_router,
+            "video-studio": _create_video_studio_router,
+        }
+    )
 )
 
 
@@ -151,6 +198,7 @@ def resolve_installed_backend_registrations(settings: AppSettings) -> InstalledB
                 manifest=manifest,
                 settings=settings,
                 create_router=router_factory,
+                create_state=_BACKEND_STATE_FACTORIES.get(capability_id, _no_extra_state),
             )
         )
     return InstalledBackendCapabilities(

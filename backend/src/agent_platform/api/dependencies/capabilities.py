@@ -170,11 +170,6 @@ def wrap_capability_router(router: APIRouter) -> APIRouter:
             raise TypeError("capability routers must only contain API routes")
         # 装配期 fail-fast：包装器重建路由只透传 path/methods/status_code/name，
         # 暂不支持的路由形态必须显式拒绝，禁止静默丢弃元数据或产出损坏响应。
-        if iscoroutinefunction(route.endpoint):
-            raise TypeError(
-                f"capability route {route.path} uses an async endpoint; "
-                "the audit wrapper only supports sync endpoints for now"
-            )
         if route.dependencies:
             raise TypeError(
                 f"capability route {route.path} declares per-route dependencies, "
@@ -191,10 +186,15 @@ def wrap_capability_router(router: APIRouter) -> APIRouter:
 
 
 def _wrap_capability_endpoint(endpoint: Callable[..., Any]) -> Callable[..., Any]:
+    endpoint_is_async = iscoroutinefunction(endpoint)
+
     @wraps(endpoint)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
-            result = await run_in_threadpool(endpoint, *args, **kwargs)
+            if endpoint_is_async:
+                result = await endpoint(*args, **kwargs)
+            else:
+                result = await run_in_threadpool(endpoint, *args, **kwargs)
         except BaseException:
             # 失败路径尽力落库已发生的审计事件，但不掩盖业务异常。
             with suppress(Exception):

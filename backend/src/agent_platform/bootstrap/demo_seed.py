@@ -82,6 +82,7 @@ DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
+DEMO_VIDEO_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "video-studio-entitlement")
 
 DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
 DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
@@ -333,6 +334,22 @@ def _demo_records(
                 id=DEMO_SOCIAL_ENTITLEMENT_ID,
                 tenant_id=DEMO_TENANT_ID,
                 capability_id="social-operations",
+                status="active",
+                source="demo-seed",
+                expires_at=None,
+                granted_at=_DEMO_CREATED_AT,
+                granted_by=DEMO_USER_ID,
+                revoked_at=None,
+                revoked_by=None,
+                revision=1,
+            ),
+            ("capability_id", "status", "source", "expires_at", "revoked_at", "revoked_by"),
+        ),
+        (
+            CapabilityEntitlementRecord(
+                id=DEMO_VIDEO_ENTITLEMENT_ID,
+                tenant_id=DEMO_TENANT_ID,
+                capability_id="video-studio",
                 status="active",
                 source="demo-seed",
                 expires_at=None,

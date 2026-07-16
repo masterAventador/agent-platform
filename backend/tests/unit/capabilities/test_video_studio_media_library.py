@@ -279,6 +279,7 @@ async def test_referenced_material_cannot_be_deleted_until_reference_is_removed(
     )
     await service.add_reference(
         tenant_id=tenant_id,
+        actor_id=owner_id,
         material_id=material.id,
         reference_type="timeline",
         reference_id=uuid4(),
@@ -808,18 +809,21 @@ async def test_list_references_is_tenant_scoped_and_ordered_by_creation() -> Non
 
     first = await service.add_reference(
         tenant_id=tenant_id,
+        actor_id=owner_id,
         material_id=material.id,
         reference_type="timeline_clip",
         reference_id=uuid4(),
     )
     second = await service.add_reference(
         tenant_id=tenant_id,
+        actor_id=owner_id,
         material_id=material.id,
         reference_type="render_job",
         reference_id=uuid4(),
     )
     await service.add_reference(
         tenant_id=other_tenant_id,
+        actor_id=owner_id,
         material_id=other_material.id,
         reference_type="timeline_clip",
         reference_id=uuid4(),
@@ -863,3 +867,234 @@ async def test_upload_credentials_reject_materials_over_size_limit() -> None:
         sha256="b" * 64,
     )
     assert boundary.material.size_bytes == MAX_MATERIAL_SIZE_BYTES
+
+
+class RecordingAuditSink:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def record(self, event) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_key_material_and_download_operations_record_sanitized_audit_events() -> None:
+    """素材上传/删除/引用/下载任务关键操作必须产出可桥接 C14 的脱敏审计事件。"""
+
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="audit.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+    )
+    material = draft.material
+    verifier.objects[(tenant_id, material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="a" * 64,
+    )
+    await service.complete_upload(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=material.id
+    )
+    reference = await service.add_reference(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        material_id=material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.cancel_download_task(
+        tenant_id=tenant_id, actor_id=actor_id, task_id=task.id
+    )
+
+    second = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.start_download_task(tenant_id=tenant_id, task_id=second.id)
+    await service.fail_download_task(
+        tenant_id=tenant_id, task_id=second.id, error_code="network_timeout", retryable=True
+    )
+    await service.retry_download_task(
+        tenant_id=tenant_id, actor_id=actor_id, task_id=second.id
+    )
+
+    actions = [event.action for event in audit_sink.events]
+    assert actions == [
+        "video.material.upload_requested",
+        "video.material.upload_completed",
+        "video.material.reference_created",
+        "video.download_task.created",
+        "video.download_task.cancelled",
+        "video.download_task.created",
+        "video.download_task.retried",
+    ]
+    upload_requested = audit_sink.events[0]
+    assert upload_requested.tenant_id == tenant_id
+    assert upload_requested.actor_user_id == actor_id
+    assert upload_requested.resource_id == material.id
+    detail_keys = {key for key, _ in upload_requested.details}
+    assert "sha256" not in detail_keys
+    assert "tmp_secret_key" not in detail_keys
+    reference_event = audit_sink.events[2]
+    assert reference_event.resource_id == material.id
+    assert ("reference_id", str(reference.reference_id)) in reference_event.details
+
+    disposable = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="disposable.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="b" * 64,
+    )
+    await service.delete_material(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=disposable.material.id
+    )
+    deleted_event = audit_sink.events[-1]
+    assert deleted_event.action == "video.material.deleted"
+    assert deleted_event.resource_id == disposable.material.id
+
+
+@pytest.mark.asyncio
+async def test_failed_complete_upload_does_not_record_success_audit() -> None:
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="mismatch.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=999,
+        sha256="b" * 64,
+    )
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=draft.material.id
+        )
+    assert [event.action for event in audit_sink.events] == [
+        "video.material.upload_requested",
+    ]
+
+
+class StubArtifactSourceResolver:
+    def __init__(self) -> None:
+        self.artifacts: dict[tuple[object, object], int] = {}
+
+    async def resolve_artifact(self, *, tenant_id, artifact_id):
+        from agent_platform.capabilities.video_studio.media_library import (
+            ResolvedDownloadSource,
+        )
+
+        size = self.artifacts.get((tenant_id, artifact_id))
+        if size is None:
+            return None
+        return ResolvedDownloadSource(size_bytes=size)
+
+
+@pytest.mark.asyncio
+async def test_download_task_supports_artifact_source_with_tenant_isolation() -> None:
+    """成片（Core Artifact）来源：按租户解析大小，未知/跨租户成片一律不存在。"""
+
+    resolver = StubArtifactSourceResolver()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        artifact_source_resolver=resolver,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    actor_id = uuid4()
+    artifact_id = uuid4()
+    resolver.artifacts[(tenant_id, artifact_id)] = 4096
+
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="artifact",
+        source_id=artifact_id,
+    )
+    assert task.source_type == "artifact"
+    assert task.total_bytes == 4096
+    assert task.status is DownloadTaskStatus.QUEUED
+    assert audit_sink.events[-1].action == "video.download_task.created"
+    assert ("source_type", "artifact") in audit_sink.events[-1].details
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.create_download_task(
+            tenant_id=other_tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=artifact_id,
+        )
+    with pytest.raises(MaterialNotFoundError):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_task_rejects_unknown_source_type_and_missing_resolver() -> None:
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    with pytest.raises(InvalidMaterialInput):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="bogus",
+            source_id=uuid4(),
+        )
+
+    # 成片来源解析器未装配时必须失败关闭，不得伪造成功。
+    with pytest.raises(RuntimeError):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=uuid4(),
+        )

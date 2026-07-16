@@ -6,6 +6,10 @@ from typing import Protocol
 from uuid import UUID
 
 
+class MaterialStorageCredentialsUnavailable(RuntimeError):
+    """临时凭证签发上游失败或响应不可信时的失败关闭错误。"""
+
+
 @dataclass(frozen=True, slots=True)
 class IssuedUploadCredentials:
     provider: str

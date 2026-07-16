@@ -355,6 +355,8 @@ def create_app(
             wrap_capability_router(registration.create_router(registration.settings)),
             dependencies=[Depends(create_capability_gate(registration.manifest))],
         )
+        for state_key, state_value in registration.create_state(registration.settings).items():
+            setattr(app.state, state_key, state_value)
 
     @app.exception_handler(KnowledgeProviderUnavailable)
     @app.exception_handler(InvalidKnowledgeProviderResponse)

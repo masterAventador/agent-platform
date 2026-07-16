@@ -1,38 +1,15 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { registerAndLogin } from './helpers/auth'
+
+/**
+ * B04 素材库真实链路验收：不 mock capabilities/registry 与登录权限，
+ * 由生产装配的后端按「部署安装 ∩ 租户 Entitlement ∩ 用户 RBAC」三层裁剪驱动前端；
+ * 浏览器直传仍拦截 COS 域名（真实腾讯 CAM/STS 属独立外部门禁）。
+ */
+
 const reusableEmail = 'e2e-video-studio@example.com'
 const reusablePassword = 'agent-platform-video-e2e'
-const videoPermissions = ['video.read', 'video.manage', 'video.execute']
-
-async function enableVideoStudioCapability(page: Page) {
-  await page.route('**/api/v1/capabilities/registry', (route) => route.fulfill({
-    contentType: 'application/json',
-    json: {
-      schema_version: '1.0',
-      capabilities: [{
-        capability_id: 'video-studio',
-        deployment_installed: true,
-        tenant_entitled: true,
-        frontend_entries: ['video.routes.v1'],
-        permissions: videoPermissions,
-      }],
-    },
-  }))
-  await page.route('**/api/v1/auth/login', async (route) => {
-    const response = await route.fetch()
-    const user = await response.json()
-    await route.fulfill({
-      response,
-      json: {
-        ...user,
-        workspaces: user.workspaces.map((workspace: { permissions: string[] }) => ({
-          ...workspace,
-          permissions: [...workspace.permissions, ...videoPermissions],
-        })),
-      },
-    })
-  })
-}
 
 async function loginWithReusableAccount(page: Page) {
   const registration = await page.request.post('/api/v1/auth/register', {
@@ -47,8 +24,30 @@ async function loginWithReusableAccount(page: Page) {
   await page.waitForURL(/\/$/)
 }
 
+async function grantVideoStudioEntitlement(page: Page) {
+  const grant = await page.request.put(
+    '/api/v1/capabilities/entitlements/video-studio',
+    { data: {} },
+  )
+  expect(grant.ok()).toBeTruthy()
+  await page.reload()
+}
+
+test('B04 未授权租户看不到素材库入口且直达路由与 API 被拒', async ({ page }) => {
+  await registerAndLogin(page)
+
+  await expect(page.getByRole('link', { name: '工作台' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '素材库' })).toHaveCount(0)
+
+  await page.goto('/video/materials')
+  await expect(page.getByText('当前工作区未获此能力授权')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '素材库' })).toHaveCount(0)
+
+  const rejected = await page.request.get('/api/v1/video-studio/materials')
+  expect(rejected.status()).toBe(403)
+})
+
 test('B04 素材文件直传、确认、预览、下载状态与删除形成真实 API 闭环', async ({ page }) => {
-  await enableVideoStudioCapability(page)
   const cosRequests: string[] = []
   await page.route(/^https?:\/\/[^/]+\.cos\./, async (route) => {
     cosRequests.push(route.request().url())
@@ -65,6 +64,8 @@ test('B04 素材文件直传、确认、预览、下载状态与删除形成真�
   })
 
   await loginWithReusableAccount(page)
+  await grantVideoStudioEntitlement(page)
+
   await page.getByRole('link', { name: '素材库' }).click()
   await expect(page).toHaveURL(/\/video\/materials$/)
   await expect(page.getByRole('heading', { name: '素材库' })).toBeVisible()
@@ -103,4 +104,30 @@ test('B04 素材文件直传、确认、预览、下载状态与删除形成真�
   await page.getByRole('button', { name: '删除 b04-preview.png' }).click()
   await expect(page.getByText('素材已删除，存储清理任务将异步执行。')).toBeVisible()
   await expect(page.getByRole('cell', { name: 'b04-preview.png', exact: true })).toHaveCount(0)
+})
+
+test('B04 撤销授权后素材库入口消失且直连 API 403', async ({ page }) => {
+  await registerAndLogin(page)
+  await grantVideoStudioEntitlement(page)
+
+  const entryLink = page.getByRole('link', { name: '素材库' })
+  await expect(entryLink).toBeVisible()
+  await entryLink.click()
+  await expect(page).toHaveURL(/\/video\/materials$/)
+  await expect(page.getByRole('heading', { name: '素材库' })).toBeVisible()
+
+  const revoke = await page.request.delete(
+    '/api/v1/capabilities/entitlements/video-studio',
+  )
+  expect(revoke.ok()).toBeTruthy()
+
+  await page.reload()
+  await expect(page.getByRole('link', { name: '工作台' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '素材库' })).toHaveCount(0)
+
+  await page.goto('/video/materials')
+  await expect(page.getByText('当前工作区未获此能力授权')).toBeVisible()
+
+  const rejected = await page.request.get('/api/v1/video-studio/materials')
+  expect(rejected.status()).toBe(403)
 })

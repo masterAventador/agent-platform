@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
-from typing import Annotated, cast
+from typing import cast
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.capabilities.request_context import (
+    CapabilityRequestContext,
+    ContextBufferAuditSink,
+    require_capability_request_context,
+)
 from agent_platform.capabilities.video_studio.media_library import (
     DownloadTask,
     InvalidDownloadTaskTransition,
@@ -25,6 +29,7 @@ from agent_platform.capabilities.video_studio.media_library import (
     UploadCredentialExpiredError,
 )
 from agent_platform.capabilities.video_studio.persistence import (
+    SqlAlchemyArtifactDownloadSourceResolver,
     SqlAlchemyMediaLibraryRepository,
 )
 from agent_platform.capabilities.video_studio.storage_credentials import (
@@ -32,12 +37,15 @@ from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedUploadCredentials,
     MaterialObjectVerifier,
     MaterialPreviewUrlIssuer,
+    MaterialStorageCredentialsUnavailable,
     MaterialUploadCredentialIssuer,
 )
-from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 
 router = APIRouter(prefix="/api/v1/video-studio", tags=["video-studio"])
-TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
+
+VIDEO_READ_PERMISSION = "video.read"
+VIDEO_MANAGE_PERMISSION = "video.manage"
+VIDEO_EXECUTE_PERMISSION = "video.execute"
 
 
 class MaterialFolderResponse(BaseModel):
@@ -255,6 +263,18 @@ def _unavailable(code: str, message: str) -> HTTPException:
     )
 
 
+def _actor(required_permission: str) -> CapabilityRequestContext:
+    """从能力 gate 绑定的请求上下文取执行者，并强制 video.* 权限域。"""
+
+    context = require_capability_request_context()
+    if required_permission not in context.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "permission_denied", "message": "没有执行此操作的权限"},
+        )
+    return context
+
+
 def _credential_issuer(request: Request) -> MaterialUploadCredentialIssuer:
     configured = getattr(request.app.state, "video_material_upload_credential_issuer", None)
     if configured is None:
@@ -290,12 +310,15 @@ def _service(
     repository: SqlAlchemyMediaLibraryRepository,
     *,
     require_preview: bool = False,
+    artifact_source_resolver: SqlAlchemyArtifactDownloadSourceResolver | None = None,
 ) -> MediaLibraryService:
     return MediaLibraryService(
         repository=repository,
         credential_issuer=_credential_issuer(request),
         object_verifier=_object_verifier(request),
         preview_issuer=_preview_issuer(request) if require_preview else None,
+        audit_sink=ContextBufferAuditSink(),
+        artifact_source_resolver=artifact_source_resolver,
     )
 
 
@@ -307,22 +330,16 @@ def _service(
 async def create_material_folder(
     payload: MaterialFolderCreateRequest,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialFolderResponse:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             folder = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
             ).create_folder(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 name=payload.name,
                 parent_id=payload.parent_id,
             )
@@ -338,20 +355,14 @@ async def create_material_folder(
 async def list_material_folders(
     request: Request,
     parent_id: UUID | None = None,
-    tenant_id: TenantHeader = None,
 ) -> MaterialFolderListResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             folders = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
-            ).list_folders(tenant_id=access.tenant.id, parent_id=parent_id)
+            ).list_folders(tenant_id=actor.tenant_id, parent_id=parent_id)
         except MaterialFolderNotFoundError:
             raise _not_found() from None
         return MaterialFolderListResponse(
@@ -367,20 +378,14 @@ async def list_material_folders(
 async def request_material_upload_credentials(
     payload: MaterialUploadCredentialRequest,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialUploadCredentialResponse:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         repository = SqlAlchemyMediaLibraryRepository(session)
         try:
             draft = await _service(request, repository).request_upload_credentials(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 name=payload.name,
                 kind=payload.kind,
                 media_type=payload.media_type,
@@ -393,6 +398,8 @@ async def request_material_upload_credentials(
             raise _invalid(str(error)) from None
         except MaterialFolderNotFoundError:
             raise _not_found() from None
+        except MaterialStorageCredentialsUnavailable as error:
+            raise _unavailable("video_material_sts_unavailable", str(error)) from None
         await session.commit()
         return MaterialUploadCredentialResponse(
             material=MaterialResponse.from_entity(draft.material),
@@ -404,20 +411,14 @@ async def request_material_upload_credentials(
 async def complete_material_upload(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialResponse:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         repository = SqlAlchemyMediaLibraryRepository(session)
         try:
             material = await _service(request, repository).complete_upload(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 material_id=material_id,
             )
         except MaterialNotFoundError:
@@ -435,27 +436,18 @@ async def complete_material_upload(
 async def abort_material_upload(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialResponse:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             material = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
             ).abort_upload(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 material_id=material_id,
-                manage_all=role_has_permission(
-                    role=access.role,
-                    permission=TenantPermission.RUNS_MANAGE,
-                ),
+                manage_all=VIDEO_MANAGE_PERMISSION in actor.permissions,
             )
         except MaterialNotFoundError:
             raise _not_found() from None
@@ -468,19 +460,13 @@ async def abort_material_upload(
 @router.get("/materials", response_model=MaterialListResponse)
 async def list_materials(
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialListResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         materials = await _service(
             request,
             SqlAlchemyMediaLibraryRepository(session),
-        ).list_materials(tenant_id=access.tenant.id)
+        ).list_materials(tenant_id=actor.tenant_id)
         return MaterialListResponse(
             items=[MaterialResponse.from_entity(item) for item in materials],
         )
@@ -490,20 +476,14 @@ async def list_materials(
 async def get_material(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             material = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
-            ).get_material(tenant_id=access.tenant.id, material_id=material_id)
+            ).get_material(tenant_id=actor.tenant_id, material_id=material_id)
         except MaterialNotFoundError:
             raise _not_found() from None
         return MaterialResponse.from_entity(material)
@@ -513,22 +493,16 @@ async def get_material(
 async def preview_material(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialPreviewResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             preview = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
                 require_preview=True,
             ).request_preview_url(
-                tenant_id=access.tenant.id,
+                tenant_id=actor.tenant_id,
                 material_id=material_id,
             )
         except MaterialNotFoundError:
@@ -547,21 +521,16 @@ async def create_material_reference(
     material_id: UUID,
     payload: MaterialReferenceCreateRequest,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialReferenceResponse:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             reference = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
             ).add_reference(
-                tenant_id=access.tenant.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 material_id=material_id,
                 reference_type=payload.reference_type,
                 reference_id=payload.reference_id,
@@ -583,20 +552,14 @@ async def create_material_reference(
 async def list_material_references(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> MaterialReferenceListResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             references = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
-            ).list_references(tenant_id=access.tenant.id, material_id=material_id)
+            ).list_references(tenant_id=actor.tenant_id, material_id=material_id)
         except MaterialNotFoundError:
             raise _not_found() from None
         return MaterialReferenceListResponse(
@@ -608,19 +571,13 @@ async def list_material_references(
 async def delete_material(
     material_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> None:
+    actor = _actor(VIDEO_MANAGE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             await _service(request, SqlAlchemyMediaLibraryRepository(session)).delete_material(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 material_id=material_id,
             )
         except MaterialNotFoundError:
@@ -638,22 +595,17 @@ async def delete_material(
 async def create_download_task(
     payload: DownloadTaskCreateRequest,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             task = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
+                artifact_source_resolver=SqlAlchemyArtifactDownloadSourceResolver(session),
             ).create_download_task(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 source_type=payload.source_type,
                 source_id=payload.source_id,
             )
@@ -668,19 +620,13 @@ async def create_download_task(
 @router.get("/download-tasks", response_model=DownloadTaskListResponse)
 async def list_download_tasks(
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskListResponse:
+    actor = _actor(VIDEO_READ_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         tasks = await _service(
             request,
             SqlAlchemyMediaLibraryRepository(session),
-        ).list_download_tasks(tenant_id=access.tenant.id)
+        ).list_download_tasks(tenant_id=actor.tenant_id)
         return DownloadTaskListResponse(
             items=[DownloadTaskResponse.from_entity(task) for task in tasks],
         )
@@ -690,20 +636,14 @@ async def list_download_tasks(
 async def start_download_task(
     task_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             task = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
-            ).start_download_task(tenant_id=access.tenant.id, task_id=task_id)
+            ).start_download_task(tenant_id=actor.tenant_id, task_id=task_id)
         except MaterialNotFoundError:
             raise _not_found() from None
         except InvalidDownloadTaskTransition as error:
@@ -719,25 +659,19 @@ async def fail_download_task(
     task_id: UUID,
     payload: DownloadTaskFailRequest,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         service = _service(request, SqlAlchemyMediaLibraryRepository(session))
         try:
             await service.update_download_progress(
-                tenant_id=access.tenant.id,
+                tenant_id=actor.tenant_id,
                 task_id=task_id,
                 downloaded_bytes=payload.downloaded_bytes,
                 resume_token=payload.resume_token,
             )
             task = await service.fail_download_task(
-                tenant_id=access.tenant.id,
+                tenant_id=actor.tenant_id,
                 task_id=task_id,
                 error_code=payload.error_code,
                 retryable=payload.retryable,
@@ -756,27 +690,18 @@ async def fail_download_task(
 async def retry_download_task(
     task_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             task = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
             ).retry_download_task(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 task_id=task_id,
-                manage_all=role_has_permission(
-                    role=access.role,
-                    permission=TenantPermission.RUNS_MANAGE,
-                ),
+                manage_all=VIDEO_MANAGE_PERMISSION in actor.permissions,
             )
         except MaterialNotFoundError:
             raise _not_found() from None
@@ -790,20 +715,14 @@ async def retry_download_task(
 async def complete_download_task(
     task_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_MANAGE,
-        )
         try:
             task = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
-            ).complete_download_task(tenant_id=access.tenant.id, task_id=task_id)
+            ).complete_download_task(tenant_id=actor.tenant_id, task_id=task_id)
         except MaterialNotFoundError:
             raise _not_found() from None
         except InvalidDownloadTaskTransition as error:
@@ -816,27 +735,18 @@ async def complete_download_task(
 async def cancel_download_task(
     task_id: UUID,
     request: Request,
-    tenant_id: TenantHeader = None,
 ) -> DownloadTaskResponse:
+    actor = _actor(VIDEO_EXECUTE_PERMISSION)
     async with request.app.state.session_factory() as session:
-        user, access = await resolve_workspace(
-            request=request,
-            database_session=session,
-            tenant_id=tenant_id,
-            required_permission=TenantPermission.RUNS_EXECUTE,
-        )
         try:
             task = await _service(
                 request,
                 SqlAlchemyMediaLibraryRepository(session),
             ).cancel_download_task(
-                tenant_id=access.tenant.id,
-                actor_id=user.id,
+                tenant_id=actor.tenant_id,
+                actor_id=actor.user_id,
                 task_id=task_id,
-                manage_all=role_has_permission(
-                    role=access.role,
-                    permission=TenantPermission.RUNS_MANAGE,
-                ),
+                manage_all=VIDEO_MANAGE_PERMISSION in actor.permissions,
             )
         except MaterialNotFoundError:
             raise _not_found() from None

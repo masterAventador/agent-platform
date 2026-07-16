@@ -2,7 +2,12 @@
 
 These providers intentionally live below ``tests``: they exercise the production API,
 database repository and browser flow without creating a production fake-COS fallback.
-Real Tencent STS/COS remains a separate external acceptance gate.
+Real Tencent STS/COS remains a separate external acceptance gate
+(``tests/integration/storage/test_real_tencent_sts_material_credentials.py``).
+
+The app itself is the production assembly: ``video-studio`` must be present in
+``AGENT_PLATFORM_INSTALLED_CAPABILITIES``, routes are mounted through the
+capability gate, and the browser flow must grant a real tenant entitlement.
 """
 
 from datetime import datetime
@@ -15,14 +20,12 @@ from agent_platform.capabilities.video_studio.media_library import MATERIAL_UPLO
 from agent_platform.capabilities.video_studio.persistence import (
     VideoMaterialRecord,
 )
-from agent_platform.capabilities.video_studio.registration import (
-    VIDEO_STUDIO_BACKEND_REGISTRATION as _video_studio_registration,
-)
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
     StoredMaterialObject,
 )
+from agent_platform.config import AppSettings
 
 
 class PlaywrightCredentialIssuer:
@@ -87,10 +90,14 @@ class PlaywrightPreviewIssuer:
         )
 
 
-# 三层授权生产装配（C17 gate 接线）完成前，E2E 夹具直接挂载能力路由。
-app = create_app()
-for _capability_router in _video_studio_registration.routers:
-    app.include_router(_capability_router)
+# 生产装配：video-studio 必须在部署安装清单中（由 Playwright 配置注入
+# AGENT_PLATFORM_INSTALLED_CAPABILITIES），路由经 capability gate 三层校验挂载。
+_settings = AppSettings()
+if "video-studio" not in _settings.installed_capabilities:
+    raise RuntimeError(
+        "video-studio E2E 夹具要求 AGENT_PLATFORM_INSTALLED_CAPABILITIES 包含 video-studio"
+    )
+app = create_app(settings=_settings)
 app.state.video_material_upload_credential_issuer = PlaywrightCredentialIssuer()
 app.state.video_material_object_verifier = PlaywrightObjectVerifier(app.state.session_factory)
 app.state.video_material_preview_url_issuer = PlaywrightPreviewIssuer()

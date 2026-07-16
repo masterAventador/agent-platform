@@ -101,6 +101,9 @@ class AppSettings(BaseSettings):
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
     installed_capabilities: tuple[str, ...] = ("social-operations",)
+    # video-studio 素材直传桶：配置后（连同 cos_region/cos_secret_id/cos_secret_key）
+    # 生产装配注入真实腾讯 CAM/STS 签发器；缺省时素材上传凭证端点保持 503 失败关闭。
+    video_material_cos_bucket: str | None = None
     social_operations_offline_after_seconds: int = Field(default=90, ge=5, le=3_600)
     social_operations_claim_lease_seconds: int = Field(default=60, ge=5, le=3_600)
     social_operations_state_path: str | None = None
