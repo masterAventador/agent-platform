@@ -27,11 +27,13 @@ RAGFlow API 地址为 `http://127.0.0.1:19380`，Web 管理界面为
 RAGFLOW_MINIO_CONSOLE_PORT=29001 RAGFLOW_WEB_HTTP_PORT=28080 manage.sh up`；
 `down`/`status` 也要携带同一组变量。
 
-默认启用官方 `tei-cpu` profile 提供本地 embedding（TEI 镜像预置模型，默认
-`BAAI/bge-m3` 多语言模型；官方默认的 `Qwen/Qwen3-Embedding-0.6B` 在本机 CPU
-warmup 需要 16GB 以上内存，不作默认，可用 `RAGFLOW_TEI_MODEL` 覆盖）。不启用
-TEI 时 RAGFlow 没有默认 embedding 模型，文档解析会以 "No default embedding
-model is set" 失败。profiles 可用 `RAGFLOW_COMPOSE_PROFILES` 覆盖。
+默认启用官方 `tei-cpu` profile 提供本地 embedding。默认模型为最小的
+`BAAI/bge-small-en-v1.5`（**英文-only**；`Qwen/Qwen3-Embedding-0.6B` 与
+`BAAI/bge-m3` 在本机 CPU warmup 都可能超出可用内存被 OOM 因而不作默认）。
+**中文语料请用 `RAGFLOW_TEI_MODEL=BAAI/bge-m3` 覆盖**（需保证 Docker 内存充足），
+否则中文检索召回质量会明显下降。不启用 TEI 时 RAGFlow 没有默认 embedding
+模型，文档解析会以 "No default embedding model is set" 失败。profiles 可用
+`RAGFLOW_COMPOSE_PROFILES` 覆盖。
 
 本机覆盖同时将 Elasticsearch JVM 堆固定为 512MB、容器上限设为 1.5GB。完整运行
 RAGFlow、TEI、Elasticsearch 及平台基础设施时，Docker/Colima 虚拟机至少应
