@@ -8,6 +8,7 @@ import sys
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
@@ -32,6 +33,9 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run
+
+load_database_models()
+
 
 VALID_PAYLOAD_MARKER = "valid-payload-must-never-appear"
 MALFORMED_PAYLOAD_MARKER = "malformed-payload-must-never-appear"

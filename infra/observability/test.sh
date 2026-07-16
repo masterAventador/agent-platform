@@ -43,6 +43,8 @@ wait_for_url() {
 run_start_health_test() {
   local otel_health_port="${OTEL_HEALTH_PORT:-13133}"
   local jaeger_ui_port="${JAEGER_UI_PORT:-16686}"
+  local prometheus_port="${PROMETHEUS_UI_PORT:-9090}"
+  local grafana_port="${GRAFANA_UI_PORT:-3000}"
 
   cleanup() {
     docker compose -f "${COMPOSE_FILE}" down
@@ -52,6 +54,8 @@ run_start_health_test() {
   docker compose -f "${COMPOSE_FILE}" up --detach
   wait_for_url "OpenTelemetry Collector" "http://127.0.0.1:${otel_health_port}/"
   wait_for_url "Jaeger" "http://127.0.0.1:${jaeger_ui_port}/"
+  wait_for_url "Prometheus" "http://127.0.0.1:${prometheus_port}/-/ready"
+  wait_for_url "Grafana" "http://127.0.0.1:${grafana_port}/api/health"
   docker compose -f "${COMPOSE_FILE}" ps
 }
 

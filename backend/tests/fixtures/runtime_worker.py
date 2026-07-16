@@ -19,8 +19,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.workers.main import run_worker_service
 from agent_platform.workers.runtime_composition import PlatformModelResolver
+
+load_database_models()
 
 RUNTIME_E2E_OUTPUT = "Runtime E2E completed in the real worker."
 STRUCTURED_RUNTIME_E2E_OUTPUT = (

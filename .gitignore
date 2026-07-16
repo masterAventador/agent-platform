@@ -11,6 +11,9 @@
 .local/
 .pnpm-store/
 
+# 子代理 worktree 目录，仅本机临时工作台
+wt/
+
 backend/.venv/
 backend/.mypy_cache/
 backend/.pytest_cache/

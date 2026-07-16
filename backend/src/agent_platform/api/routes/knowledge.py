@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, JsonValue, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.knowledge import (
     SqlAlchemyKnowledgeBaseRepository,
 )
@@ -162,6 +163,15 @@ async def create_knowledge_base(
         )
         try:
             await SqlAlchemyKnowledgeBaseRepository(session).add(value)
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="knowledge_base.created",
+                resource_type="knowledge_base",
+                resource_id=value.id,
+                metadata={"provider": value.provider},
+            )
             await session.commit()
         except IntegrityError as error:
             await session.rollback()
@@ -195,7 +205,7 @@ async def delete_knowledge_base(
     tenant_id: TenantHeader = None,
 ) -> None:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -210,6 +220,15 @@ async def delete_knowledge_base(
         provider = _provider_for(request, value)
         await provider.delete_dataset(value.provider_id)
         await repository.delete(value)
+        await emit_audit_event(
+            session,
+            tenant_id=access.tenant.id,
+            actor_user_id=user.id,
+            action="knowledge_base.deleted",
+            resource_type="knowledge_base",
+            resource_id=value.id,
+            metadata={"provider": value.provider},
+        )
         await session.commit()
 
 

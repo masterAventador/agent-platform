@@ -72,10 +72,39 @@ async def test_minio_provider_round_trip_and_response_cleanup() -> None:
     assert client.objects == {}
 
 
+class _FakeCosRawStream:
+    def __init__(self, content: bytes) -> None:
+        self._buffer = BytesIO(content)
+        self.closed = False
+
+    def read(self) -> bytes:
+        return self._buffer.read()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeCosStreamBody:
+    """对齐 cos-python-sdk-v5 StreamBody 的真实契约：有 read/get_raw_stream，没有 close。"""
+
+    def __init__(self, content: bytes) -> None:
+        self._raw = _FakeCosRawStream(content)
+
+    def read(self) -> bytes:
+        return self._raw.read()
+
+    def get_raw_stream(self) -> _FakeCosRawStream:
+        return self._raw
+
+    @property
+    def raw_stream_closed(self) -> bool:
+        return self._raw.closed
+
+
 class FakeCos:
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], bytes] = {}
-        self.body: BytesIO | None = None
+        self.body: FakeCosStreamBody | None = None
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object:
         del ContentType
@@ -83,7 +112,7 @@ class FakeCos:
         return object()
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
-        self.body = BytesIO(self.objects[(Bucket, Key)])
+        self.body = FakeCosStreamBody(self.objects[(Bucket, Key)])
         return {"Body": self.body}
 
     def delete_object(self, *, Bucket: str, Key: str) -> object:
@@ -98,7 +127,7 @@ async def test_tencent_cos_provider_is_lighthouse_cos_compatible() -> None:
 
     await provider.put(key="tenant/artifact", content=b"result", media_type="text/plain")
     assert await provider.get(key="tenant/artifact") == b"result"
-    assert client.body is not None and client.body.closed
+    assert client.body is not None and client.body.raw_stream_closed
     await provider.delete(key="tenant/artifact")
     assert client.objects == {}
 

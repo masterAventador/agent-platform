@@ -5,7 +5,11 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
     FileRecord,
     TaskAttachmentRecord,
 )
-from agent_platform.infrastructure.database.repositories.audit import ToolAuditRecord
+from agent_platform.infrastructure.database.repositories.audit import (
+    AuditChainStateRecord,
+    AuditEventRecord,
+    ToolAuditRecord,
+)
 from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
@@ -63,6 +67,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     McpServerRecord,
     ToolRecord,
     SandboxLeaseRecord,
+    AuditChainStateRecord,
+    AuditEventRecord,
     ToolAuditRecord,
     TenantModelGatewayPolicyRecord,
     ModelGatewayProvisioningCommandRecord,

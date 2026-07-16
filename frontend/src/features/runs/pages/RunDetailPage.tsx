@@ -6,6 +6,7 @@ import { useParams } from 'react-router-dom'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import { getPlatformAdapter } from '../../../platform'
+import { reportClientEvent } from '../../../observability/client-events'
 import {
   runKeys,
   useArtifacts,
@@ -50,13 +51,40 @@ export function RunDetailPage({
     const source = new EventSource(`/api/v1/runs/${runId}/stream?${search}`, {
       withCredentials: true,
     })
+    const startedAt = Date.now()
+    const recordConnected = () => {
+      void reportClientEvent(
+        {
+          operation: 'sse',
+          outcome: 'succeeded',
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        },
+        tenantId,
+      )
+    }
+    const recordFailed = () => {
+      void reportClientEvent(
+        {
+          operation: 'sse',
+          outcome: 'failed',
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        },
+        tenantId,
+      )
+    }
+    source.addEventListener('open', recordConnected)
+    source.addEventListener('error', recordFailed)
     const refresh = () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.detail(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.events(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.artifacts(tenantId, runId) })
     }
     streamEvents.forEach((type) => source.addEventListener(type, refresh))
-    return () => source.close()
+    return () => {
+      source.removeEventListener('open', recordConnected)
+      source.removeEventListener('error', recordFailed)
+      source.close()
+    }
   }, [queryClient, runId, runStatus, tenantId])
 
   if (run.isPending) {

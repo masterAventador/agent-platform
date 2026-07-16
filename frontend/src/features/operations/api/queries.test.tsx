@@ -4,11 +4,21 @@ import type { PropsWithChildren } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useActiveWorkspaceId } from '../../workspaces/store'
+import { listAuditEvents } from './audit'
 import { listRunDeadLetters, replayRunDeadLetter } from './dead-letters'
-import { runDeadLetterKeys, useReplayRunDeadLetter, useRunDeadLetters } from './queries'
+import {
+  auditEventKeys,
+  runDeadLetterKeys,
+  useAuditEvents,
+  useReplayRunDeadLetter,
+  useRunDeadLetters,
+} from './queries'
 
 
 vi.mock('../../workspaces/store', () => ({ useActiveWorkspaceId: vi.fn() }))
+vi.mock('./audit', () => ({
+  listAuditEvents: vi.fn(),
+}))
 vi.mock('./dead-letters', () => ({
   listRunDeadLetters: vi.fn(),
   replayRunDeadLetter: vi.fn(),
@@ -25,6 +35,7 @@ describe('run dead letter queries', () => {
     vi.clearAllMocks()
     vi.mocked(useActiveWorkspaceId).mockReturnValue(tenantId)
     vi.mocked(listRunDeadLetters).mockResolvedValue([])
+    vi.mocked(listAuditEvents).mockResolvedValue([])
     vi.mocked(replayRunDeadLetter).mockResolvedValue({
       run_id: replayedRunId,
       command_id: '40000000-0000-4000-8000-000000000040',
@@ -42,6 +53,14 @@ describe('run dead letter queries', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(listRunDeadLetters).toHaveBeenCalledWith(tenantId, 100)
     expect(queryClient.getQueryData(runDeadLetterKeys.list(tenantId))).toEqual([])
+  })
+
+  it('审计事件 Query Key 包含租户且固定请求安全上限', async () => {
+    const { result } = renderHook(() => useAuditEvents(), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(listAuditEvents).toHaveBeenCalledWith(tenantId, 100)
+    expect(queryClient.getQueryData(auditEventKeys.list(tenantId))).toEqual([])
   })
 
   it('重放成功后失效当前租户列表并返回同一服务端结果', async () => {

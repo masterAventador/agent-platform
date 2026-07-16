@@ -82,6 +82,22 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "SELECT name, sql FROM sqlite_master "
             "WHERE type = 'index' AND tbl_name = 'tool_audit_events'"
         ).fetchall()
+        audit_event_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        audit_event_indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'audit_events'"
+            ).fetchall()
+        }
+        audit_chain_state_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(audit_chain_states)"
+            ).fetchall()
+        }
         policy_columns = {
             row[1]
             for row in connection.execute(
@@ -260,6 +276,37 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "(invocation_id) WHERE invocation_id IS NOT NULL",
     ) in tool_audit_indexes
     assert {
+        "id",
+        "tenant_id",
+        "actor_user_id",
+        "sequence",
+        "action",
+        "resource_type",
+        "resource_id",
+        "outcome",
+        "occurred_at",
+        "correlation_id",
+        "previous_hash",
+        "event_hash",
+        "metadata",
+    } == audit_event_columns
+    assert {
+        "sqlite_autoindex_audit_events_1",
+        "ix_audit_events_tenant_id",
+        "uq_audit_events_tenant_sequence",
+        "ix_audit_events_tenant_occurred",
+        "ix_audit_events_tenant_action",
+        "ix_audit_events_tenant_resource",
+    } == audit_event_indexes
+    assert {
+        "tenant_id",
+        "head_sequence",
+        "head_hash",
+        "retained_from_sequence",
+        "retention_previous_hash",
+        "updated_at",
+    } == audit_chain_state_columns
+    assert {
         "tenant_id",
         "enabled",
         "allowed_aliases",
@@ -357,7 +404,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
             "'tool_audit_events', 'tenant_model_gateway_policies', "
             "'model_gateway_provisioning_commands', 'files', 'task_attachments', 'artifacts', "
-            "'artifact_storage_operations'"
+            "'artifact_storage_operations', 'audit_events', 'audit_chain_states'"
             ")"
         ).fetchall()
     assert platform_tables == []
@@ -593,7 +640,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0023"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0024"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

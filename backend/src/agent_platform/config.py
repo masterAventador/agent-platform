@@ -54,6 +54,9 @@ class AppSettings(BaseSettings):
     artifact_storage_tombstone_rescan_seconds: int = Field(default=5, ge=1, le=60)
     artifact_unbound_file_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
     artifact_unbound_file_cleanup_interval_seconds: int = Field(default=300, ge=5, le=86_400)
+    audit_retention_days: int = Field(default=180, ge=1, le=3_650)
+    audit_retention_sweep_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    audit_retention_sweep_batch_limit: int = Field(default=1_000, ge=1, le=10_000)
     cos_region: str | None = None
     cos_secret_id: SecretStr = SecretStr("")
     cos_secret_key: SecretStr = SecretStr("")
