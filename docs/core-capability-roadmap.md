@@ -386,7 +386,11 @@
 
 ### C17 Capability Registry、Entitlement 与交付 Profile
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-16**
+
+开工说明：前置 C14 已合入主线；经用户批准与 C14 收尾（HMAC 加固）并行。实现分支 `task/c17-entitlements`。迁移编号协调：C14 HMAC 加固占用 `20260716_0025`，本条目使用 `20260716_0026`（暂 down_revision=0024，后合入者负责重链）。video-studio 相关三层校验接线在 B04 分支合入后补齐，本条目先覆盖 Core + social-operations 与 Core-only 组合矩阵。
 
 完成定义：
 
