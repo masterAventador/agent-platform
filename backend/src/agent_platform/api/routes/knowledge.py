@@ -1,3 +1,4 @@
+import logging
 from hashlib import sha256
 from typing import Annotated, cast
 from uuid import UUID
@@ -19,9 +20,11 @@ from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.tenants.permissions import TenantPermission
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["knowledge"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+MAX_DOCUMENT_BATCH_SIZE = 20
 
 
 class CreateKnowledgeBaseRequest(BaseModel):
@@ -108,6 +111,27 @@ async def _upload_document(
         content=content,
         content_type=file.content_type or "application/octet-stream",
     )
+
+
+async def _delete_documents_best_effort(
+    *,
+    provider: KnowledgeProvider,
+    dataset_id: str,
+    documents: list[KnowledgeDocument],
+) -> None:
+    """失败补偿：尽力删除本次已上传的文档，补偿失败只记录日志、不掩盖原错误。"""
+    if not documents:
+        return
+    try:
+        await provider.delete_documents(
+            dataset_id=dataset_id,
+            document_ids=[document.provider_id for document in documents],
+        )
+    except Exception:
+        logger.warning(
+            "knowledge_document_compensation_failed",
+            extra={"dataset_id": dataset_id, "document_count": len(documents)},
+        )
 
 
 @router.post("", response_model=KnowledgeBaseResponse, status_code=status.HTTP_201_CREATED)
@@ -222,6 +246,14 @@ async def upload_documents_batch(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"code": "document_batch_empty", "message": "至少需要上传一个文档"},
         )
+    if len(files) > MAX_DOCUMENT_BATCH_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "document_batch_too_large",
+                "message": f"单次批量上传不能超过 {MAX_DOCUMENT_BATCH_SIZE} 个文档",
+            },
+        )
     async with request.app.state.session_factory() as session:
         _, access = await resolve_workspace(
             request=request,
@@ -231,14 +263,23 @@ async def upload_documents_batch(
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     provider = _provider_for(request, value)
-    documents = [
-        await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
-        for file in files
-    ]
-    await provider.start_parsing(
-        dataset_id=value.provider_id,
-        document_ids=[document.provider_id for document in documents],
-    )
+    documents: list[KnowledgeDocument] = []
+    try:
+        for file in files:
+            documents.append(
+                await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
+            )
+        await provider.start_parsing(
+            dataset_id=value.provider_id,
+            document_ids=[document.provider_id for document in documents],
+        )
+    except Exception:
+        await _delete_documents_best_effort(
+            provider=provider,
+            dataset_id=value.provider_id,
+            documents=documents,
+        )
+        raise
     return documents
 
 
@@ -280,12 +321,23 @@ async def replace_document(
             database_session=session,
             tenant_id=tenant_id,
             required_permission=TenantPermission.KNOWLEDGE_MANAGE,
-    )
+        )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     provider = _provider_for(request, value)
     document = await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
-    await provider.start_parsing(dataset_id=value.provider_id, document_ids=[document.provider_id])
-    await provider.delete_documents(dataset_id=value.provider_id, document_ids=[document_id])
+    try:
+        await provider.start_parsing(
+            dataset_id=value.provider_id, document_ids=[document.provider_id]
+        )
+        await provider.delete_documents(dataset_id=value.provider_id, document_ids=[document_id])
+    except Exception:
+        # 替换失败时补偿删除新文档，保持旧文档原状，避免残留未解析副本
+        await _delete_documents_best_effort(
+            provider=provider,
+            dataset_id=value.provider_id,
+            documents=[document],
+        )
+        raise
     return document
 
 

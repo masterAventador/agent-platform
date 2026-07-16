@@ -39,6 +39,9 @@ class FakeKnowledgeProvider:
         self.deleted_documents: list[tuple[str, list[str]]] = []
         self.parsed: list[tuple[str, list[str]]] = []
         self.create_error: Exception | None = None
+        self.fail_upload_at: int | None = None
+        self.parse_error: Exception | None = None
+        self.delete_documents_error_once: Exception | None = None
         self._document_sequence = 0
 
     async def create_dataset(
@@ -59,6 +62,8 @@ class FakeKnowledgeProvider:
         del content_type
         self.calls.append(("upload", dataset_id))
         self._document_sequence += 1
+        if self.fail_upload_at is not None and self._document_sequence >= self.fail_upload_at:
+            raise KnowledgeProviderUnavailable("上传中断")
         return KnowledgeDocument(
             provider_id=f"document-{self._document_sequence}",
             name=filename,
@@ -68,10 +73,16 @@ class FakeKnowledgeProvider:
 
     async def start_parsing(self, *, dataset_id: str, document_ids: list[str]) -> None:
         self.calls.append(("parse", dataset_id))
+        if self.parse_error is not None:
+            raise self.parse_error
         self.parsed.append((dataset_id, document_ids))
 
     async def delete_documents(self, *, dataset_id: str, document_ids: list[str]) -> None:
         self.calls.append(("delete_documents", dataset_id))
+        if self.delete_documents_error_once is not None:
+            error = self.delete_documents_error_once
+            self.delete_documents_error_once = None
+            raise error
         self.deleted_documents.append((dataset_id, document_ids))
 
     async def list_documents(self, *, dataset_id: str):
@@ -231,6 +242,111 @@ async def test_document_lifecycle_supports_batch_retry_update_and_delete(
         headers=headers,
     )
     assert deleted.status_code == 204
+    assert provider.deleted_documents[-1][1] == ["document-2"]
+
+
+async def _login_and_create_base(client, email: str) -> tuple[dict[str, str], str]:
+    credentials = {"email": email, "password": "correct horse battery staple"}
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "补偿测试知识库"},
+    )
+    assert created.status_code == 201
+    return headers, created.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_rejects_more_documents_than_the_limit(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(client, "batch-limit@example.com")
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[("files", (f"doc-{index}.txt", b"content", "text/plain")) for index in range(21)],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "document_batch_too_large"
+    assert all(call[0] != "upload" for call in provider.calls)
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_midway_failure_compensates_uploaded_documents(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "batch-compensation@example.com"
+    )
+    provider.fail_upload_at = 3
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("doc-a.txt", b"a", "text/plain")),
+            ("files", ("doc-b.txt", b"b", "text/plain")),
+            ("files", ("doc-c.txt", b"c", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+    assert provider.parsed == []
+    assert provider.deleted_documents[-1][1] == ["document-1", "document-2"]
+
+
+@pytest.mark.asyncio
+async def test_batch_parse_failure_compensates_uploaded_documents(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "batch-parse-compensation@example.com"
+    )
+    provider.parse_error = KnowledgeProviderUnavailable("解析请求失败")
+
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("doc-a.txt", b"a", "text/plain")),
+            ("files", ("doc-b.txt", b"b", "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 503
+    assert provider.parsed == []
+    assert provider.deleted_documents[-1][1] == ["document-1", "document-2"]
+
+
+@pytest.mark.asyncio
+async def test_replace_failure_compensates_the_new_document(knowledge_client) -> None:
+    client, provider, _ = knowledge_client
+    headers, knowledge_base_id = await _login_and_create_base(
+        client, "replace-compensation@example.com"
+    )
+    uploaded = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
+        headers=headers,
+        files={"file": ("policy.txt", b"v1", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    provider.delete_documents_error_once = KnowledgeProviderUnavailable("删除旧文档失败")
+
+    response = await client.put(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents/document-1",
+        headers=headers,
+        files={"file": ("policy-v2.txt", b"v2", "text/plain")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+    # 补偿删除新上传的 document-2，旧 document-1 保持原状
     assert provider.deleted_documents[-1][1] == ["document-2"]
 
 
