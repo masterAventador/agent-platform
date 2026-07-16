@@ -94,6 +94,10 @@ class AppSettings(BaseSettings):
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
+    installed_capabilities: tuple[str, ...] = ("social-operations",)
+    social_operations_offline_after_seconds: int = Field(default=90, ge=5, le=3_600)
+    social_operations_claim_lease_seconds: int = Field(default=60, ge=5, le=3_600)
+    social_operations_state_path: str | None = None
 
     @field_validator("llm_gateway_allowed_aliases")
     @classmethod

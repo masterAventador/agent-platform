@@ -651,7 +651,53 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0025"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0026"
+
+
+def test_capability_entitlement_migration_creates_and_removes_table(tmp_path: Path) -> None:
+    database_path = tmp_path / "entitlements-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(capability_entitlements)"
+            ).fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'capability_entitlements'"
+            ).fetchall()
+        }
+    assert {
+        "id",
+        "tenant_id",
+        "capability_id",
+        "status",
+        "source",
+        "expires_at",
+        "granted_at",
+        "granted_by",
+        "revoked_at",
+        "revoked_by",
+        "revision",
+    } == columns
+    assert "uq_capability_entitlements_tenant_capability" in indexes
+
+    command.downgrade(config, "20260716_0025")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'capability_entitlements'"
+        ).fetchall()
+    assert remaining == []
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

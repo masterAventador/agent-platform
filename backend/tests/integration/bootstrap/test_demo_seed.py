@@ -266,3 +266,39 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
 
 async def _count(session: AsyncSession, model: type[Base]) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_grants_social_operations_entitlement_idempotently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from sqlalchemy import select
+
+    from agent_platform.infrastructure.database.repositories.entitlements import (
+        CapabilityEntitlementRecord,
+    )
+
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        records = (
+            await session.scalars(
+                select(CapabilityEntitlementRecord).where(
+                    CapabilityEntitlementRecord.tenant_id == DEMO_TENANT_ID
+                )
+            )
+        ).all()
+
+    assert len(records) == 1
+    entitlement = records[0]
+    assert entitlement.capability_id == "social-operations"
+    assert entitlement.status == "active"
+    assert entitlement.source == "demo-seed"
+    assert entitlement.expires_at is None

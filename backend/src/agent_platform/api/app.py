@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import uuid4
 
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from minio import Minio
@@ -14,12 +14,17 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.api.dependencies.capabilities import (
+    create_capability_gate,
+    wrap_capability_router,
+)
 from agent_platform.api.middleware.request_body_limit import (
     FileUploadRequestBodyLimitMiddleware,
 )
 from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.audit import router as audit_router
 from agent_platform.api.routes.auth import router as auth_router
+from agent_platform.api.routes.capabilities import router as capabilities_router
 from agent_platform.api.routes.conversations import router as conversations_router
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
@@ -30,6 +35,7 @@ from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
+from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.database.engine import create_database_engine
@@ -302,6 +308,16 @@ def create_app(
     app.include_router(model_gateway_router)
     app.include_router(observability_router)
     app.include_router(workbench_router)
+    app.include_router(capabilities_router)
+
+    installed_capabilities = resolve_installed_backend_registrations(app_settings)
+    app.state.capability_host = installed_capabilities.host
+    app.state.capability_catalog = installed_capabilities.catalog
+    for registration in installed_capabilities.registrations:
+        app.include_router(
+            wrap_capability_router(registration.create_router(registration.settings)),
+            dependencies=[Depends(create_capability_gate(registration.manifest))],
+        )
 
     @app.exception_handler(KnowledgeProviderUnavailable)
     @app.exception_handler(InvalidKnowledgeProviderResponse)

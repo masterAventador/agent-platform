@@ -74,7 +74,7 @@
 | 审计与可观测性 | 进行中 | C14 已合入主线：审计协议、哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口；S7 经 HMAC 密钥签名加固大幅收窄（剩余威胁面：持有服务端密钥的攻击者、整库回滚到历史合法快照——后者需外部锚定，均归 C18）；隔离验收栈完整回归前不标记完成 | C14 |
 | 企业与账号管理 | 部分完成 | 缺成员邀请、角色管理、密码找回、验证、SSO/MFA | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
-| Capability/Entitlement | 未实现 | 无能力注册表、企业授权、交付 Profile 和三层启用校验 | C17 |
+| Capability/Entitlement | 🧪 待集成（`task/c17-entitlements` 分支已实现，待合入主线与 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已在分支落地；Core+视频组合与 Worker 侧接线待 B04 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
 | 协议契约自动化 | 部分完成 | 缺 OpenAPI 快照、TS 生成、事件全量导出和漂移检查 | C19 |
 | 发布、升级与灾备 | 未实现 | 缺签名、公证、自动更新、灰度、备份、恢复、HA 和容灾 | C20 |
@@ -398,11 +398,32 @@
 
 ### C17 Capability Registry、Entitlement 与交付 Profile
 
-**状态：`🚧 进行中`**
+**状态：`🧪 待集成`**
 
 **开始日期：2026-07-16**
 
 开工说明：前置 C14 已合入主线；经用户批准与 C14 收尾（HMAC 加固）并行。实现分支 `task/c17-entitlements`。迁移编号协调：C14 HMAC 加固占用 `20260716_0025`，本条目使用 `20260716_0026`（暂 down_revision=0024，后合入者负责重链）。video-studio 相关三层校验接线在 B04 分支合入后补齐，本条目先覆盖 Core + social-operations 与 Core-only 组合矩阵。
+
+实现记录（2026-07-16，本任务提交，分支 `task/c17-entitlements`）：
+
+- `platform/entitlements/` 建立租户×能力授权领域（active/revoked + 到期读取时判定 + `evaluate_capability_availability` 单一可用性判定源），`infrastructure/database/repositories/entitlements.py` 提供 revision CAS + 唯一约束的幂等 grant/revoke 仓储，迁移 `20260716_0026_create_capability_entitlements`；
+- `capabilities/registry.py` 落地生产 `CapabilityHost`（原 MockCapabilityHost 校验逻辑上移共享，Mock 改为薄子类），`bootstrap/capabilities.py` 组合根按 `AGENT_PLATFORM_INSTALLED_CAPABILITIES` 显式安装清单装配（未知能力/无后端宿主集成的能力启动即失败，fail-closed）；
+- 新增 Core 路由根 `capabilities`：`GET /api/v1/capabilities/registry` 按「部署安装 ∩ 租户 Entitlement ∩ 用户 RBAC」三层裁剪返回；未授权条目不携带 frontend_entries/permissions。管理入口为 Owner（`workspace.manage`）范围内的 `PUT/DELETE /api/v1/capabilities/entitlements/{capability_id}` + `GET` 列表，全部经 `emit_audit_event` 留审计（设计取舍：MVP 无平台运营方角色，授权动作由企业 Owner 自管，生产运营方角色留待 C15/C18 收紧）；
+- social-operations（B02/B08）路由首次挂入生产 App，统一经 `create_capability_gate` 每请求实时三层校验（未授权 403 fail-closed、Core-only Profile 下 404、Entitlement 查询失败 5xx 拒绝）；能力内审计事件经请求内缓冲、响应发出前桥接落库到 C14 统一审计（跨租户事件直接拒绝）；撤销后新调用（含任务入队/认领）立即 403，存量本地任务由设备端租约超时/紧急停止兜底；
+- 登录/`/auth/me` 的 workspace permissions 按 Entitlement + 角色附加能力权限码（OWNER/ADMIN 获全部 manifest 权限，MEMBER 不授予）；前端 `capability-registry` 数据源切换为真实 API，Zod schema 收紧为「已授权条目才允许携带声明」的判别联合，保持失败关闭；
+- Demo Seed 以稳定 ID 幂等授予演示租户 social-operations（source=demo-seed）；
+- 组合矩阵：Core-only 与 Core+social 由契约测试覆盖（Core-only 下登录/员工/知识/Skill/Tool 全部可用、social 路由 404、registry 为空）；Core+视频与目标客户组合待 B04 合入后补；
+- 验证命令：`uv run pytest tests/unit tests/contract tests/integration/database tests/integration/bootstrap -q`（971 passed）、`uv run ruff check .`、`uv run mypy`（0 错误）、`pnpm test`（43 文件 199 用例）、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 Playwright `capability-entitlements.spec.ts + social-operations.spec.ts`（5 passed，随机项目名/端口，验后自动销毁）；
+- 待集成项：① B04 合入后补 video-studio 后端宿主接线与 Core+视频组合矩阵；② Worker 侧尚无能力任务处理器（social.jobs.v1 未在主线实现），`evaluate_capability_availability` 已作为 API/Worker 共用判定源导出，B04/B08 Worker 接入时必须复用；③ Sidecar 下载与云凭据签发的未授权拦截随对应能力落地时接入同一 gate。
+
+复审修复记录（2026-07-16，双复审后集中修复，本任务提交）：
+
+- C1 迁移多头：已在分支内合并 origin/main（含 C14 HMAC 加固 `20260716_0025`），`20260716_0026` 的 down_revision 重链至 `20260716_0025`，迁移测试 head 断言同步更新；
+- I2 审计桥接语义：实测本版 FastAPI 的 yield 依赖 teardown 在响应发送之后执行，原 teardown 抛 500 会被吞（客户端 201、审计静默丢失）；已改为 endpoint 包装层在响应构造前 flush（`wrap_capability_router`），业务成功但审计写入失败时客户端收到显式 500（`capability_audit_flush_failed`）且审计不落半写。**已知不一致语义**：能力服务的业务副作用（如设备注册的内存/SQLite 状态）此时已持久化，客户端 500 后重试同一 device_id 会得到 409；运维补偿 = 依据 500 响应与 `capability_audit_flush_failed` 日志人工核对，设备注册幂等化（同租户同 device_id 重放返回既有记录）列为 follow-up；
+- I1/L3 硬化：Entitlement 授予新增部署安装校验，对未安装能力（含 Core-only Profile 下所有能力）授予返回 409 `capability_not_installed`，fail-closed；
+- 授权治理定位（主代理拍板）：**当前 Entitlement 由租户 Owner（`workspace.manage`）自助管理，不构成商业购买闸门；平台运营方/计费侧闸门待 C15/C18 收紧**；
+- 完成定义第 7 条中「交付 Profile 变更」的审计：部署安装清单（`AGENT_PLATFORM_INSTALLED_CAPABILITIES`）属部署层环境配置，其变更发生在进程外，无租户内审计主体，归 C18/运维域（部署配置变更留痕）处理；租户可见的授权/撤销已全部接入 C14 审计；
+- 记录项：L1 registry 对未授权租户返回的裸条目（capability_id + 安装布尔）暴露部署拓扑——MVP 接受，前端需要该信息区分「未授权」与「未安装」语义；L2 前端 registry 响应任一条目畸形即整表解析失败（fail-closed 优先，接受单能力故障放大为全部能力不可用）；L4 登录/`/auth/me` 的能力权限附加为每工作区×每能力逐条查询（N+1），当前安装能力数 ≤2 可接受，能力包增多时改批量查询（follow-up）。
 
 完成定义：
 
@@ -490,6 +511,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C06 动态输入输出专项 | RED 阶段后端新增契约和 Worker 用例先覆盖默认空对象 Schema 误判、结构化输出违规未受控失败和真实运行时 JSON 字符串未解析；前端新增用例先覆盖员工详情缺 Schema 表单、任务详情缺结构化结果展示。复审补充覆盖文件型字段未启用 `file_upload`、历史已发布文件字段 Schema 未启用 `file_upload` 且本次未提交文件时运行入口 fail-open、动态 properties 必须关闭 `additionalProperties`、历史已发布动态 Schema 在运行入口 fail-closed、legacy 自由输入兼容、浏览器 RegExp 不兼容 pattern 后端拒绝且前端受控失败、文件控件额外约束、数组元素文件语义、零字段动态空输入、动态文件字段与本次 `attachment_ids` 绑定、真实员工编辑器 Schema 配置入口、动态表单无法渲染的嵌套输入 Schema、前端无法一致表达的 JSON Schema 关键字、发布 v2 后旧幂等键重放仍固定原 Run/原版本 `output_schema`、DeepAgent 数字标量结构化输出、字符串 Schema 下普通数字文本不误转、可选布尔字段不静默提交 false、必填布尔字段未触碰时按 false 提交、正则、日期、数值倍数、数组长度和唯一性。GREEN 阶段 `cd backend && uv run pytest tests/contract/runs/test_dynamic_io.py -q` 29 项通过；`cd backend && uv run pytest -q` 1012 项通过、39 跳过；`cd backend && uv run pytest tests/unit tests/contract -q` 863 项通过；`.venv/bin/ruff check .`、`.venv/bin/mypy` 181 个源码文件通过；`cd frontend && pnpm test -- --reporter=dot` 40 个文件、188 项通过；`pnpm lint`、`pnpm typecheck`、`pnpm build` 通过；`bash infra/platform/test-runtime-e2e.sh` 使用随机端口和独立 Compose 项目完成普通 Worker、结构化输入输出、取消慢模型 3 项真实运行时 E2E，结构化场景通过真实编辑器配置 Schema，不再通过 route 篡改员工定义，结束后临时容器、网络和卷清理完成 |
 | C08 Skill 生命周期专项 | RED 阶段后端新增测试先失败于缺少 `skills.security`、`skills.builtin` 和固定版本物化类型，前端新增组件测试先失败于缺少“安全审核结果”面板；GREEN 阶段 `uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py tests/unit/workers/test_runtime_composition.py -q` 47 项通过；合并 C05 后发现 `/api/v1/conversations` 未进入能力包 Core API 保留根契约，已补齐 `CORE_API_ROUTE_ROOTS` 并通过 manifest 契约 8 项；正式 Skill Playwright E2E 1 项通过，按 running 状态接管本轮启动的独立 Compose 依赖并自动 `down -v`，测试 project 容器、网络和卷复查为 0 |
 | C14 审计与观测专项 | RED 阶段后端先补出审计元数据仓储边界脱敏、审计哈希链完整性、保留清理、请求 correlation_id 传递和观测告警域覆盖用例；GREEN 阶段 `cd backend && uv run pytest tests/contract/test_health.py tests/contract/audit/test_audit_events.py tests/unit/observability/test_telemetry.py tests/integration/database/test_migrations.py -q` 31 项通过；补强 Worker、队列、模型网关、RAGFlow 和 Sandbox 操作指标后，`cd backend && uv run pytest tests/unit/observability/test_operational_metrics.py -q` 2 项通过、`cd backend && uv run pytest tests/unit/workers/test_main.py tests/unit/knowledge/test_ragflow_client.py -q` 42 项通过、`cd backend && uv run pytest tests/unit/queue/test_redis_run_queue_claim.py tests/unit/queue/test_redis_run_queue_dlq.py tests/integration/queue/test_redis_run_queue.py tests/integration/queue/test_run_dead_letters.py -q` 24 项通过/6 项条件跳过、`cd backend && uv run pytest tests/unit/observability/test_telemetry.py tests/unit/workers/test_runtime_adapters.py tests/unit/workers/test_main.py tests/unit/runtimes/test_deep_agent_runtime.py -q` 57 项通过、`cd backend && uv run pytest tests/unit/llm/test_litellm_gateway.py tests/unit/sandbox/test_local_controller_provider.py tests/unit/sandbox/test_controller.py tests/unit/sandbox/test_manager.py tests/unit/workers/test_sandbox_janitor.py -q` 86 项通过；`cd backend && uv run ruff check . && uv run mypy` 184 个源码文件通过；`uv run --project backend python infra/observability/test_config.py` 通过 Collector 与告警规则配置校验；`cd frontend && pnpm exec tsc -b --noEmit && pnpm exec oxlint` 通过；前端 vitest 证据更正：此前记录的"4 个文件、28 项通过"在当时不成立——`src/features/operations/api/audit.test.ts` 存在断言笔误（mock `sequence: 2` 断言 3），其中 1 项自创建起失败；修正笔误后实测 `cd frontend && pnpm exec vitest run src/features/operations/api/audit.test.ts src/features/operations/api/queries.test.tsx src/features/operations/pages/AuditObservabilityPage.test.tsx src/app/App.test.tsx --reporter=dot` 4 个文件、28 项通过，`pnpm exec vitest run src/features/operations --reporter=dot` 5 个文件、16 项通过；正式 Playwright 审计运维入口使用隔离端口验证审计查询、页面展示和资源清理。第二轮复审修复（M1 每租户独立事务清扫、M2 完整性分块滚动校验、L1 telemetry 全局复位、L2 审计写入对指标异常免疫）后回归：`cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q` 68 项通过；`uv run pytest tests/unit tests/contract -q` 896 项通过；`uv run ruff check . && uv run mypy` 185 个源码文件通过；临时 PG 容器 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q` 7 项通过（容器已删除）。S7 HMAC 密钥签名加固（`task/c14-audit-hmac`）：RED 用例证明旧实现对无密钥全量重写伪造链返回 valid=True、保留边界篡改不被检出、密钥缺失不 fail-closed；GREEN 后 `cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q` 78 项通过（既有篡改/尾删/跨块契约全部保持通过）；`uv run pytest tests/unit tests/contract -q` 917 项通过；`uv run ruff check . && uv run mypy` 187 个源码文件通过；临时 PG 容器 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q` 7 项通过（含迁移 `20260716_0025` 真实 PG 升级，容器已删除）；`python3 -m unittest discover -s infra/platform -p 'test_contract.py'` 44 项通过 |
+| C17 能力授权专项（分支内，待合入） | RED 阶段先失败于缺少 `platform/entitlements` 领域、`capability_entitlements` 迁移/仓储、生产 `CapabilityHost`、组合根、`GET /api/v1/capabilities/registry` 三层裁剪、social 路由三层 gate、Demo Seed 授予与前端裁剪条目 schema；GREEN 阶段 `cd backend && uv run pytest tests/unit tests/contract tests/integration/database tests/integration/bootstrap -q` 971 项通过；`uv run ruff check .`、`uv run mypy`（194 文件）通过；`cd frontend && pnpm test` 43 文件 199 项通过；`pnpm lint`、`pnpm typecheck`、`pnpm build` 通过；隔离随机端口/项目名 Playwright `capability-entitlements.spec.ts`（未授权租户菜单不可见且直达被拒；Owner 授予后菜单可见、真实注册设备成功、撤销后入口消失且直连 API 403）与既有 `social-operations.spec.ts` 共 5 项通过；随后第二个隔离随机栈跑完整 Playwright Web 回归 22 项通过（原 20 项 + C17 新增 2 项），两轮验收栈容器/网络/卷均自动销毁 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |

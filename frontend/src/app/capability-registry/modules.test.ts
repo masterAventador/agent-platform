@@ -40,7 +40,24 @@ function descriptor(load: () => Promise<FrontendCapabilityModule>): FrontendCapa
 describe('authorized frontend capability module loading', () => {
   it.each([
     ['deployment 未安装', { ...capability, deployment_installed: false }, new Set(permissions)],
-    ['tenant 未授权', { ...capability, tenant_entitled: false }, new Set(permissions)],
+    [
+      'tenant 未授权（服务端已裁剪声明）',
+      {
+        capability_id: 'social-operations',
+        deployment_installed: true,
+        tenant_entitled: false,
+      },
+      new Set(permissions),
+    ],
+    [
+      '用户被服务端裁剪权限声明',
+      {
+        capability_id: 'social-operations',
+        deployment_installed: true,
+        tenant_entitled: true,
+      },
+      new Set(permissions),
+    ],
     ['用户无 social 权限', capability, new Set(['runs.execute'])],
     [
       'frontend_entries 未知',

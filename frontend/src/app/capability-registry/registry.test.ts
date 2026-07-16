@@ -49,6 +49,50 @@ describe('capability registry', () => {
     })).toThrow()
   })
 
+  it('接受服务端按租户/用户裁剪后的条目：未授权时入口与权限一概不出现', () => {
+    const trimmedUnentitled = {
+      capability_id: 'social-operations',
+      deployment_installed: true,
+      tenant_entitled: false,
+    }
+    const trimmedForbidden = {
+      capability_id: 'social-operations',
+      deployment_installed: true,
+      tenant_entitled: true,
+    }
+
+    expect(parseCapabilityRegistry({
+      schema_version: '1.0',
+      capabilities: [trimmedUnentitled],
+    }).capabilities[0]).toEqual(trimmedUnentitled)
+    expect(parseCapabilityRegistry({
+      schema_version: '1.0',
+      capabilities: [trimmedForbidden],
+    }).capabilities[0]).toEqual(trimmedForbidden)
+  })
+
+  it('拒绝未授权条目仍携带入口或权限声明的响应', () => {
+    expect(() => parseCapabilityRegistry({
+      schema_version: '1.0',
+      capabilities: [{ ...capability, tenant_entitled: false }],
+    })).toThrow()
+  })
+
+  it('裁剪条目按租户/用户层分别得出 not-entitled 与 forbidden', () => {
+    const userPermissions = new Set(capability.permissions)
+
+    expect(resolveCapabilityAccess(
+      { capability_id: 'social-operations', deployment_installed: true, tenant_entitled: false },
+      descriptor,
+      userPermissions,
+    )).toBe('not-entitled')
+    expect(resolveCapabilityAccess(
+      { capability_id: 'social-operations', deployment_installed: true, tenant_entitled: true },
+      descriptor,
+      userPermissions,
+    )).toBe('forbidden')
+  })
+
   it('部署、租户、用户权限和 frontend entry 任一缺失都拒绝装配', () => {
     const userPermissions = new Set(capability.permissions)
 
