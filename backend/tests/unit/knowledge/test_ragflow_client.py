@@ -18,6 +18,8 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
         requests.append(request)
         if request.url.path == "/api/v1/datasets":
             return httpx.Response(200, json={"code": 0, "data": {"id": "ds-1", "name": "制度库"}})
+        if request.method == "DELETE" and request.url.path.endswith("/documents"):
+            return httpx.Response(200, json={"code": 0})
         if request.url.path.endswith("/documents"):
             return httpx.Response(
                 200,
@@ -72,6 +74,10 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
             dataset_id=dataset.provider_id,
             document_ids=[document.provider_id],
         )
+        await client.delete_documents(
+            dataset_id=dataset.provider_id,
+            document_ids=[document.provider_id],
+        )
         result = await client.retrieve(
             question="年假有几天",
             dataset_ids=[dataset.provider_id],
@@ -83,6 +89,12 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
     assert document.status == "UNSTART"
     assert result.citations[0].content == "年假为十天"
     assert all(request.headers["authorization"] == "Bearer secret" for request in requests)
+    delete_request = next(
+        request
+        for request in requests
+        if request.method == "DELETE" and "/documents" in str(request.url)
+    )
+    assert json.loads(delete_request.content) == {"ids": ["doc-1"]}
     retrieval_body = json.loads(requests[-1].content)
     assert retrieval_body["metadata_condition"]["logic"] == "and"
 

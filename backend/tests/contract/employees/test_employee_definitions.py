@@ -18,6 +18,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
+from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
     RunRecord,
@@ -119,6 +120,31 @@ def employee_definition(
             "file_upload": file_upload,
         },
     }
+
+
+async def seed_knowledge_base(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    name: str = "员工知识库",
+) -> UUID:
+    knowledge_base_id = uuid4()
+    async with session_factory() as session:
+        session.add(
+            KnowledgeBaseRecord(
+                id=knowledge_base_id,
+                tenant_id=tenant_id,
+                name=name,
+                description="用于员工绑定校验",
+                provider="ragflow",
+                provider_id=f"ragflow-{knowledge_base_id.hex}",
+                created_by=user_id,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+    return knowledge_base_id
 
 
 def legacy_draft(*, name: str, work_mode: RuntimeType = RuntimeType.WORKFLOW) -> EmployeeDraft:
@@ -385,6 +411,62 @@ async def test_autonomous_employee_accepts_file_upload_capability(
 
 
 @pytest.mark.asyncio
+async def test_employee_knowledge_base_references_must_be_bindable_in_current_tenant(
+    employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    _, session_factory, client = employee_api
+    current_user = await register_and_login(client, "employee-knowledge-bind@example.com")
+    tenant_id = UUID(current_user["workspaces"][0]["id"])
+    user_id = UUID(current_user["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+    bindable_id = await seed_knowledge_base(
+        session_factory,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        name="可绑定知识库",
+    )
+
+    missing_id = uuid4()
+    rejected_create = await client.post(
+        "/api/v1/employees",
+        headers=headers,
+        json={
+            **employee_definition(name="缺失知识库员工"),
+            "knowledge_base_ids": [str(missing_id)],
+        },
+    )
+    assert rejected_create.status_code == 422
+    assert rejected_create.json()["detail"] == {
+        "code": "employee_knowledge_base_not_bindable",
+        "message": "数字员工只能绑定当前企业可用的知识库",
+    }
+
+    created = await client.post(
+        "/api/v1/employees",
+        headers=headers,
+        json={
+            **employee_definition(name="可绑定知识库员工"),
+            "knowledge_base_ids": [str(bindable_id)],
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["definition"]["knowledge_base_ids"] == [str(bindable_id)]
+
+    async with session_factory() as session:
+        record = await session.get(KnowledgeBaseRecord, bindable_id)
+        assert record is not None
+        await session.delete(record)
+        await session.commit()
+
+    rejected_publish = await client.post(
+        f"/api/v1/employees/{created.json()['id']}/publish",
+        headers=headers,
+    )
+    assert rejected_publish.status_code == 422
+    assert rejected_publish.json()["detail"]["code"] == "employee_knowledge_base_not_bindable"
+
+
+@pytest.mark.asyncio
 async def test_legacy_draft_is_readable_but_publish_fails_before_version_creation(
     employee_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
 ) -> None:
@@ -423,9 +505,9 @@ async def test_legacy_draft_is_readable_but_publish_fails_before_version_creatio
         assert persisted is not None and persisted.status is EmployeeStatus.DRAFT
         version_count = (
             await session.execute(
-                select(func.count()).select_from(EmployeeVersionRecord).where(
-                    EmployeeVersionRecord.employee_id == employee.id
-                )
+                select(func.count())
+                .select_from(EmployeeVersionRecord)
+                .where(EmployeeVersionRecord.employee_id == employee.id)
             )
         ).scalar_one()
         assert version_count == 0
@@ -468,9 +550,9 @@ async def test_legacy_published_employee_cannot_create_run_or_command(
     async with session_factory() as session:
         run_count = (
             await session.execute(
-                select(func.count()).select_from(RunRecord).where(
-                    RunRecord.employee_id == published.id
-                )
+                select(func.count())
+                .select_from(RunRecord)
+                .where(RunRecord.employee_id == published.id)
             )
         ).scalar_one()
         command_count = (
@@ -709,6 +791,4 @@ async def test_model_alias_allowlist_is_authoritative_for_update_and_publish(
         headers=headers,
     )
     assert rejected_publish.status_code == 422
-    assert rejected_publish.json()["detail"]["code"] == (
-        "employee_model_alias_unavailable"
-    )
+    assert rejected_publish.json()["detail"]["code"] == ("employee_model_alias_unavailable")

@@ -160,6 +160,13 @@ class RagFlowClient:
             json={"document_ids": document_ids},
         )
 
+    async def delete_documents(self, *, dataset_id: str, document_ids: list[str]) -> None:
+        await self._request(
+            "DELETE",
+            f"/api/v1/datasets/{dataset_id}/documents",
+            json={"ids": document_ids},
+        )
+
     async def list_documents(self, *, dataset_id: str) -> list[KnowledgeDocument]:
         data = await self._request(
             "GET",

@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 
 import { usePublishedSkills } from '../../skills/api/queries'
 import { useAvailableTools } from '../../tools/api/queries'
+import { useKnowledgeBases } from '../../knowledge/api/queries'
 import type { EmployeeWriteDefinition, WorkMode } from '../api/employees'
 import { getEmployeeApiErrorMessage } from '../api/errors'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
@@ -23,6 +24,7 @@ interface EmployeeFormValues {
   outputSchemaText: string
   skillIds: string[]
   toolIds: string[]
+  knowledgeBaseIds: string[]
 }
 
 const defaultValues: EmployeeFormValues = {
@@ -38,6 +40,7 @@ const defaultValues: EmployeeFormValues = {
   outputSchemaText: formatJson({}),
   skillIds: [],
   toolIds: [],
+  knowledgeBaseIds: [],
 }
 
 export function EmployeeEditorPage() {
@@ -48,6 +51,7 @@ export function EmployeeEditorPage() {
   const navigate = useNavigate()
   const skills = usePublishedSkills()
   const tools = useAvailableTools()
+  const knowledgeBases = useKnowledgeBases()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
   const selectedWorkMode = Form.useWatch('workMode', form) ?? 'autonomous'
@@ -74,6 +78,7 @@ export function EmployeeEditorPage() {
       outputSchemaText: formatJson(employee.definition.output_schema),
       skillIds: employee.definition.skill_ids,
       toolIds: employee.definition.tool_ids,
+      knowledgeBaseIds: employee.definition.knowledge_base_ids,
     })
   }, [editingEmployee.data, form])
 
@@ -113,7 +118,7 @@ export function EmployeeEditorPage() {
       },
       skill_ids: values.skillIds,
       tool_ids: values.toolIds,
-      knowledge_base_ids: existing?.knowledge_base_ids ?? [],
+      knowledge_base_ids: values.knowledgeBaseIds,
       approval_policy: existing?.approval_policy ?? {},
       release_strategy: existing?.release_strategy ?? { mode: 'all' },
     }
@@ -273,6 +278,21 @@ export function EmployeeEditorPage() {
               })}
             />
           </Form.Item>
+          <Form.Item label="知识库" name="knowledgeBaseIds">
+            <Select
+              mode="multiple"
+              virtual={false}
+              loading={knowledgeBases.isPending}
+              placeholder="选择当前企业可用的知识库"
+              options={knowledgeBases.data?.map((knowledgeBase) => ({
+                value: knowledgeBase.id,
+                label: knowledgeBase.name,
+              }))}
+            />
+          </Form.Item>
+          <Typography.Paragraph type="secondary">
+            任务运行时会检索已绑定知识库并展示可追溯引用；发布时后端会再次校验知识库仍属于当前企业。
+          </Typography.Paragraph>
           <Space>
             <Button
               type="primary"

@@ -85,6 +85,31 @@ async def _get_base(request: Request, tenant_id: UUID, knowledge_base_id: UUID) 
     return value
 
 
+async def _read_document_upload(file: UploadFile) -> bytes:
+    content = await file.read(MAX_DOCUMENT_BYTES + 1)
+    if len(content) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={"code": "document_too_large", "message": "文档不能超过 50 MB"},
+        )
+    return content
+
+
+async def _upload_document(
+    *,
+    provider: KnowledgeProvider,
+    dataset_id: str,
+    file: UploadFile,
+) -> KnowledgeDocument:
+    content = await _read_document_upload(file)
+    return await provider.upload_document(
+        dataset_id=dataset_id,
+        filename=file.filename or "document",
+        content=content,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+
 @router.post("", response_model=KnowledgeBaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_knowledge_base(
     payload: CreateKnowledgeBaseRequest,
@@ -180,20 +205,112 @@ async def upload_document(
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     provider = _provider_for(request, value)
-    content = await file.read(MAX_DOCUMENT_BYTES + 1)
-    if len(content) > MAX_DOCUMENT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail={"code": "document_too_large", "message": "文档不能超过 50 MB"},
-        )
-    document = await provider.upload_document(
-        dataset_id=value.provider_id,
-        filename=file.filename or "document",
-        content=content,
-        content_type=file.content_type or "application/octet-stream",
-    )
+    document = await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
     await provider.start_parsing(dataset_id=value.provider_id, document_ids=[document.provider_id])
     return document
+
+
+@router.post("/{knowledge_base_id}/documents/batch", response_model=list[KnowledgeDocument])
+async def upload_documents_batch(
+    knowledge_base_id: UUID,
+    request: Request,
+    files: Annotated[list[UploadFile], File()],
+    tenant_id: TenantHeader = None,
+) -> list[KnowledgeDocument]:
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "document_batch_empty", "message": "至少需要上传一个文档"},
+        )
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    provider = _provider_for(request, value)
+    documents = [
+        await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
+        for file in files
+    ]
+    await provider.start_parsing(
+        dataset_id=value.provider_id,
+        document_ids=[document.provider_id for document in documents],
+    )
+    return documents
+
+
+@router.post(
+    "/{knowledge_base_id}/documents/{document_id}/retry",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def retry_document_parsing(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> None:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    await _provider_for(request, value).start_parsing(
+        dataset_id=value.provider_id,
+        document_ids=[document_id],
+    )
+
+
+@router.put("/{knowledge_base_id}/documents/{document_id}", response_model=KnowledgeDocument)
+async def replace_document(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    tenant_id: TenantHeader = None,
+) -> KnowledgeDocument:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+    )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    provider = _provider_for(request, value)
+    document = await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
+    await provider.start_parsing(dataset_id=value.provider_id, document_ids=[document.provider_id])
+    await provider.delete_documents(dataset_id=value.provider_id, document_ids=[document_id])
+    return document
+
+
+@router.delete(
+    "/{knowledge_base_id}/documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_document(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> None:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    await _provider_for(request, value).delete_documents(
+        dataset_id=value.provider_id,
+        document_ids=[document_id],
+    )
 
 
 @router.get("/{knowledge_base_id}/documents", response_model=list[KnowledgeDocument])

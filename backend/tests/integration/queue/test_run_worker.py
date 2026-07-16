@@ -48,6 +48,7 @@ from agent_platform.platform.conversations.entities import (
     ConversationMessageRole,
 )
 from agent_platform.platform.employees.entities import EmployeeVersion
+from agent_platform.platform.knowledge.models import KnowledgeCitation
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
@@ -70,7 +71,10 @@ from agent_platform.workers.run_worker import (
     RunWorker,
     WorkerFenced,
 )
-from agent_platform.workers.runtime_composition import UntrustedRuntimeDefinition
+from agent_platform.workers.runtime_composition import (
+    RuntimeKnowledgeContext,
+    UntrustedRuntimeDefinition,
+)
 
 
 def fail_conversation_projection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,6 +380,7 @@ class CompletedRecoverRuntime(RestorableRuntime):
 class Prepared:
     runtime: CompletingRuntime
     employee_definition: dict[str, object]
+    knowledge_context: RuntimeKnowledgeContext | None = None
     close_calls: int = 0
     close_error: Exception | None = None
     renew_calls: int = 0
@@ -863,6 +868,109 @@ async def test_worker_executes_run_and_persists_events_and_terminal_state(factor
         events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
         assert [event.type for event in events] == [EventType.RUN_STARTED, EventType.RUN_COMPLETED]
         assert await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+
+
+@pytest.mark.asyncio
+async def test_worker_injects_retrieved_knowledge_and_persists_citation_event(factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        action=RunCommandAction.START,
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"runtime_type": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    runtime = CompletingRuntime()
+    resolver = Resolver(runtime)
+    delivery = RunQueueDelivery(
+        delivery_id="knowledge-1-0",
+        message=RunQueueMessage(
+            command_id=command.id,
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action="start",
+        ),
+    )
+    resolver_knowledge = RuntimeKnowledgeContext(
+        citations=(
+            KnowledgeCitation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_name="handbook.pdf",
+                dataset_id="dataset-1",
+                content="年假十天",
+                score=0.91,
+                metadata={"department": "HR"},
+            ),
+        )
+    )
+
+    async def resolve_with_knowledge(run_arg: Run, definition: dict[str, object]) -> Prepared:
+        prepared = await Resolver.resolve(resolver, run_arg, definition)
+        prepared.knowledge_context = resolver_knowledge
+        return prepared
+
+    resolver.resolve = resolve_with_knowledge  # type: ignore[method-assign]
+
+    await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(delivery),
+        runtime_resolver=resolver,
+        consumer_name="test-worker",
+    ).run_once(block_ms=1)
+
+    assert runtime.requests[0].input_data["knowledge_context"] == {
+        "citations": [
+            {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "document_name": "handbook.pdf",
+                "dataset_id": "dataset-1",
+                "content": "年假十天",
+                "score": 0.91,
+                "metadata": {"department": "HR"},
+            }
+        ]
+    }
+    async with factory() as session:
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+    assert [event.type for event in events] == [
+        EventType.RUN_STARTED,
+        EventType.KNOWLEDGE_RETRIEVED,
+        EventType.RUN_COMPLETED,
+    ]
+    assert events[1].payload == {
+        "citation_count": 1,
+        "citations": [
+            {
+                "chunk_id": "chunk-1",
+                "document_id": "doc-1",
+                "document_name": "handbook.pdf",
+                "dataset_id": "dataset-1",
+                "content": "年假十天",
+                "score": 0.91,
+                "metadata": {"department": "HR"},
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio

@@ -36,8 +36,10 @@ class FakeKnowledgeProvider:
         self.provider_name = provider_name
         self.calls: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.deleted_documents: list[tuple[str, list[str]]] = []
         self.parsed: list[tuple[str, list[str]]] = []
         self.create_error: Exception | None = None
+        self._document_sequence = 0
 
     async def create_dataset(
         self, *, name: str, description: str = "", chunk_method: str = "naive"
@@ -56,13 +58,21 @@ class FakeKnowledgeProvider:
     ):
         del content_type
         self.calls.append(("upload", dataset_id))
+        self._document_sequence += 1
         return KnowledgeDocument(
-            provider_id="document-1", name=filename, status="UNSTART", size_bytes=len(content)
+            provider_id=f"document-{self._document_sequence}",
+            name=filename,
+            status="UNSTART",
+            size_bytes=len(content),
         )
 
     async def start_parsing(self, *, dataset_id: str, document_ids: list[str]) -> None:
         self.calls.append(("parse", dataset_id))
         self.parsed.append((dataset_id, document_ids))
+
+    async def delete_documents(self, *, dataset_id: str, document_ids: list[str]) -> None:
+        self.calls.append(("delete_documents", dataset_id))
+        self.deleted_documents.append((dataset_id, document_ids))
 
     async def list_documents(self, *, dataset_id: str):
         self.calls.append(("list", dataset_id))
@@ -155,6 +165,73 @@ async def test_tenant_knowledge_base_document_and_retrieval_flow(knowledge_clien
     )
     assert deleted.status_code == 204
     assert len(provider.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_document_lifecycle_supports_batch_retry_update_and_delete(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    credentials = {
+        "email": "knowledge-doc-lifecycle@example.com",
+        "password": "correct horse battery staple",
+    }
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=headers,
+        json={"name": "文档生命周期知识库"},
+    )
+    assert created.status_code == 201
+    knowledge_base = created.json()
+
+    batch = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/batch",
+        headers=headers,
+        files=[
+            ("files", ("policy-a.txt", b"policy a", "text/plain")),
+            ("files", ("policy-b.txt", b"policy b", "text/plain")),
+        ],
+    )
+    assert batch.status_code == 200
+    assert [document["provider_id"] for document in batch.json()] == [
+        "document-1",
+        "document-2",
+    ]
+    assert provider.parsed[-1][1] == ["document-1", "document-2"]
+
+    retry = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-1/retry",
+        headers=headers,
+    )
+    assert retry.status_code == 204
+    assert provider.parsed[-1][1] == ["document-1"]
+
+    updated = await client.put(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-1",
+        headers=headers,
+        files={"file": ("policy-a-v2.txt", b"policy a v2", "text/plain")},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["provider_id"] == "document-3"
+    assert [call[0] for call in provider.calls[-3:]] == [
+        "upload",
+        "parse",
+        "delete_documents",
+    ]
+    assert len({call[1] for call in provider.calls[-3:]}) == 1
+    assert provider.deleted_documents[-1][1] == ["document-1"]
+    assert provider.parsed[-1][1] == ["document-3"]
+
+    deleted = await client.delete(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/document-2",
+        headers=headers,
+    )
+    assert deleted.status_code == 204
+    assert provider.deleted_documents[-1][1] == ["document-2"]
 
 
 @pytest.mark.asyncio

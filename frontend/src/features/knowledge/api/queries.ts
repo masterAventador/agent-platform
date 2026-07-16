@@ -4,11 +4,15 @@ import { tenantMutationKey } from '../../../api/tenant'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import {
   createKnowledgeBase,
+  deleteDocument,
   deleteKnowledgeBase,
   listDocuments,
   listKnowledgeBases,
+  replaceDocument,
   retrieve,
+  retryDocumentParsing,
   uploadDocument,
+  uploadDocuments,
 } from './knowledge'
 
 
@@ -63,6 +67,51 @@ export function useUploadKnowledgeDocument(id: string) {
   return useMutation({
     mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'upload', id),
     mutationFn: (file: File) => uploadDocument(tenantId!, id, file),
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
+  })
+}
+
+export function useUploadKnowledgeDocuments(id: string) {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'upload-batch', id),
+    mutationFn: (files: File[]) => uploadDocuments(tenantId!, id, files),
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
+  })
+}
+
+export function useRetryKnowledgeDocument(id: string) {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'retry-document', id),
+    mutationFn: (documentId: string) => retryDocumentParsing(tenantId!, id, documentId),
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
+  })
+}
+
+export function useReplaceKnowledgeDocument(id: string) {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'replace-document', id),
+    mutationFn: (payload: { documentId: string; file: File }) =>
+      replaceDocument(tenantId!, id, payload.documentId, payload.file),
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
+  })
+}
+
+export function useDeleteKnowledgeDocument(id: string) {
+  const tenantId = useActiveWorkspaceId()
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationKey: tenantMutationKey(tenantId ?? '', 'knowledge-bases', 'delete-document', id),
+    mutationFn: (documentId: string) => deleteDocument(tenantId!, id, documentId),
     onSuccess: async () =>
       queryClient.invalidateQueries({ queryKey: keys.documents(tenantId!, id) }),
   })

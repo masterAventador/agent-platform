@@ -4,11 +4,14 @@ import { useNavigate, useParams } from 'react-router-dom'
 
 import { getApiErrorMessage } from '../../auth/api/errors'
 import {
+  useDeleteKnowledgeDocument,
   useDeleteKnowledgeBase,
   useKnowledgeBases,
   useKnowledgeDocuments,
   useKnowledgeSearch,
-  useUploadKnowledgeDocument,
+  useReplaceKnowledgeDocument,
+  useRetryKnowledgeDocument,
+  useUploadKnowledgeDocuments,
 } from '../api/queries'
 import './knowledge.css'
 
@@ -25,11 +28,14 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
   const { knowledgeBaseId = '' } = useParams()
   const knowledgeBases = useKnowledgeBases()
   const documents = useKnowledgeDocuments(knowledgeBaseId)
-  const upload = useUploadKnowledgeDocument(knowledgeBaseId)
+  const upload = useUploadKnowledgeDocuments(knowledgeBaseId)
+  const retryDocument = useRetryKnowledgeDocument(knowledgeBaseId)
+  const replaceDocument = useReplaceKnowledgeDocument(knowledgeBaseId)
+  const deleteDocument = useDeleteKnowledgeDocument(knowledgeBaseId)
   const remove = useDeleteKnowledgeBase()
   const search = useKnowledgeSearch(knowledgeBaseId)
   const navigate = useNavigate()
-  const [file, setFile] = useState<File>()
+  const [files, setFiles] = useState<File[]>([])
   const [question, setQuestion] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>()
@@ -60,16 +66,19 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
           <Flex gap={12} align="center">
             <input
               aria-label="选择文档"
+              multiple
               type="file"
-              onChange={(event) => setFile(event.target.files?.[0])}
+              onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
             />
             <Button
               type="primary"
-              disabled={!file}
+              disabled={files.length === 0}
               loading={upload.isPending}
-              onClick={() => canManageKnowledge && file && upload.mutate(file)}
+              onClick={() => canManageKnowledge
+                && files.length > 0
+                && upload.mutate(files, { onSuccess: () => setFiles([]) })}
             >
-              上传并解析
+              批量上传并解析
             </Button>
           </Flex>
         )}
@@ -79,9 +88,53 @@ export function KnowledgeBaseDetailPage({ canManageKnowledge }: { canManageKnowl
               color: 'default', text: document.status,
             }
             return (
-              <Flex key={document.provider_id} className="knowledge-document" justify="space-between">
-                <Typography.Text>{document.name}</Typography.Text>
-                <Tag color={status.color}>{status.text}</Tag>
+              <Flex
+                key={document.provider_id}
+                className="knowledge-document"
+                gap={12}
+                justify="space-between"
+                wrap="wrap"
+              >
+                <Space>
+                  <Typography.Text>{document.name}</Typography.Text>
+                  <Tag color={status.color}>{status.text}</Tag>
+                  <Typography.Text type="secondary">
+                    {document.size_bytes} 字节 · {document.chunk_count} 片段
+                  </Typography.Text>
+                </Space>
+                {canManageKnowledge && (
+                  <Space wrap>
+                    <Button
+                      size="small"
+                      loading={retryDocument.isPending}
+                      onClick={() => retryDocument.mutate(document.provider_id)}
+                    >
+                      {`重试解析 ${document.name}`}
+                    </Button>
+                    <input
+                      aria-label={`选择替换文档 ${document.name}`}
+                      type="file"
+                      onChange={(event) => {
+                        const replacement = event.target.files?.[0]
+                        if (replacement) {
+                          replaceDocument.mutate({
+                            documentId: document.provider_id,
+                            file: replacement,
+                          })
+                        }
+                        event.currentTarget.value = ''
+                      }}
+                    />
+                    <Button
+                      danger
+                      size="small"
+                      loading={deleteDocument.isPending}
+                      onClick={() => deleteDocument.mutate(document.provider_id)}
+                    >
+                      {`删除文档 ${document.name}`}
+                    </Button>
+                  </Space>
+                )}
               </Flex>
             )
           }) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有文档" />}

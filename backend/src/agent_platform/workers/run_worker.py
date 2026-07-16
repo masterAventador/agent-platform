@@ -343,6 +343,7 @@ class RunWorker:
         assert version is not None
 
         cancellation_command_ids: tuple[UUID, ...] = ()
+        knowledge_event: PlatformEvent | None = None
         pending_result = self._pending_results.get(run.id)
         if pending_result is not None:
             if pending_result.command_id != message.command_id:
@@ -381,6 +382,7 @@ class RunWorker:
             self._prepared_runtimes[run.id] = prepared
             self._active_runs[run.id] = run
             runtime = prepared.runtime
+            knowledge_event = self._knowledge_event(run, prepared)
             try:
                 marked_running = await self._mark_running(
                     run,
@@ -487,6 +489,8 @@ class RunWorker:
                     history=None,
                 )
                 raise
+        if knowledge_event is not None:
+            history = self._insert_knowledge_event(history, knowledge_event)
 
         try:
             persisted_status = await self._persist_runtime_result(
@@ -1420,6 +1424,10 @@ class RunWorker:
 
     @staticmethod
     def _runtime_request(run: Run, prepared: PreparedRuntime) -> RuntimeStartRequest:
+        input_data = dict(run.input_data)
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is not None:
+            input_data["knowledge_context"] = knowledge_context.as_input_payload()
         return RuntimeStartRequest(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -1429,8 +1437,40 @@ class RunWorker:
             employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
                 prepared.employee_definition
             ),
-            input_data=run.input_data,
+            input_data=TypeAdapter(dict[str, JsonValue]).validate_python(input_data),
         )
+
+    @staticmethod
+    def _knowledge_event(run: Run, prepared: PreparedRuntime) -> PlatformEvent | None:
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is None:
+            return None
+        payload = {
+            "citation_count": len(knowledge_context.citations),
+            **knowledge_context.as_input_payload(),
+        }
+        return PlatformEvent.create(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            run_id=run.id,
+            sequence=1,
+            event_type=EventType.KNOWLEDGE_RETRIEVED,
+            payload=TypeAdapter(dict[str, JsonValue]).validate_python(payload),
+        )
+
+    @staticmethod
+    def _insert_knowledge_event(
+        history: list[PlatformEvent],
+        knowledge_event: PlatformEvent,
+    ) -> list[PlatformEvent]:
+        if any(event.type is EventType.KNOWLEDGE_RETRIEVED for event in history):
+            return history
+        started_index = next(
+            (index for index, event in enumerate(history) if event.type is EventType.RUN_STARTED),
+            -1,
+        )
+        insert_at = started_index + 1 if started_index >= 0 else 0
+        return [*history[:insert_at], knowledge_event, *history[insert_at:]]
 
     async def _claim_ownership(self, run: Run) -> RuntimeOwnership:
         async with self._session_factory() as session:

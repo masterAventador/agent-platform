@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Employee } from '../api/employees'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
+import { useKnowledgeBases } from '../../knowledge/api/queries'
 import { EmployeeEditorPage } from './EmployeeEditorPage'
 
 
@@ -20,6 +21,10 @@ vi.mock('../../skills/api/queries', () => ({
 
 vi.mock('../../tools/api/queries', () => ({
   useAvailableTools: vi.fn(() => ({ data: [], servers: [], isPending: false })),
+}))
+
+vi.mock('../../knowledge/api/queries', () => ({
+  useKnowledgeBases: vi.fn(() => ({ data: [], isPending: false })),
 }))
 
 const createMutateAsync = vi.fn()
@@ -85,6 +90,7 @@ describe('EmployeeEditorPage configuration availability', () => {
       ...mutation(),
       mutateAsync: updateMutateAsync,
     } as never)
+    vi.mocked(useKnowledgeBases).mockReturnValue({ data: [], isPending: false } as never)
     createMutateAsync.mockResolvedValue(employee)
     updateMutateAsync.mockResolvedValue(employee)
   })
@@ -174,6 +180,33 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
       input_schema: inputSchema,
       output_schema: outputSchema,
+    }))
+  })
+
+  it('submits selected knowledge bases with the employee definition', async () => {
+    const user = userEvent.setup()
+    vi.mocked(useKnowledgeBases).mockReturnValue({
+      data: [{
+        id: 'knowledge-1',
+        tenant_id: 'tenant-1',
+        name: '员工制度',
+        description: 'HR policy',
+        provider: 'ragflow',
+      }],
+      isPending: false,
+    } as never)
+    renderEditor()
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '制度问答专员')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '回答制度问题')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '引用知识库回答')
+    await user.click(screen.getByRole('combobox', { name: '知识库' }))
+    await user.click(screen.getByRole('option', { name: '员工制度' }))
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      knowledge_base_ids: ['knowledge-1'],
     }))
   })
 

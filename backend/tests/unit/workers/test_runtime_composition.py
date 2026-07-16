@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.platform.knowledge.models import KnowledgeCitation, KnowledgeSearchResult
+from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.sandbox.entities import SandboxLease, SandboxScope
@@ -126,6 +129,46 @@ class UnusedGateway:
         raise AssertionError((invocation, context))
 
 
+class RecordingKnowledgeProvider:
+    provider_name = "fake-knowledge"
+
+    def __init__(self) -> None:
+        self.retrieve_calls: list[tuple[str, list[str], int, dict[str, object] | None]] = []
+
+    async def retrieve(
+        self,
+        *,
+        question: str,
+        dataset_ids: list[str],
+        page_size: int = 10,
+        metadata_condition: dict[str, object] | None = None,
+    ) -> KnowledgeSearchResult:
+        self.retrieve_calls.append((question, dataset_ids, page_size, metadata_condition))
+        return KnowledgeSearchResult(
+            total=2,
+            citations=[
+                KnowledgeCitation(
+                    chunk_id="allowed-chunk",
+                    document_id="doc-1",
+                    document_name="handbook.pdf",
+                    dataset_id=dataset_ids[0],
+                    content="年假为十天",
+                    score=0.91,
+                    metadata={"department": "HR"},
+                ),
+                KnowledgeCitation(
+                    chunk_id="foreign-chunk",
+                    document_id="doc-foreign",
+                    document_name="foreign.pdf",
+                    dataset_id="foreign-dataset",
+                    content="不得泄露的其他租户片段",
+                    score=0.99,
+                    metadata={},
+                ),
+            ],
+        )
+
+
 @pytest_asyncio.fixture
 async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -158,11 +201,13 @@ def injected_model_resolver() -> tuple[PlatformModelResolver, GenericFakeChatMod
 def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> None:
     skill_id = uuid4()
     tool_id = uuid4()
+    knowledge_base_id = uuid4()
 
     capabilities = PublishedRuntimeCapabilities.from_definition(
         autonomous_definition(
             skill_ids=[str(skill_id)],
             tool_ids=[str(tool_id)],
+            knowledge_base_ids=[str(knowledge_base_id)],
             capabilities={"conversation": True},
         )
     )
@@ -170,6 +215,7 @@ def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> N
     assert capabilities.model == PublishedModel(kind="gateway_alias", alias="general-purpose")
     assert capabilities.skill_ids == (skill_id,)
     assert capabilities.tool_ids == (tool_id,)
+    assert capabilities.knowledge_base_ids == (knowledge_base_id,)
 
 
 def test_workflow_without_published_identity_fails_closed() -> None:
@@ -194,6 +240,7 @@ def test_workflow_without_published_identity_fails_closed() -> None:
         },
         {**autonomous_definition(), "skill_ids": "not-a-list"},
         {**autonomous_definition(), "tool_ids": ["not-a-uuid"]},
+        {**autonomous_definition(), "knowledge_base_ids": ["not-a-uuid"]},
     ],
 )
 def test_all_invalid_published_fields_are_permanent_preparation_errors(
@@ -329,6 +376,108 @@ async def test_composed_resolver_materializes_attachments_and_installs_artifact_
     assert materialized == [(run.tenant_id, run.id, manager.workspace)]
     assert selector.selection is not None
     assert "create_artifact" in {tool.name for tool in selector.selection["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_composed_resolver_retrieves_bound_knowledge_and_filters_provider_overreach(
+    session_factory,
+) -> None:
+    knowledge_base_id = uuid4()
+    provider_dataset_id = "dataset-allowed"
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    async with session_factory() as session:
+        session.add(
+            KnowledgeBaseRecord(
+                id=knowledge_base_id,
+                tenant_id=run.tenant_id,
+                name="制度库",
+                description="员工制度",
+                provider="fake-knowledge",
+                provider_id=provider_dataset_id,
+                created_by=run.created_by,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    provider = RecordingKnowledgeProvider()
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+        model_resolver=model_resolver,
+        knowledge_provider_registry=KnowledgeProviderRegistry([provider]),
+    )
+
+    prepared = await resolver.resolve(
+        run,
+        autonomous_definition(
+            knowledge_base_ids=[str(knowledge_base_id)],
+            knowledge_retrieval={
+                "limit": 2,
+                "metadata_condition": {
+                    "logic": "and",
+                    "conditions": [{"key": "department", "op": "eq", "value": "HR"}],
+                },
+            },
+        ),
+    )
+
+    assert provider.retrieve_calls == [
+        (
+            "年假有几天",
+            [provider_dataset_id],
+            2,
+            {
+                "logic": "and",
+                "conditions": [{"key": "department", "op": "eq", "value": "HR"}],
+            },
+        )
+    ]
+    assert prepared.knowledge_context is not None
+    assert [citation.chunk_id for citation in prepared.knowledge_context.citations] == [
+        "allowed-chunk"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_published_knowledge_reference_fails_before_sandbox_side_effect(
+    session_factory,
+) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(),
+        model_resolver=model_resolver,
+        knowledge_provider_registry=KnowledgeProviderRegistry([RecordingKnowledgeProvider()]),
+    )
+
+    with pytest.raises(UntrustedRuntimeDefinition, match="published knowledge"):
+        await resolver.resolve(run, autonomous_definition(knowledge_base_ids=[str(uuid4())]))
+
+    assert manager.scope is None
 
 
 @pytest.mark.asyncio
