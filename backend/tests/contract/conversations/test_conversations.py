@@ -129,6 +129,7 @@ async def test_create_conversation_append_message_and_list_timeline_with_run_rel
     assert body["message"]["run_id"] == body["run"]["id"]
     assert body["run"]["conversation_id"] == conversation["id"]
     assert body["run"]["thread_id"] == conversation["thread_id"]
+    assert body["run"]["created_by"] == current_user["id"]
     assert body["run_action"] == "started"
 
     detail = await owner.get(f"/api/v1/conversations/{conversation['id']}", headers=headers)
@@ -329,3 +330,71 @@ async def test_failed_conversation_retry_uses_same_thread_and_bounded_context(
     context_messages = retried["input"]["conversation_context"]["messages"]
     assert 1 <= len(context_messages) <= 8
     assert [message["content"] for message in context_messages][-1] == "历史消息 11"
+
+
+@pytest.mark.asyncio
+async def test_append_during_active_run_persists_followup_intent_command(
+    conversation_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient, AsyncClient],
+) -> None:
+    """活跃任务期间追加消息必须留下可派生的 followup 意图，且不进入执行队列。"""
+    _, session_factory, owner, _ = conversation_api
+    current_user = await _register_and_login(owner, "conversation-followup@example.com")
+    tenant_id = current_user["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    employee = await _published_conversation_employee(owner, tenant_id=tenant_id)
+    conversation = (
+        await owner.post(
+            "/api/v1/conversations",
+            headers=headers,
+            json={"employee_id": employee["id"], "title": "自动续跑"},
+        )
+    ).json()
+    first_turn = (
+        await owner.post(
+            f"/api/v1/conversations/{conversation['id']}/messages",
+            headers=headers,
+            json={"content": "第一轮输入", "dispatch": True},
+        )
+    ).json()
+    assert first_turn["run_action"] == "started"
+    active_run_id = UUID(first_turn["run"]["id"])
+
+    queued = await owner.post(
+        f"/api/v1/conversations/{conversation['id']}/messages",
+        headers=headers,
+        json={"content": "第二轮排队输入", "dispatch": True},
+    )
+    stored = await owner.post(
+        f"/api/v1/conversations/{conversation['id']}/messages",
+        headers=headers,
+        json={"content": "只存储不派发", "dispatch": False},
+    )
+
+    assert queued.status_code == 202
+    queued_body = queued.json()
+    assert queued_body["run_action"] == "queued_after_current"
+    assert queued_body["run"]["id"] == str(active_run_id)
+    assert queued_body["message"]["run_id"] is None
+    assert stored.status_code == 202
+    assert stored.json()["run_action"] == "stored"
+
+    async with session_factory() as session:
+        followups = (
+            (
+                await session.execute(
+                    select(RunCommandRecord).where(
+                        RunCommandRecord.run_id == active_run_id,
+                        RunCommandRecord.action == "followup",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(followups) == 1
+    followup = followups[0]
+    assert followup.payload["message_id"] == queued_body["message"]["id"]
+    assert followup.payload["requested_by"] == current_user["id"]
+    # followup 意图命令不进入执行队列：创建时即视为已分发、仅由 Worker 结算时消费
+    assert followup.dispatched_at is not None
+    assert followup.processed_at is None

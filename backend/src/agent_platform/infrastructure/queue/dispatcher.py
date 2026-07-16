@@ -1,9 +1,16 @@
+from typing import cast
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
 )
-from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue, RunQueueMessage
+from agent_platform.infrastructure.queue.redis_streams import (
+    RedisRunQueue,
+    RunQueueAction,
+    RunQueueMessage,
+)
+from agent_platform.platform.runs.commands import RunCommandAction
 
 
 class RunCommandDispatcher:
@@ -21,13 +28,20 @@ class RunCommandDispatcher:
         async with self._session_factory() as session:
             repository = SqlAlchemyRunCommandRepository(session)
             for command in await repository.pending(limit=limit):
+                action = command.action
+                if action is RunCommandAction.FOLLOWUP:
+                    # 会话续跑意图不进入执行队列；正常创建时 dispatched_at 已置位，
+                    # 此处兜底结清，避免异常数据被反复扫描。
+                    await repository.mark_dispatched(command.id)
+                    await session.commit()
+                    continue
                 try:
                     await self._queue.enqueue(
                         RunQueueMessage(
                             command_id=command.id,
                             run_id=command.run_id,
                             tenant_id=command.tenant_id,
-                            action=command.action.value,
+                            action=cast(RunQueueAction, action.value),
                             payload=command.payload,
                         )
                     )

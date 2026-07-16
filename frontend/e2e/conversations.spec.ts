@@ -30,6 +30,15 @@ test('用户可以从已发布数字员工开始多轮会话并追加输入', as
   await page.getByRole('button', { name: '发送' }).click()
   await expect(page.getByText('继续补充每个方向的风险')).toBeVisible()
 
+  // 活跃关联任务提供会话内直接取消入口和任务详情跳转
+  await expect(page.getByRole('button', { name: '取消任务' })).toBeVisible()
+  const conversationUrl = page.url()
+  await page.getByRole('link', { name: '任务详情' }).click()
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByRole('heading', { name: '任务详情' })).toBeVisible()
+  await page.goto(conversationUrl)
+  await expect(page.getByRole('heading', { name: '会话研究专员' })).toBeVisible()
+
   await page.getByRole('link', { name: '会话中心' }).click()
   await expect(page).toHaveURL(/\/conversations$/)
   await expect(page.getByText('会话研究专员')).toBeVisible()

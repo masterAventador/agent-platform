@@ -25,7 +25,7 @@ const backendEnvironment = {
   AGENT_PLATFORM_REDIS_URL: runtimeRedisUrl,
   AGENT_PLATFORM_RUN_QUEUE_STREAM_NAME: runtimeQueueStream,
   AGENT_PLATFORM_RUN_QUEUE_GROUP_NAME: runtimeQueueGroup,
-  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","structured-output"]',
+  AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","slow-complete","structured-output"]',
 }
 
 export default defineConfig({

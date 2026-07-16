@@ -124,6 +124,22 @@ class SqlAlchemyConversationRepository:
         ).scalar_one_or_none()
         return self._to_entity(record) if record is not None else None
 
+    async def get_for_update(
+        self, *, tenant_id: UUID, conversation_id: UUID
+    ) -> Conversation | None:
+        """锁定会话行，用于序列化「追加消息决策」与「终态结算自动续跑派生」。"""
+        record = (
+            await self._session.execute(
+                select(ConversationRecord)
+                .where(
+                    ConversationRecord.tenant_id == tenant_id,
+                    ConversationRecord.id == conversation_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        return self._to_entity(record) if record is not None else None
+
     async def update(self, conversation: Conversation) -> None:
         record = (
             await self._session.execute(
@@ -245,6 +261,24 @@ class SqlAlchemyConversationMessageRepository:
             )
         )
         await self._session.flush()
+
+    async def get(
+        self,
+        *,
+        tenant_id: UUID,
+        conversation_id: UUID,
+        message_id: UUID,
+    ) -> ConversationMessage | None:
+        record = (
+            await self._session.execute(
+                select(ConversationMessageRecord).where(
+                    ConversationMessageRecord.tenant_id == tenant_id,
+                    ConversationMessageRecord.conversation_id == conversation_id,
+                    ConversationMessageRecord.id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return self._to_entity(record) if record is not None else None
 
     async def next_sequence(self, *, tenant_id: UUID, conversation_id: UUID) -> int:
         result = await self._session.execute(
