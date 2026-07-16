@@ -204,18 +204,21 @@ def create_app(
         await _wait_for_database_ready(configured_session_factory)
         while True:
             try:
-                async with configured_session_factory() as session:
-                    purged = await purge_expired_audit_events(
-                        session,
-                        cutoff=datetime.now(UTC)
-                        - timedelta(days=app_settings.audit_retention_days),
-                        limit=app_settings.audit_retention_sweep_batch_limit,
-                    )
-                    await session.commit()
-                if purged:
+                result = await purge_expired_audit_events(
+                    configured_session_factory,
+                    cutoff=datetime.now(UTC)
+                    - timedelta(days=app_settings.audit_retention_days),
+                    limit=app_settings.audit_retention_sweep_batch_limit,
+                )
+                if result.purged_events:
                     logger.info(
                         "audit_retention_sweep_purged",
-                        extra={"purged_events": purged},
+                        extra={"purged_events": result.purged_events},
+                    )
+                if result.failed_tenants:
+                    logger.warning(
+                        "audit_retention_sweep_partial_failure",
+                        extra={"failed_tenants": result.failed_tenants},
                     )
             except asyncio.CancelledError:
                 raise

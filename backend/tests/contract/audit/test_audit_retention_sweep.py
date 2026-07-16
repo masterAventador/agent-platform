@@ -136,21 +136,163 @@ async def test_purge_expired_audit_events_sweeps_every_tenant_and_keeps_chain_va
         expired_age=timedelta(days=10),
     )
 
-    async with sessions() as session:
-        purged = await purge_expired_audit_events(
-            session,
-            cutoff=datetime.now(UTC) - timedelta(days=7),
-            limit=100,
-        )
-        await session.commit()
+    result = await purge_expired_audit_events(
+        sessions,
+        cutoff=datetime.now(UTC) - timedelta(days=7),
+        limit=100,
+    )
 
-    assert purged == 3
+    assert result.purged_events == 3
+    assert result.failed_tenants == 0
     assert await _count_events(sessions, first_tenant) == 1
     assert await _count_events(sessions, second_tenant) == 2
     async with sessions() as session:
         repository = SqlAlchemyAuditEventRepository(session)
         assert (await repository.verify_integrity(tenant_id=first_tenant)).valid is True
         assert (await repository.verify_integrity(tenant_id=second_tenant)).valid is True
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_purge_commits_each_tenant_before_processing_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第一个租户的链锁必须在处理后续租户前随事务提交释放，禁止跨租户持锁。"""
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    call_log: list[str] = []
+
+    class CommitLoggingSession(AsyncSession):
+        async def commit(self) -> None:
+            call_log.append("commit")
+            await super().commit()
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False, class_=CommitLoggingSession)
+    first_tenant = uuid4()
+    second_tenant = uuid4()
+    await _seed_tenant_events(
+        sessions,
+        first_tenant,
+        expired=1,
+        fresh=1,
+        expired_age=timedelta(days=10),
+    )
+    await _seed_tenant_events(
+        sessions,
+        second_tenant,
+        expired=1,
+        fresh=1,
+        expired_age=timedelta(days=10),
+    )
+
+    original_purge_before = SqlAlchemyAuditEventRepository.purge_before
+
+    async def logging_purge_before(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        tenant_id,
+        cutoff,
+        limit,
+    ):
+        call_log.append(f"purge:{tenant_id}")
+        return await original_purge_before(self, tenant_id=tenant_id, cutoff=cutoff, limit=limit)
+
+    monkeypatch.setattr(SqlAlchemyAuditEventRepository, "purge_before", logging_purge_before)
+    call_log.clear()
+
+    result = await purge_expired_audit_events(
+        sessions,
+        cutoff=datetime.now(UTC) - timedelta(days=7),
+        limit=100,
+    )
+
+    assert result.purged_events == 2
+    assert result.failed_tenants == 0
+    purge_indexes = [index for index, entry in enumerate(call_log) if entry.startswith("purge:")]
+    assert len(purge_indexes) == 2
+    assert "commit" in call_log[purge_indexes[0] + 1 : purge_indexes[1]], (
+        f"第一个租户的清理必须在处理第二个租户前提交，链锁不得跨租户持有: {call_log!r}"
+    )
+    assert "commit" in call_log[purge_indexes[1] + 1 :], (
+        f"第二个租户的清理也必须在自己的事务内提交: {call_log!r}"
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_purge_failure_in_one_tenant_does_not_affect_other_tenants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单租户清理失败只影响该租户自身，其余租户照常清理，部分成功语义明确。"""
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    first_tenant = uuid4()
+    second_tenant = uuid4()
+    await _seed_tenant_events(
+        sessions,
+        first_tenant,
+        expired=1,
+        fresh=1,
+        expired_age=timedelta(days=10),
+    )
+    await _seed_tenant_events(
+        sessions,
+        second_tenant,
+        expired=1,
+        fresh=1,
+        expired_age=timedelta(days=10),
+    )
+
+    original_purge_before = SqlAlchemyAuditEventRepository.purge_before
+
+    async def failing_purge_before(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        tenant_id,
+        cutoff,
+        limit,
+    ):
+        if tenant_id == first_tenant:
+            raise RuntimeError("simulated tenant purge failure")
+        return await original_purge_before(self, tenant_id=tenant_id, cutoff=cutoff, limit=limit)
+
+    monkeypatch.setattr(SqlAlchemyAuditEventRepository, "purge_before", failing_purge_before)
+
+    result = await purge_expired_audit_events(
+        sessions,
+        cutoff=datetime.now(UTC) - timedelta(days=7),
+        limit=100,
+    )
+
+    assert result.purged_events == 1
+    assert result.failed_tenants == 1
+    assert await _count_events(sessions, first_tenant) == 2
+    assert await _count_events(sessions, second_tenant) == 1
+    async with sessions() as session:
+        repository = SqlAlchemyAuditEventRepository(session)
+        assert (await repository.verify_integrity(tenant_id=second_tenant)).valid is True
+
+    monkeypatch.setattr(SqlAlchemyAuditEventRepository, "purge_before", original_purge_before)
+    recovery = await purge_expired_audit_events(
+        sessions,
+        cutoff=datetime.now(UTC) - timedelta(days=7),
+        limit=100,
+    )
+
+    assert recovery.purged_events == 1
+    assert recovery.failed_tenants == 0
+    assert await _count_events(sessions, first_tenant) == 1
+    async with sessions() as session:
+        repository = SqlAlchemyAuditEventRepository(session)
+        assert (await repository.verify_integrity(tenant_id=first_tenant)).valid is True
     await engine.dispose()
 
 

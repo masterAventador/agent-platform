@@ -18,6 +18,10 @@ from opentelemetry.trace import Link, SpanContext, Status, StatusCode, TraceFlag
 
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
+from agent_platform.observability.metrics import (
+    active_operational_metrics,
+    set_operational_metrics,
+)
 from agent_platform.observability.telemetry import (
     InstrumentorSet,
     SanitizingLogExporter,
@@ -266,6 +270,47 @@ def test_shutdown_flushes_and_closes_injected_trace_provider_once() -> None:
     assert meter_provider.shutdown_count == 1
     assert logger_provider.flush_count == 1
     assert logger_provider.shutdown_count == 1
+
+
+def _make_recording_telemetry():  # type: ignore[no-untyped-def]
+    return configure_telemetry(
+        AppSettings(otel_enabled=True),
+        providers=TelemetryProviders(
+            tracer_provider=RecordingTracerProvider(),
+            meter_provider=RecordingMeterProvider(),
+            logger_provider=RecordingLoggerProvider(),
+        ),
+        instrumentors=make_instrumentors()[0],
+    )
+
+
+def test_shutdown_resets_the_operational_metrics_global_it_registered() -> None:
+    telemetry = _make_recording_telemetry()
+    try:
+        assert active_operational_metrics() is telemetry.operational_metrics
+
+        telemetry.shutdown()
+
+        assert active_operational_metrics() is None
+    finally:
+        set_operational_metrics(None)
+
+
+def test_shutdown_keeps_operational_metrics_registered_by_a_newer_telemetry() -> None:
+    first = _make_recording_telemetry()
+    second = _make_recording_telemetry()
+    try:
+        assert active_operational_metrics() is second.operational_metrics
+
+        first.shutdown()
+
+        assert active_operational_metrics() is second.operational_metrics
+
+        second.shutdown()
+
+        assert active_operational_metrics() is None
+    finally:
+        set_operational_metrics(None)
 
 
 def test_instrument_app_records_basic_api_metrics_without_query_or_body() -> None:

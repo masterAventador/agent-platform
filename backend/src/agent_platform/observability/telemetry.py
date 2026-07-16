@@ -38,7 +38,11 @@ from agent_platform.observability.attributes import (
     sanitize_span_attributes,
 )
 from agent_platform.observability.correlation import current_correlation_id
-from agent_platform.observability.metrics import OperationalMetrics, set_operational_metrics
+from agent_platform.observability.metrics import (
+    OperationalMetrics,
+    active_operational_metrics,
+    set_operational_metrics,
+)
 
 _FLUSH_TIMEOUT_MILLIS = 30_000
 _SENSITIVE_HTTP_HEADERS = ["authorization", "cookie", "set-cookie"]
@@ -172,6 +176,11 @@ class Telemetry:
         if self.providers is None or self._shutdown:
             return
         self._shutdown = True
+        if (
+            self.operational_metrics is not None
+            and active_operational_metrics() is self.operational_metrics
+        ):
+            set_operational_metrics(None)
         if self._logging_handler is not None:
             _APPLICATION_LOGGER.removeHandler(self._logging_handler)
             self._logging_handler = None

@@ -203,6 +203,41 @@ async def test_successful_write_verify_and_retention_record_metrics_without_fail
 
 
 @pytest.mark.asyncio
+async def test_audit_write_survives_metric_instrument_failure(
+    audit_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """指标 instrument 抛异常不得回滚或阻断已成功的审计写入。"""
+
+    class ExplodingMetrics:
+        def record(self, **kwargs: object) -> None:
+            raise RuntimeError("metric instrument exploded")
+
+    tenant_id = uuid4()
+    async with audit_sessions() as session:
+        repository = SqlAlchemyAuditEventRepository(
+            session,
+            metrics=cast(OperationalMetrics, ExplodingMetrics()),
+        )
+        event = await repository.add(
+            AuditEventCreate(
+                tenant_id=tenant_id,
+                actor_user_id=None,
+                action="test.metric_failure",
+                resource_type="test",
+            )
+        )
+        await session.commit()
+
+    assert event.sequence == 1
+    async with audit_sessions() as session:
+        stored = await SqlAlchemyAuditEventRepository(session).list(
+            tenant_id=tenant_id,
+            limit=10,
+        )
+    assert [record.action for record in stored] == ["test.metric_failure"]
+
+
+@pytest.mark.asyncio
 async def test_telemetry_wires_operational_metrics_into_audit_write_path(
     audit_sessions: async_sessionmaker[AsyncSession],
 ) -> None:

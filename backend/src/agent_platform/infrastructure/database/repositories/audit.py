@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -41,7 +42,10 @@ from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.tool_gateway.errors import ToolInvocationClaimRejected
 from agent_platform.platform.tool_gateway.models import AuditEventType, ToolAuditEvent
 
+logger = logging.getLogger(__name__)
+
 _REDACTED = "[redacted]"
+_VERIFY_INTEGRITY_DEFAULT_BATCH_SIZE = 1_000
 _SENSITIVE_METADATA_KEYS = frozenset(
     {
         "api_key",
@@ -428,10 +432,14 @@ class SqlAlchemyAuditEventRepository:
         self,
         *,
         tenant_id: UUID,
+        batch_size: int = _VERIFY_INTEGRITY_DEFAULT_BATCH_SIZE,
     ) -> AuditIntegrityVerification:
         started = perf_counter()
         try:
-            verification = await self._verify_integrity(tenant_id=tenant_id)
+            verification = await self._verify_integrity(
+                tenant_id=tenant_id,
+                batch_size=batch_size,
+            )
         except Exception:
             self._record_metric("verify", "failed", started)
             raise
@@ -442,53 +450,73 @@ class SqlAlchemyAuditEventRepository:
         self,
         *,
         tenant_id: UUID,
+        batch_size: int,
     ) -> AuditIntegrityVerification:
+        if batch_size < 1 or batch_size > 10_000:
+            raise ValueError("audit integrity batch size must be between 1 and 10000")
         state = await self._session.get(AuditChainStateRecord, tenant_id)
-        result = await self._session.execute(
-            select(AuditEventRecord)
-            .where(AuditEventRecord.tenant_id == tenant_id)
-            .order_by(AuditEventRecord.sequence)
-        )
-        records = list(result.scalars().all())
         if state is None:
+            first_sequence = (
+                await self._session.execute(
+                    select(AuditEventRecord.sequence)
+                    .where(AuditEventRecord.tenant_id == tenant_id)
+                    .order_by(AuditEventRecord.sequence)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
             return AuditIntegrityVerification(
-                valid=not records,
+                valid=first_sequence is None,
                 checked_events=0,
-                first_invalid_sequence=records[0].sequence if records else None,
+                first_invalid_sequence=first_sequence,
             )
         checked_events = 0
         previous_hash = state.retention_previous_hash
         expected_sequence = state.retained_from_sequence
-        for record in records:
-            if record.sequence != expected_sequence or record.previous_hash != previous_hash:
-                return AuditIntegrityVerification(
-                    valid=False,
-                    checked_events=checked_events,
-                    first_invalid_sequence=expected_sequence,
-                )
-            expected_hash = _calculate_event_hash(
-                event_id=record.id,
-                tenant_id=record.tenant_id,
-                actor_user_id=record.actor_user_id,
-                sequence=record.sequence,
-                action=record.action,
-                resource_type=record.resource_type,
-                resource_id=record.resource_id,
-                outcome=record.outcome,
-                occurred_at=_ensure_aware(record.occurred_at),
-                correlation_id=record.correlation_id,
-                previous_hash=record.previous_hash,
-                metadata=record.metadata_json,
+        last_seen_sequence: int | None = None
+        while True:
+            statement = (
+                select(AuditEventRecord)
+                .where(AuditEventRecord.tenant_id == tenant_id)
+                .order_by(AuditEventRecord.sequence)
+                .limit(batch_size)
             )
-            if expected_hash != record.event_hash:
-                return AuditIntegrityVerification(
-                    valid=False,
-                    checked_events=checked_events,
-                    first_invalid_sequence=record.sequence,
+            if last_seen_sequence is not None:
+                statement = statement.where(AuditEventRecord.sequence > last_seen_sequence)
+            records = list((await self._session.execute(statement)).scalars().all())
+            for record in records:
+                if record.sequence != expected_sequence or record.previous_hash != previous_hash:
+                    return AuditIntegrityVerification(
+                        valid=False,
+                        checked_events=checked_events,
+                        first_invalid_sequence=expected_sequence,
+                    )
+                expected_hash = _calculate_event_hash(
+                    event_id=record.id,
+                    tenant_id=record.tenant_id,
+                    actor_user_id=record.actor_user_id,
+                    sequence=record.sequence,
+                    action=record.action,
+                    resource_type=record.resource_type,
+                    resource_id=record.resource_id,
+                    outcome=record.outcome,
+                    occurred_at=_ensure_aware(record.occurred_at),
+                    correlation_id=record.correlation_id,
+                    previous_hash=record.previous_hash,
+                    metadata=record.metadata_json,
                 )
-            checked_events += 1
-            previous_hash = record.event_hash
-            expected_sequence += 1
+                if expected_hash != record.event_hash:
+                    return AuditIntegrityVerification(
+                        valid=False,
+                        checked_events=checked_events,
+                        first_invalid_sequence=record.sequence,
+                    )
+                checked_events += 1
+                previous_hash = record.event_hash
+                expected_sequence += 1
+            if records:
+                last_seen_sequence = records[-1].sequence
+            if len(records) < batch_size:
+                break
         if (
             expected_sequence != state.head_sequence + 1
             or previous_hash != state.head_hash
@@ -562,12 +590,19 @@ class SqlAlchemyAuditEventRepository:
         metrics = self._metrics or active_operational_metrics()
         if metrics is None:
             return
-        metrics.record(
-            component=OperationalComponent.AUDIT,
-            operation=operation,
-            outcome=outcome,
-            duration_ms=(perf_counter() - started) * 1000,
-        )
+        try:
+            metrics.record(
+                component=OperationalComponent.AUDIT,
+                operation=operation,
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1000,
+            )
+        except Exception:
+            logger.debug(
+                "audit_metric_record_failed",
+                extra={"audit_operation": operation, "audit_outcome": outcome},
+                exc_info=True,
+            )
 
     async def _chain_state_for_update(
         self, *, tenant_id: UUID
@@ -599,26 +634,50 @@ class SqlAlchemyAuditEventRepository:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class AuditRetentionSweepResult:
+    """Partial-success outcome of one retention sweep across all tenants."""
+
+    purged_events: int
+    failed_tenants: int
+
+
 async def purge_expired_audit_events(
-    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
     *,
     cutoff: datetime,
     limit: int,
-) -> int:
-    """Purge expired audit events for every tenant while keeping each hash chain valid."""
+) -> AuditRetentionSweepResult:
+    """Purge expired audit events tenant by tenant, one transaction per tenant.
 
-    repository = SqlAlchemyAuditEventRepository(session)
-    tenant_ids = (
-        (await session.execute(select(AuditChainStateRecord.tenant_id))).scalars().all()
-    )
-    purged = 0
-    for tenant_id in tenant_ids:
-        purged += await repository.purge_before(
-            tenant_id=tenant_id,
-            cutoff=cutoff,
-            limit=limit,
+    Each tenant's chain-state row lock is released by its own commit before the
+    next tenant is processed, so a slow or failing tenant never blocks audit
+    writes of other tenants. A tenant failure is logged and counted without
+    aborting the sweep.
+    """
+
+    async with session_factory() as session:
+        tenant_ids = list(
+            (await session.execute(select(AuditChainStateRecord.tenant_id))).scalars().all()
         )
-    return purged
+    purged = 0
+    failed_tenants = 0
+    for tenant_id in tenant_ids:
+        try:
+            async with session_factory() as session:
+                purged += await SqlAlchemyAuditEventRepository(session).purge_before(
+                    tenant_id=tenant_id,
+                    cutoff=cutoff,
+                    limit=limit,
+                )
+                await session.commit()
+        except Exception:
+            failed_tenants += 1
+            logger.exception(
+                "audit_retention_tenant_purge_failed",
+                extra={"tenant_id": str(tenant_id)},
+            )
+    return AuditRetentionSweepResult(purged_events=purged, failed_tenants=failed_tenants)
 
 
 async def emit_audit_event(

@@ -38,7 +38,7 @@ describe('audit API', () => {
       {
         id: eventId,
         actor_user_id: actorId,
-        sequence: 3,
+        sequence: 2,
         action: 'employee.created',
         metadata: { runtime_type: 'flow' },
       },
