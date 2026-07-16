@@ -19,6 +19,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
         "run-dead-letters",
         "runs",
         "skills",
+        "tool-invocations",
         "tools",
         "workbench",
     }

@@ -32,3 +32,13 @@ class ToolExecutor(Protocol):
 
 class ToolAuditSink(Protocol):
     async def emit(self, event: ToolAuditEvent) -> None: ...
+
+
+class ExecutionCircuit(Protocol):
+    """Per-(tenant, server) fast-fail guard; best-effort, never replaces policy."""
+
+    def allow(self, *, tenant_id: UUID, server_id: UUID) -> bool: ...
+
+    def record_success(self, *, tenant_id: UUID, server_id: UUID) -> None: ...
+
+    def record_failure(self, *, tenant_id: UUID, server_id: UUID) -> None: ...

@@ -64,6 +64,12 @@ class AppSettings(BaseSettings):
     cos_scheme: Literal["http", "https"] = "https"
     local_credentials_file: str | None = None
     local_credentials_repository_root: str | None = None
+    mcp_connection_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    mcp_stdio_allowed_commands: list[str] = Field(default_factory=list)
+    tool_invocation_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    tool_invocation_max_read_retries: int = Field(default=2, ge=0, le=10)
+    tool_circuit_failure_threshold: int = Field(default=5, ge=1, le=100)
+    tool_circuit_cooldown_seconds: float = Field(default=30.0, gt=0, le=3_600)
     sandbox_provider: Literal["local-controller"] = "local-controller"
     sandbox_controller_url: str = "http://sandbox-controller:8090"
     sandbox_controller_secret: SecretStr = SecretStr("")

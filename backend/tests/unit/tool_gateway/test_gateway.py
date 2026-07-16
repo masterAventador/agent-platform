@@ -384,7 +384,7 @@ async def test_executor_secret_is_not_exposed_by_error_or_audit_event() -> None:
         audit_sink=audit,
     )
 
-    with pytest.raises(ToolExecutionError, match="Tool execution failed") as captured:
+    with pytest.raises(ToolExecutionError, match="tool_execution_failed") as captured:
         await gateway.invoke(request, context())
 
     assert captured.value.__cause__ is None

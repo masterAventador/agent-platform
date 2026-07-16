@@ -200,3 +200,108 @@ test('用户可以取消正在调用模型的真实 Worker 任务且运行停止
   )).toBe('1|0|0')
   expect(existsSync(slowModelSideEffectFile)).toBe(false)
 })
+
+// C09：真实 Worker 通过 Tool Gateway 调用本地 MCP stub；禁用后调用被拒并留下审计与界面记录。
+test('员工任务可调用 MCP 工具且禁用后调用被拒', async ({ page }) => {
+  test.setTimeout(240_000)
+  const stubPort = process.env.PLAYWRIGHT_RUNTIME_MCP_STUB_PORT ?? '18941'
+  const stubBase = `http://127.0.0.1:${stubPort}`
+  await page.request.post(`${stubBase}/__control/profile`, { data: { profile: 'v1' } })
+  await page.request.post(`${stubBase}/__control/mode`, { data: { mode: 'normal' } })
+  await page.request.post(`${stubBase}/__control/auth`, { data: { token: null } })
+
+  await registerAndLogin(page)
+
+  // 注册 stub Server 并自动发现工具
+  await page.getByRole('link', { name: '工具与 MCP' }).click()
+  await page.getByRole('button', { name: '注册 MCP Server' }).click()
+  await page.getByLabel('Server 名称').fill('运行时工具 MCP')
+  await page.getByLabel('服务地址').fill(`${stubBase}/mcp`)
+  await page.getByRole('dialog').getByRole('button', { name: '注册 Server' }).click()
+  const serverRow = page.getByRole('row', { name: /运行时工具 MCP Streamable HTTP/ })
+  await serverRow.getByRole('button', { name: '同步工具' }).click()
+  const syncDialog = page.getByRole('dialog')
+  await expect(syncDialog.getByText('同步结果')).toBeVisible()
+  await syncDialog.getByRole('button', { name: 'Close' }).click()
+
+  // 把发现的工具调成只读（免审批）并启用
+  const toolRow = page.getByRole('row', { name: /search_customers 运行时工具 MCP/ })
+  await toolRow.getByRole('button', { name: /编\s*辑/ }).click()
+  const editDialog = page.getByRole('dialog')
+  await editDialog.getByLabel('风险等级').click()
+  await page.getByText('只读', { exact: true }).last().click()
+  await editDialog.getByRole('button', { name: '保存修改' }).click()
+  await toolRow.getByRole('button', { name: /启\s*用/ }).click()
+  await expect(toolRow).toContainText('已启用')
+
+  // 创建绑定该工具的员工（tool-call 是 Worker 夹具专用 alias）
+  await page.route(/\/api\/v1\/employees$/, async (route) => {
+    const request = route.request()
+    if (request.method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    const payload = request.postDataJSON() as Record<string, unknown>
+    await route.continue({
+      headers: { ...request.headers(), 'content-type': 'application/json' },
+      postData: JSON.stringify({
+        ...payload,
+        model: { kind: 'gateway_alias', alias: 'tool-call' },
+      }),
+    })
+  })
+
+  await page.getByRole('link', { name: '数字员工' }).click()
+  await page.getByRole('button', { name: '创建数字员工' }).click()
+  await page.getByLabel('员工名称').fill('工具调用验收专员')
+  await page.getByLabel('岗位说明').fill('验证工具网关调用链路')
+  await page.getByLabel('系统指令').fill('查询客户时调用企业搜索工具。')
+  await page.getByLabel('Tools').click()
+  await page.getByText('运行时工具 MCP / search_customers', { exact: true }).last().click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '保存草稿' }).click()
+  await expect(page).toHaveURL(/\/employees\/[0-9a-f-]+$/)
+  await page.getByRole('button', { name: '发布员工' }).click()
+  await expect(page.getByText('已发布', { exact: true })).toBeVisible()
+  const employeeUrl = page.url()
+
+  // 启用状态下任务完成且工具真实执行
+  await page.getByRole('button', { name: '发起任务' }).click()
+  await page.getByLabel('任务内容').fill('查询 acme 客户信息')
+  await page.getByRole('button', { name: '确认发起' }).click()
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('Tool call completed in the real worker.', { exact: true }),
+  ).toBeVisible()
+
+  // 禁用工具后新任务调用被拒
+  await page.getByRole('link', { name: '工具与 MCP' }).click()
+  await toolRow.getByRole('button', { name: /禁\s*用/ }).click()
+  await expect(toolRow).toContainText('已禁用')
+
+  await page.goto(employeeUrl)
+  await page.getByRole('button', { name: '发起任务' }).click()
+  await page.getByLabel('任务内容').fill('再次查询 acme 客户信息')
+  await page.getByRole('button', { name: '确认发起' }).click()
+  await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('Tool call was denied by the platform.', { exact: true }),
+  ).toBeVisible()
+
+  // 调用记录界面能看到成功与拒绝原因
+  await page.getByRole('link', { name: '工具与 MCP' }).click()
+  const recordsCard = page.locator('.tool-registry-card', { hasText: '工具调用记录' })
+  await expect(recordsCard.getByText('已拒绝').first()).toBeVisible()
+  await expect(recordsCard.getByText('tool_disabled').first()).toBeVisible()
+  await expect(recordsCard.getByText('已完成').first()).toBeVisible()
+
+  // 审计事实：STARTED/COMPLETED 与拒绝记录都持久化
+  expect(Number(queryRuntimeDatabase(
+    "SELECT count(*) FROM tool_audit_events WHERE event_type = 'tool.rejected' AND reason = 'tool_disabled' AND tool_name = 'search_customers'",
+  ))).toBeGreaterThan(0)
+  expect(Number(queryRuntimeDatabase(
+    "SELECT count(*) FROM tool_audit_events WHERE event_type = 'tool.completed' AND succeeded AND tool_name = 'search_customers'",
+  ))).toBeGreaterThan(0)
+})

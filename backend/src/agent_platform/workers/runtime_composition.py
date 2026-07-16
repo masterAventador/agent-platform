@@ -537,8 +537,12 @@ class ComposedRuntimeResolver:
                         tenant_id=run.tenant_id,
                         tool_id=tool_id,
                     )
-                    if tool is None or not tool.enabled:
+                    if tool is None:
+                        # 已删除的引用没有可组装的定义，保持 fail-closed。
                         raise UntrustedRuntimeDefinition("published tool is unavailable")
+                    # 禁用/上游移除的工具仍然组装：调用点由 Tool Gateway 策略
+                    # 拒绝并留下 tool.rejected 审计，避免单个工具下线导致
+                    # 员工其他能力整体不可用。
                     tool_metadata.append(tool)
 
             gateway_adapter = ToolGatewayAdapter(

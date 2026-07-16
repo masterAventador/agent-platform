@@ -640,7 +640,96 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0024"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0027"
+
+
+def test_tool_lifecycle_migration_adds_versioning_sync_and_connection_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "tool-lifecycle.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "20260716_0024")
+    tenant_id = str(uuid4())
+    user_id = str(uuid4())
+    server_id = str(uuid4())
+    tool_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) "
+            "VALUES (?, 'T', 't', CURRENT_TIMESTAMP)",
+            (tenant_id,),
+        )
+        connection.execute(
+            "INSERT INTO users (id, email, email_verified, password_hash, created_at) "
+            "VALUES (?, 'tool-migration@example.com', 0, 'x', CURRENT_TIMESTAMP)",
+            (user_id,),
+        )
+        connection.execute(
+            "INSERT INTO mcp_servers "
+            "(id, tenant_id, name, transport, endpoint, command, args, secret_reference, "
+            "enabled, created_by, created_at, updated_at) "
+            "VALUES (?, ?, 'legacy', 'streamable_http', 'https://mcp.example.com', NULL, "
+            "'[]', NULL, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (server_id, tenant_id, user_id),
+        )
+        connection.execute(
+            "INSERT INTO tools "
+            "(id, tenant_id, server_id, name, description, input_schema, risk_level, "
+            "enabled, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'legacy.tool', '', '{}', 'read', 1, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (tool_id, tenant_id, server_id),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        server_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(mcp_servers)")
+        }
+        tool_columns = {row[1] for row in connection.execute("PRAGMA table_info(tools)")}
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        legacy_tool = connection.execute(
+            "SELECT origin, approval_policy, upstream_missing, version FROM tools WHERE id = ?",
+            (tool_id,),
+        ).fetchone()
+        backfilled_versions = connection.execute(
+            "SELECT version, change_source FROM tool_versions WHERE tool_id = ?",
+            (tool_id,),
+        ).fetchall()
+
+    assert {
+        "connection_status",
+        "connection_tested_at",
+        "connection_error_code",
+        "last_synced_at",
+    }.issubset(server_columns)
+    assert {"origin", "approval_policy", "upstream_missing", "version"}.issubset(tool_columns)
+    assert {"tool_versions", "mcp_sync_reports"}.issubset(tables)
+    assert legacy_tool == ("manual", "risk_based", 0, 1)
+    assert backfilled_versions == [(1, "initial")]
+
+    command.downgrade(config, "20260716_0024")
+    with sqlite3.connect(database_path) as connection:
+        tables_after = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        tool_columns_after = {
+            row[1] for row in connection.execute("PRAGMA table_info(tools)")
+        }
+    assert {"tool_versions", "mcp_sync_reports"}.isdisjoint(tables_after)
+    assert "approval_policy" not in tool_columns_after
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

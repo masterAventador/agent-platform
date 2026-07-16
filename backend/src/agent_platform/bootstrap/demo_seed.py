@@ -31,7 +31,11 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
     TenantRecord,
 )
-from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.database.repositories.tools import (
+    McpServerRecord,
+    ToolRecord,
+    ToolVersionRecord,
+)
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
 )
@@ -68,6 +72,7 @@ DEMO_COMPLETED_RUN_ID = uuid5(_DEMO_NAMESPACE, "completed-run")
 DEMO_FAILED_RUN_ID = uuid5(_DEMO_NAMESPACE, "failed-run")
 DEMO_MCP_SERVER_ID = uuid5(_DEMO_NAMESPACE, "disabled-mcp-server")
 DEMO_TOOL_ID = uuid5(_DEMO_NAMESPACE, "disabled-tool")
+DEMO_TOOL_VERSION_ID = uuid5(_DEMO_NAMESPACE, "disabled-tool-version-1")
 DEMO_DEAD_LETTER_ID = uuid5(_DEMO_NAMESPACE, "settled-dead-letter")
 DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
@@ -117,6 +122,7 @@ type DemoRecord = (
     | RunEventRecord
     | McpServerRecord
     | ToolRecord
+    | ToolVersionRecord
     | RunDeadLetterRecord
     | FileRecord
     | TaskAttachmentRecord
@@ -499,6 +505,30 @@ def _demo_records(
                 "input_schema",
                 "risk_level",
                 "enabled",
+            ),
+        ),
+        (
+            ToolVersionRecord(
+                id=DEMO_TOOL_VERSION_ID,
+                tenant_id=DEMO_TENANT_ID,
+                tool_id=DEMO_TOOL_ID,
+                version=1,
+                description="禁用的本地演示工具，不会发起外部调用。",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.READ.value,
+                approval_policy="risk_based",
+                change_source="initial",
+                created_at=_DEMO_CREATED_AT,
+            ),
+            (
+                "tenant_id",
+                "tool_id",
+                "version",
+                "description",
+                "input_schema",
+                "risk_level",
+                "approval_policy",
+                "change_source",
             ),
         ),
         (

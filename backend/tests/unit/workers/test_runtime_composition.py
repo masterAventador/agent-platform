@@ -648,3 +648,115 @@ def test_default_autonomous_selector_injects_durable_checkpointer(monkeypatch) -
     )
 
     assert calls == [(environment, model, checkpointer)]
+
+
+@pytest.mark.asyncio
+async def test_disabled_or_upstream_missing_tools_still_compose_for_call_time_denial(
+    session_factory,
+) -> None:
+    """C09：禁用/上游移除只在调用点由 Gateway 拒绝，不使整个任务无法启动。"""
+    from agent_platform.infrastructure.database.repositories.tools import (
+        SqlAlchemyToolRepository,
+    )
+    from agent_platform.platform.tools.entities import (
+        McpServer,
+        McpTransport,
+        Tool,
+        ToolRiskLevel,
+    )
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    server = McpServer.create(
+        tenant_id=run.tenant_id,
+        created_by=run.created_by,
+        name="composition-mcp",
+        transport=McpTransport.STREAMABLE_HTTP,
+        endpoint="https://mcp.example.com/api",
+        command=None,
+        args=[],
+        secret_reference=None,
+        enabled=True,
+    )
+    disabled_tool = Tool.create(
+        tenant_id=run.tenant_id,
+        server_id=server.id,
+        name="disabled_tool",
+        description="",
+        input_schema={"type": "object"},
+        risk_level=ToolRiskLevel.READ,
+        enabled=False,
+    )
+    missing_tool = Tool.create(
+        tenant_id=run.tenant_id,
+        server_id=server.id,
+        name="missing_tool",
+        description="",
+        input_schema={"type": "object"},
+        risk_level=ToolRiskLevel.READ,
+        enabled=True,
+    ).mark_upstream_missing(missing=True, at=__import__("datetime").datetime.now(
+        __import__("datetime").UTC
+    ))
+    async with session_factory() as session:
+        repository = SqlAlchemyToolRepository(session)
+        await repository.add_server(server)
+        await repository.add_tool(disabled_tool)
+        await repository.add_tool(missing_tool)
+        await session.commit()
+
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+        model_resolver=model_resolver,
+    )
+
+    await resolver.resolve(
+        run,
+        autonomous_definition(
+            tool_ids=[str(disabled_tool.id), str(missing_tool.id)],
+        ),
+    )
+
+    assert selector.selection is not None
+    tool_names = {tool.name for tool in selector.selection["tools"]}
+    assert {"disabled_tool", "missing_tool"}.issubset(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_deleted_tool_reference_still_fails_closed(session_factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+        model_resolver=model_resolver,
+    )
+
+    with pytest.raises(UntrustedRuntimeDefinition):
+        await resolver.resolve(
+            run,
+            autonomous_definition(tool_ids=[str(uuid4())]),
+        )
