@@ -22,8 +22,21 @@ RAGFlow API 地址为 `http://127.0.0.1:19380`，Web 管理界面为
 
 管理脚本通过官方 Compose 环境变量设置独立宿主机端口：MySQL `13306`、Valkey
 `16379`、MinIO `19000/19001`、Elasticsearch `19200`。平台不得连接这些内部端口。
+宿主机端口被其他进程占用（如常驻开发栈、SSH 隧道）时，可用 `RAGFLOW_*_PORT`
+环境变量覆盖默认值，例如 `RAGFLOW_REDIS_PORT=26379 RAGFLOW_MINIO_PORT=29000
+RAGFLOW_MINIO_CONSOLE_PORT=29001 RAGFLOW_WEB_HTTP_PORT=28080 manage.sh up`；
+`down`/`status` 也要携带同一组变量。
+
+默认启用官方 `tei-cpu` profile 提供本地 embedding。默认模型为最小的
+`BAAI/bge-small-en-v1.5`（**英文-only**；`Qwen/Qwen3-Embedding-0.6B` 与
+`BAAI/bge-m3` 在本机 CPU warmup 都可能超出可用内存被 OOM 因而不作默认）。
+**中文语料请用 `RAGFLOW_TEI_MODEL=BAAI/bge-m3` 覆盖**（需保证 Docker 内存充足），
+否则中文检索召回质量会明显下降。不启用 TEI 时 RAGFlow 没有默认 embedding
+模型，文档解析会以 "No default embedding model is set" 失败。profiles 可用
+`RAGFLOW_COMPOSE_PROFILES` 覆盖。
+
 本机覆盖同时将 Elasticsearch JVM 堆固定为 512MB、容器上限设为 1.5GB。完整运行
-RAGFlow、Admin Server、Elasticsearch 及平台基础设施时，Docker/Colima 虚拟机至少应
+RAGFlow、TEI、Elasticsearch 及平台基础设施时，Docker/Colima 虚拟机至少应
 分配 8GB 内存；本项目当前开发机使用 8 核、16GB。正式环境必须按实际容量独立配置，
 不复用该开发值。
 

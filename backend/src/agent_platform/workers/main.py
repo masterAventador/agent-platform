@@ -49,8 +49,10 @@ from agent_platform.infrastructure.object_storage.minio import (
     MinioSkillStorage,
 )
 from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue
+from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 from agent_platform.observability.telemetry import configure_telemetry
+from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.tool_gateway import (
     InMemoryToolCircuitBreaker,
     ToolDefinition,
@@ -417,6 +419,18 @@ def _build_runtime_resolver(
         ),
     )
     minio = create_bounded_minio_client(settings)
+    knowledge_provider = RagFlowClient(
+        base_url=settings.ragflow_url,
+        api_key=settings.ragflow_api_key,
+        metrics=metrics,
+    )
+
+    async def close_adapters_and_knowledge_provider() -> None:
+        try:
+            await adapters.aclose()
+        finally:
+            await knowledge_provider.aclose()
+
     return ComposedRuntimeResolver(
         session_factory=session_factory,
         skill_storage=MinioSkillStorage(
@@ -441,7 +455,8 @@ def _build_runtime_resolver(
             settings.artifact_storage_operation_heartbeat_seconds
         ),
         artifact_storage_request_timeout=(settings.artifact_storage_request_timeout_seconds),
-        close_callback=adapters.aclose,
+        knowledge_provider_registry=KnowledgeProviderRegistry([knowledge_provider]),
+        close_callback=close_adapters_and_knowledge_provider,
         model_resolver=model_resolver,
     )
 

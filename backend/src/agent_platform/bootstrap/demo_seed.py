@@ -26,6 +26,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
     EmployeeVersionRecord,
 )
+from agent_platform.infrastructure.database.repositories.entitlements import (
+    CapabilityEntitlementRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
@@ -77,6 +80,7 @@ DEMO_DEAD_LETTER_ID = uuid5(_DEMO_NAMESPACE, "settled-dead-letter")
 DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
+DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 
 DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
 DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
@@ -114,6 +118,7 @@ class DemoSeedSummary:
 
 type DemoRecord = (
     UserRecord
+    | CapabilityEntitlementRecord
     | TenantRecord
     | TenantMembershipRecord
     | EmployeeRecord
@@ -261,7 +266,7 @@ def _demo_records(
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
-            "conversation": False,
+            "conversation": True,
             "scheduled_tasks": False,
             "file_upload": True,
         },
@@ -312,6 +317,22 @@ def _demo_records(
             ("name", "slug"),
         ),
         (
+            CapabilityEntitlementRecord(
+                id=DEMO_SOCIAL_ENTITLEMENT_ID,
+                tenant_id=DEMO_TENANT_ID,
+                capability_id="social-operations",
+                status="active",
+                source="demo-seed",
+                expires_at=None,
+                granted_at=_DEMO_CREATED_AT,
+                granted_by=DEMO_USER_ID,
+                revoked_at=None,
+                revoked_by=None,
+                revision=1,
+            ),
+            ("capability_id", "status", "source", "expires_at", "revoked_at", "revoked_by"),
+        ),
+        (
             TenantMembershipRecord(
                 id=DEMO_MEMBERSHIP_ID,
                 tenant_id=DEMO_TENANT_ID,
@@ -356,7 +377,7 @@ def _demo_records(
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 capabilities={
-                    "conversation": False,
+                    "conversation": True,
                     "scheduled_tasks": False,
                     "file_upload": True,
                 },

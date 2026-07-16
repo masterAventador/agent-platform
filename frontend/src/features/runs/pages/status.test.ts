@@ -31,4 +31,11 @@ describe('formatRunEvent', () => {
       content: 'result.txt',
     })
   })
+
+  it('展示知识库检索引用数量', () => {
+    expect(formatRunEvent('knowledge.retrieved', { citation_count: 2 })).toEqual({
+      label: '检索知识库引用',
+      content: '引用 2 个知识片段',
+    })
+  })
 })

@@ -33,3 +33,7 @@ class EmployeeSkillPolicy(Protocol):
 
 class EmployeeToolPolicy(Protocol):
     async def are_bindable(self, *, tenant_id: UUID, tool_ids: list[UUID]) -> bool: ...
+
+
+class EmployeeKnowledgeBasePolicy(Protocol):
+    async def are_bindable(self, *, tenant_id: UUID, knowledge_base_ids: list[UUID]) -> bool: ...

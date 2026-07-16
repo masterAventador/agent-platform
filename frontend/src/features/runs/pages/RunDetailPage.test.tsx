@@ -231,6 +231,36 @@ describe('RunDetailPage tenant-scoped event stream', () => {
     expect(mutate).toHaveBeenCalledWith('artifact-1')
   })
 
+  it('renders knowledge citations from retrieved knowledge events', () => {
+    vi.mocked(useRunEvents).mockReturnValue({
+      data: [{
+        event_id: 'knowledge-event',
+        type: 'knowledge.retrieved',
+        sequence: 2,
+        payload: {
+          citation_count: 1,
+          citations: [{
+            chunk_id: 'chunk-1',
+            document_id: 'doc-1',
+            document_name: 'handbook.pdf',
+            dataset_id: 'dataset-1',
+            content: '年假十天',
+            score: 0.91,
+            metadata: { department: 'HR' },
+          }],
+        },
+      }],
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.getByText('检索知识库引用')).toBeInTheDocument()
+    expect(screen.getByText('引用 1 个知识片段')).toBeInTheDocument()
+    expect(screen.getByText('handbook.pdf')).toBeInTheDocument()
+    expect(screen.getByText('年假十天')).toBeInTheDocument()
+  })
+
   it('renders card structured output from the run output schema and exports JSON', async () => {
     const user = (await import('@testing-library/user-event')).default.setup()
     const saveFile = vi.fn()

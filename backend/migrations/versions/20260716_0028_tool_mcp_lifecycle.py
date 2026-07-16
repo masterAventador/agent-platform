@@ -11,8 +11,8 @@ from uuid import uuid4
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260716_0027"
-down_revision: str | None = "20260716_0024"
+revision: str = "20260716_0028"
+down_revision: str | None = "20260716_0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

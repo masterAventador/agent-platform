@@ -13,6 +13,13 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy.dialects import postgresql
 
+from agent_platform.platform.audit.hashing import (
+    HMAC_SHA256_V1_ALGORITHM,
+    INSECURE_DEV_AUDIT_HMAC_KEY,
+    LEGACY_SHA256_ALGORITHM,
+    AuditHasher,
+)
+
 BACKEND_ROOT = Path(__file__).parents[3]
 
 
@@ -290,6 +297,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "correlation_id",
         "previous_hash",
         "event_hash",
+        "hash_algorithm",
         "metadata",
     } == audit_event_columns
     assert {
@@ -306,6 +314,8 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "head_hash",
         "retained_from_sequence",
         "retention_previous_hash",
+        "head_seal",
+        "head_seal_algorithm",
         "updated_at",
     } == audit_chain_state_columns
     assert {
@@ -642,7 +652,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0027"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0028"
 
 
 def test_tool_lifecycle_migration_adds_versioning_sync_and_connection_state(
@@ -732,6 +742,52 @@ def test_tool_lifecycle_migration_adds_versioning_sync_and_connection_state(
         }
     assert {"tool_versions", "mcp_sync_reports"}.isdisjoint(tables_after)
     assert "approval_policy" not in tool_columns_after
+
+
+def test_capability_entitlement_migration_creates_and_removes_table(tmp_path: Path) -> None:
+    database_path = tmp_path / "entitlements-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(capability_entitlements)"
+            ).fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'capability_entitlements'"
+            ).fetchall()
+        }
+    assert {
+        "id",
+        "tenant_id",
+        "capability_id",
+        "status",
+        "source",
+        "expires_at",
+        "granted_at",
+        "granted_by",
+        "revoked_at",
+        "revoked_by",
+        "revision",
+    } == columns
+    assert "uq_capability_entitlements_tenant_capability" in indexes
+
+    command.downgrade(config, "20260716_0025")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'capability_entitlements'"
+        ).fetchall()
+    assert remaining == []
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(
@@ -1048,3 +1104,76 @@ def test_tool_lifecycle_backfill_succeeds_on_real_postgres_with_existing_tools()
             )
             connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{scratch_database}"'))
         admin_engine.dispose()
+
+
+def test_audit_hmac_migration_backfills_chain_head_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0025 必须为存量链头补 HMAC 封印，存量事件保留 legacy 算法标识。"""
+
+    monkeypatch.delenv("AGENT_PLATFORM_AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.setenv("AGENT_PLATFORM_APP_ENVIRONMENT", "test")
+    database_path = tmp_path / "audit-hmac.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "20260716_0024")
+
+    tenant_id = uuid4()
+    event_id = uuid4()
+    head_hash = "a" * 64
+    timestamp = "2026-07-16 08:00:00+00:00"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                id, tenant_id, actor_user_id, sequence, action, resource_type,
+                resource_id, outcome, occurred_at, correlation_id, previous_hash,
+                event_hash, metadata
+            ) VALUES (?, ?, NULL, 1, 'legacy.event', 'test', NULL, 'succeeded',
+                      ?, NULL, NULL, ?, '{}')
+            """,
+            (event_id.hex, tenant_id.hex, timestamp, head_hash),
+        )
+        connection.execute(
+            """
+            INSERT INTO audit_chain_states (
+                tenant_id, head_sequence, head_hash, retained_from_sequence,
+                retention_previous_hash, updated_at
+            ) VALUES (?, 1, ?, 1, NULL, ?)
+            """,
+            (tenant_id.hex, head_hash, timestamp),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        algorithm = connection.execute(
+            "SELECT hash_algorithm FROM audit_events WHERE id = ?",
+            (event_id.hex,),
+        ).fetchone()[0]
+        head_seal, head_seal_algorithm = connection.execute(
+            "SELECT head_seal, head_seal_algorithm FROM audit_chain_states "
+            "WHERE tenant_id = ?",
+            (tenant_id.hex,),
+        ).fetchone()
+    assert algorithm == LEGACY_SHA256_ALGORITHM
+    assert head_seal_algorithm == HMAC_SHA256_V1_ALGORITHM
+    assert head_seal == AuditHasher(INSECURE_DEV_AUDIT_HMAC_KEY).chain_head_seal(
+        tenant_id=tenant_id,
+        head_sequence=1,
+        head_hash=head_hash,
+        retained_from_sequence=1,
+        retention_previous_hash=None,
+    )
+
+    command.downgrade(config, "20260716_0024")
+    with sqlite3.connect(database_path) as connection:
+        event_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(audit_events)")
+        }
+        state_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(audit_chain_states)")
+        }
+    assert "hash_algorithm" not in event_columns
+    assert {"head_seal", "head_seal_algorithm"}.isdisjoint(state_columns)

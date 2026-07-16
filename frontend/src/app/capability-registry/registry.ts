@@ -10,13 +10,26 @@ export const resourceDeclarationsSchema = z.array(resourceDeclaration).min(1).su
   },
 )
 
-const capabilityRegistryEntrySchema = z.object({
-  capability_id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+const capabilityIdSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+
+const authorizedCapabilityEntrySchema = z.object({
+  capability_id: capabilityIdSchema,
   deployment_installed: z.boolean(),
-  tenant_entitled: z.boolean(),
+  tenant_entitled: z.literal(true),
   frontend_entries: resourceDeclarationsSchema,
   permissions: resourceDeclarationsSchema,
 }).strict()
+
+const trimmedCapabilityEntrySchema = z.object({
+  capability_id: capabilityIdSchema,
+  deployment_installed: z.boolean(),
+  tenant_entitled: z.boolean(),
+}).strict()
+
+const capabilityRegistryEntrySchema = z.union([
+  authorizedCapabilityEntrySchema,
+  trimmedCapabilityEntrySchema,
+])
 
 const capabilityRegistrySchema = z.object({
   schema_version: z.literal('1.0'),
@@ -28,6 +41,7 @@ const capabilityRegistrySchema = z.object({
   }
 })
 
+export type AuthorizedCapabilityRegistryEntry = z.infer<typeof authorizedCapabilityEntrySchema>
 export type CapabilityRegistryEntry = z.infer<typeof capabilityRegistryEntrySchema>
 export type CapabilityRegistry = z.infer<typeof capabilityRegistrySchema>
 export type CapabilityAccess =
@@ -51,6 +65,12 @@ export interface CapabilityAccessDescriptor {
   permissions: readonly string[]
 }
 
+export function isAuthorizedCapabilityEntry(
+  capability: CapabilityRegistryEntry,
+): capability is AuthorizedCapabilityRegistryEntry {
+  return 'frontend_entries' in capability && 'permissions' in capability
+}
+
 export function resolveCapabilityAccess(
   capability: CapabilityRegistryEntry | undefined,
   descriptor: CapabilityAccessDescriptor | undefined,
@@ -58,6 +78,7 @@ export function resolveCapabilityAccess(
 ): CapabilityAccess {
   if (capability === undefined || !capability.deployment_installed) return 'not-installed'
   if (!capability.tenant_entitled) return 'not-entitled'
+  if (!isAuthorizedCapabilityEntry(capability)) return 'forbidden'
   if (
     descriptor === undefined
     || descriptor.capabilityId !== capability.capability_id

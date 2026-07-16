@@ -44,6 +44,7 @@ class EmployeeRecord(Base):
     skill_ids: Mapped[list[str]] = mapped_column(JSON)
     tool_ids: Mapped[list[str]] = mapped_column(JSON)
     knowledge_base_ids: Mapped[list[str]] = mapped_column(JSON)
+    knowledge_retrieval: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     approval_policy: Mapped[dict[str, object]] = mapped_column(JSON)
     release_strategy: Mapped[dict[str, object]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32))
@@ -107,6 +108,7 @@ class SqlAlchemyEmployeeRepository:
         record.skill_ids = [str(value) for value in employee.draft.skill_ids]
         record.tool_ids = [str(value) for value in employee.draft.tool_ids]
         record.knowledge_base_ids = [str(value) for value in employee.draft.knowledge_base_ids]
+        record.knowledge_retrieval = employee.draft.knowledge_retrieval
         record.approval_policy = employee.draft.approval_policy
         record.release_strategy = employee.draft.release_strategy
         record.status = employee.status.value
@@ -158,6 +160,7 @@ class SqlAlchemyEmployeeRepository:
             skill_ids=[str(value) for value in employee.draft.skill_ids],
             tool_ids=[str(value) for value in employee.draft.tool_ids],
             knowledge_base_ids=[str(value) for value in employee.draft.knowledge_base_ids],
+            knowledge_retrieval=employee.draft.knowledge_retrieval,
             approval_policy=employee.draft.approval_policy,
             release_strategy=employee.draft.release_strategy,
             status=employee.status.value,
@@ -186,6 +189,7 @@ class SqlAlchemyEmployeeRepository:
                 skill_ids=[UUID(value) for value in record.skill_ids],
                 tool_ids=[UUID(value) for value in record.tool_ids],
                 knowledge_base_ids=[UUID(value) for value in record.knowledge_base_ids],
+                knowledge_retrieval=record.knowledge_retrieval or {},
                 approval_policy=record.approval_policy,
                 release_strategy=record.release_strategy,
             ),

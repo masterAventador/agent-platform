@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -37,6 +38,12 @@ from agent_platform.observability.metrics import (
     OperationalComponent,
     OperationalMetrics,
     active_operational_metrics,
+)
+from agent_platform.platform.audit.hashing import (
+    AUDIT_EVENT_HASH_PURPOSE,
+    LEGACY_SHA256_ALGORITHM,
+    AuditHasher,
+    require_audit_hasher,
 )
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.tool_gateway.errors import ToolInvocationClaimRejected
@@ -93,6 +100,7 @@ class AuditEvent:
     correlation_id: str | None
     previous_hash: str | None
     event_hash: str
+    hash_algorithm: str
     metadata: dict[str, JsonValue] = field(default_factory=dict)
 
 
@@ -139,6 +147,10 @@ class AuditEventRecord(Base):
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     event_hash: Mapped[str] = mapped_column(String(64))
+    hash_algorithm: Mapped[str] = mapped_column(
+        String(32),
+        server_default=LEGACY_SHA256_ALGORITHM,
+    )
     metadata_json: Mapped[dict[str, JsonValue]] = mapped_column("metadata", JSON)
 
 
@@ -150,6 +162,8 @@ class AuditChainStateRecord(Base):
     head_hash: Mapped[str] = mapped_column(String(64))
     retained_from_sequence: Mapped[int] = mapped_column(Integer)
     retention_previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    head_seal: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    head_seal_algorithm: Mapped[str | None] = mapped_column(String(32), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -349,9 +363,14 @@ class SqlAlchemyAuditEventRepository:
         session: AsyncSession,
         *,
         metrics: OperationalMetrics | None = None,
+        hasher: AuditHasher | None = None,
     ) -> None:
         self._session = session
         self._metrics = metrics
+        self._hasher = hasher
+
+    def _require_hasher(self) -> AuditHasher:
+        return self._hasher or require_audit_hasher()
 
     async def add(self, event: AuditEventCreate) -> AuditEvent:
         started = perf_counter()
@@ -366,6 +385,7 @@ class SqlAlchemyAuditEventRepository:
     async def _add(self, event: AuditEventCreate) -> AuditEvent:
         from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
 
+        hasher = self._require_hasher()
         await self._session.execute(
             select(TenantRecord.id)
             .where(TenantRecord.id == event.tenant_id)
@@ -378,7 +398,8 @@ class SqlAlchemyAuditEventRepository:
         previous_hash = None if state is None else state.head_hash
         correlation_id = event.correlation_id or current_correlation_id()
         event_id = uuid4()
-        event_hash = _calculate_event_hash(
+        event_hash = _hmac_event_hash(
+            hasher,
             event_id=event_id,
             tenant_id=event.tenant_id,
             actor_user_id=event.actor_user_id,
@@ -405,24 +426,25 @@ class SqlAlchemyAuditEventRepository:
             correlation_id=correlation_id,
             previous_hash=previous_hash,
             event_hash=event_hash,
+            hash_algorithm=hasher.algorithm,
             metadata_json=sanitized_metadata,
         )
         self._session.add(record)
         if state is None:
-            self._session.add(
-                AuditChainStateRecord(
-                    tenant_id=event.tenant_id,
-                    head_sequence=sequence,
-                    head_hash=event_hash,
-                    retained_from_sequence=1,
-                    retention_previous_hash=None,
-                    updated_at=occurred_at,
-                )
+            state = AuditChainStateRecord(
+                tenant_id=event.tenant_id,
+                head_sequence=sequence,
+                head_hash=event_hash,
+                retained_from_sequence=1,
+                retention_previous_hash=None,
+                updated_at=occurred_at,
             )
+            self._session.add(state)
         else:
             state.head_sequence = sequence
             state.head_hash = event_hash
             state.updated_at = occurred_at
+        _reseal_chain_state(state, hasher)
         await self._session.flush()
         return self._entity(record)
 
@@ -476,6 +498,7 @@ class SqlAlchemyAuditEventRepository:
     ) -> AuditIntegrityVerification:
         if batch_size < 1 or batch_size > 10_000:
             raise ValueError("audit integrity batch size must be between 1 and 10000")
+        hasher = self._require_hasher()
         state = await self._session.get(AuditChainStateRecord, tenant_id)
         if state is None:
             first_sequence = (
@@ -491,9 +514,25 @@ class SqlAlchemyAuditEventRepository:
                 checked_events=0,
                 first_invalid_sequence=first_sequence,
             )
+        if not hasher.verify_chain_head_seal(
+            seal=state.head_seal,
+            tenant_id=state.tenant_id,
+            head_sequence=state.head_sequence,
+            head_hash=state.head_hash,
+            retained_from_sequence=state.retained_from_sequence,
+            retention_previous_hash=state.retention_previous_hash,
+        ):
+            # 链头封印缺失或不匹配：能全量重写数据库的攻击者没有服务端密钥，
+            # 无法为伪造链头重算封印，必须直接判定完整性失败。
+            return AuditIntegrityVerification(
+                valid=False,
+                checked_events=0,
+                first_invalid_sequence=state.head_sequence,
+            )
         checked_events = 0
         previous_hash = state.retention_previous_hash
         expected_sequence = state.retained_from_sequence
+        seen_hmac_event = False
         last_seen_sequence: int | None = None
         while True:
             statement = (
@@ -512,21 +551,18 @@ class SqlAlchemyAuditEventRepository:
                         checked_events=checked_events,
                         first_invalid_sequence=expected_sequence,
                     )
-                expected_hash = _calculate_event_hash(
-                    event_id=record.id,
-                    tenant_id=record.tenant_id,
-                    actor_user_id=record.actor_user_id,
-                    sequence=record.sequence,
-                    action=record.action,
-                    resource_type=record.resource_type,
-                    resource_id=record.resource_id,
-                    outcome=record.outcome,
-                    occurred_at=_ensure_aware(record.occurred_at),
-                    correlation_id=record.correlation_id,
-                    previous_hash=record.previous_hash,
-                    metadata=record.metadata_json,
-                )
-                if expected_hash != record.event_hash:
+                if record.hash_algorithm == hasher.algorithm:
+                    seen_hmac_event = True
+                elif record.hash_algorithm != LEGACY_SHA256_ALGORITHM or seen_hmac_event:
+                    # 未知算法，或 HMAC 事件之后又出现 legacy 事件（配置密钥后新
+                    # 写入必须是 HMAC，出现降级即判定失败），禁止静默降级。
+                    return AuditIntegrityVerification(
+                        valid=False,
+                        checked_events=checked_events,
+                        first_invalid_sequence=record.sequence,
+                    )
+                expected_hash = _expected_event_hash(record, hasher)
+                if not hmac.compare_digest(expected_hash, record.event_hash):
                     return AuditIntegrityVerification(
                         valid=False,
                         checked_events=checked_events,
@@ -575,6 +611,7 @@ class SqlAlchemyAuditEventRepository:
     ) -> int:
         if limit < 1 or limit > 10_000:
             raise ValueError("audit retention limit must be between 1 and 10000")
+        hasher = self._require_hasher()
         state = await self._chain_state_for_update(tenant_id=tenant_id)
         if state is None:
             return 0
@@ -605,6 +642,7 @@ class SqlAlchemyAuditEventRepository:
         state.retained_from_sequence = last_purged.sequence + 1
         state.retention_previous_hash = last_purged.event_hash
         state.updated_at = datetime.now(UTC)
+        _reseal_chain_state(state, hasher)
         await self._session.flush()
         return len(records)
 
@@ -652,6 +690,7 @@ class SqlAlchemyAuditEventRepository:
             correlation_id=record.correlation_id,
             previous_hash=record.previous_hash,
             event_hash=record.event_hash,
+            hash_algorithm=record.hash_algorithm,
             metadata=dict(record.metadata_json),
         )
 
@@ -728,7 +767,50 @@ async def emit_audit_event(
     )
 
 
-def _calculate_event_hash(
+def _canonical_event_payload(
+    *,
+    event_id: UUID,
+    tenant_id: UUID,
+    actor_user_id: UUID | None,
+    sequence: int,
+    action: str,
+    resource_type: str,
+    resource_id: UUID | None,
+    outcome: str,
+    occurred_at: datetime,
+    correlation_id: str | None,
+    previous_hash: str | None,
+    metadata: Mapping[str, JsonValue],
+    hash_algorithm: str | None,
+) -> bytes:
+    payload: dict[str, JsonValue] = {
+        "id": str(event_id),
+        "tenant_id": str(tenant_id),
+        "actor_user_id": str(actor_user_id) if actor_user_id is not None else None,
+        "sequence": sequence,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": str(resource_id) if resource_id is not None else None,
+        "outcome": outcome,
+        "occurred_at": _ensure_aware(occurred_at).isoformat(),
+        "correlation_id": correlation_id,
+        "previous_hash": previous_hash,
+        "metadata": dict(metadata),
+    }
+    if hash_algorithm is not None:
+        # legacy sha256 载荷不含算法标识与用途域（保持与存量哈希字节一致）；
+        # 密钥化算法把两者纳入被签名载荷，做算法域与用途域双重隔离。
+        payload["hash_algorithm"] = hash_algorithm
+        payload["purpose"] = AUDIT_EVENT_HASH_PURPOSE
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _legacy_event_hash(
     *,
     event_id: UUID,
     tenant_id: UUID,
@@ -743,27 +825,89 @@ def _calculate_event_hash(
     previous_hash: str | None,
     metadata: Mapping[str, JsonValue],
 ) -> str:
-    payload = {
-        "id": str(event_id),
-        "tenant_id": str(tenant_id),
-        "actor_user_id": str(actor_user_id) if actor_user_id is not None else None,
-        "sequence": sequence,
-        "action": action,
-        "resource_type": resource_type,
-        "resource_id": str(resource_id) if resource_id is not None else None,
-        "outcome": outcome,
-        "occurred_at": _ensure_aware(occurred_at).isoformat(),
-        "correlation_id": correlation_id,
-        "previous_hash": previous_hash,
-        "metadata": metadata,
-    }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = _canonical_event_payload(
+        event_id=event_id,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        sequence=sequence,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome=outcome,
+        occurred_at=occurred_at,
+        correlation_id=correlation_id,
+        previous_hash=previous_hash,
+        metadata=metadata,
+        hash_algorithm=None,
+    )
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _hmac_event_hash(
+    hasher: AuditHasher,
+    *,
+    event_id: UUID,
+    tenant_id: UUID,
+    actor_user_id: UUID | None,
+    sequence: int,
+    action: str,
+    resource_type: str,
+    resource_id: UUID | None,
+    outcome: str,
+    occurred_at: datetime,
+    correlation_id: str | None,
+    previous_hash: str | None,
+    metadata: Mapping[str, JsonValue],
+) -> str:
+    encoded = _canonical_event_payload(
+        event_id=event_id,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        sequence=sequence,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome=outcome,
+        occurred_at=occurred_at,
+        correlation_id=correlation_id,
+        previous_hash=previous_hash,
+        metadata=metadata,
+        hash_algorithm=hasher.algorithm,
+    )
+    return hasher.event_hash(encoded)
+
+
+def _expected_event_hash(record: AuditEventRecord, hasher: AuditHasher) -> str:
+    hash_fn = (
+        _legacy_event_hash
+        if record.hash_algorithm == LEGACY_SHA256_ALGORITHM
+        else lambda **fields: _hmac_event_hash(hasher, **fields)
+    )
+    return hash_fn(
+        event_id=record.id,
+        tenant_id=record.tenant_id,
+        actor_user_id=record.actor_user_id,
+        sequence=record.sequence,
+        action=record.action,
+        resource_type=record.resource_type,
+        resource_id=record.resource_id,
+        outcome=record.outcome,
+        occurred_at=_ensure_aware(record.occurred_at),
+        correlation_id=record.correlation_id,
+        previous_hash=record.previous_hash,
+        metadata=record.metadata_json,
+    )
+
+
+def _reseal_chain_state(state: AuditChainStateRecord, hasher: AuditHasher) -> None:
+    state.head_seal = hasher.chain_head_seal(
+        tenant_id=state.tenant_id,
+        head_sequence=state.head_sequence,
+        head_hash=state.head_hash,
+        retained_from_sequence=state.retained_from_sequence,
+        retention_previous_hash=state.retention_previous_hash,
+    )
+    state.head_seal_algorithm = hasher.algorithm
 
 
 def _ensure_aware(value: datetime) -> datetime:
