@@ -11,7 +11,7 @@ from langchain_core.callbacks import (
 )
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
@@ -19,10 +19,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.workers.main import run_worker_service
 from agent_platform.workers.runtime_composition import PlatformModelResolver
 
+load_database_models()
+
 RUNTIME_E2E_OUTPUT = "Runtime E2E completed in the real worker."
+TOOL_CALL_SUCCESS_OUTPUT = "Tool call completed in the real worker."
+TOOL_CALL_DENIED_OUTPUT = "Tool call was denied by the platform."
 STRUCTURED_RUNTIME_E2E_OUTPUT = (
     '{"cards":[{"title":"线索 A","score":0.91}],"summary":"已生成结构化卡片"}'
 )
@@ -88,6 +93,49 @@ class ToolBindingRuntimeE2EChatModel(BaseChatModel):
         return "runtime-e2e-conditional-model"
 
 
+class ToolBindingSlowCompletingChatModel(BaseChatModel):
+    """Test-only model that delays completion so E2E can append during the active run."""
+
+    delay_seconds: float = 8.0
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        del tools, tool_choice, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        raise AssertionError("slow completing runtime E2E model must use async invocation")
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        await asyncio.sleep(self.delay_seconds)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=RUNTIME_E2E_OUTPUT))]
+        )
+
+    @property
+    def _llm_type(self) -> str:
+        return "runtime-e2e-slow-completing-model"
+
+
 class ToolBindingCancellableSlowChatModel(BaseChatModel):
     """A test-only model whose public async invocation blocks until cancelled."""
 
@@ -133,6 +181,68 @@ class ToolBindingCancellableSlowChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "runtime-e2e-cancellable-slow-model"
+
+
+class ToolBindingToolCallChatModel(BaseChatModel):
+    """C09 fixture：第一轮发起 search_customers 工具调用，第二轮根据工具结果收敛。"""
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        del tools, tool_choice, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        return ChatResult(
+            generations=[ChatGeneration(message=self._next_message(messages))]
+        )
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        return ChatResult(
+            generations=[ChatGeneration(message=self._next_message(messages))]
+        )
+
+    @staticmethod
+    def _next_message(messages: Sequence[BaseMessage]) -> AIMessage:
+        for message in reversed(messages):
+            if isinstance(message, ToolMessage):
+                content = _message_content_text(message)
+                if message.status == "error" or "tool_denied" in content:
+                    return AIMessage(content=TOOL_CALL_DENIED_OUTPUT)
+                return AIMessage(content=TOOL_CALL_SUCCESS_OUTPUT)
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search_customers",
+                    "args": {"query": "acme"},
+                    "id": "runtime-e2e-tool-call-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    @property
+    def _llm_type(self) -> str:
+        return "runtime-e2e-tool-call-model"
 
 
 def _messages() -> Iterator[AIMessage | str]:
@@ -196,6 +306,8 @@ async def _main() -> None:
             "general-purpose": model,
             "structured-output": structured_model,
             "slow-cancel": slow_model,
+            "tool-call": ToolBindingToolCallChatModel(),
+            "slow-complete": ToolBindingSlowCompletingChatModel(),
         },
     )
     await run_worker_service(

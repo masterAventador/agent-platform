@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -54,6 +55,38 @@ class SqlAlchemyKnowledgeBaseRepository:
         )
         record = result.scalar_one_or_none()
         return self._entity(record) if record is not None else None
+
+    async def list_by_ids(
+        self,
+        *,
+        tenant_id: UUID,
+        knowledge_base_ids: Sequence[UUID],
+    ) -> list[KnowledgeBase]:
+        ids = list(dict.fromkeys(knowledge_base_ids))
+        if not ids:
+            return []
+        result = await self._session.execute(
+            select(KnowledgeBaseRecord).where(
+                KnowledgeBaseRecord.tenant_id == tenant_id,
+                KnowledgeBaseRecord.id.in_(ids),
+            )
+        )
+        records = list(result.scalars())
+        order = {knowledge_base_id: index for index, knowledge_base_id in enumerate(ids)}
+        records.sort(key=lambda record: order[record.id])
+        return [self._entity(record) for record in records]
+
+    async def are_bindable(self, *, tenant_id: UUID, knowledge_base_ids: list[UUID]) -> bool:
+        if not knowledge_base_ids:
+            return True
+        expected_ids = set(knowledge_base_ids)
+        result = await self._session.execute(
+            select(KnowledgeBaseRecord.id).where(
+                KnowledgeBaseRecord.tenant_id == tenant_id,
+                KnowledgeBaseRecord.id.in_(expected_ids),
+            )
+        )
+        return set(result.scalars()) == expected_ids
 
     async def list(self, *, tenant_id: UUID) -> list[KnowledgeBase]:
         result = await self._session.execute(

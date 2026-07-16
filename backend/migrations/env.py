@@ -16,7 +16,9 @@ if database_url := os.getenv("AGENT_PLATFORM_DATABASE_URL"):
     config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 不禁用已存在的 logger：同进程内（如测试套件）先创建的业务 logger
+    # 不应因执行迁移而被静默禁用。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 迁移 metadata 必须与运行时同源：Core + 全部能力包模型无条件聚合，
 # 否则 autogenerate 会把能力包表误判为需要 DROP 的漂移。

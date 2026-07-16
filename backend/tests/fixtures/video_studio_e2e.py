@@ -11,10 +11,12 @@ from uuid import UUID
 from sqlalchemy import select
 
 from agent_platform.api.app import create_app
-from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.capabilities.video_studio.media_library import MATERIAL_UPLOAD_ACTIONS
 from agent_platform.capabilities.video_studio.persistence import (
     VideoMaterialRecord,
+)
+from agent_platform.capabilities.video_studio.registration import (
+    VIDEO_STUDIO_BACKEND_REGISTRATION as _video_studio_registration,
 )
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
@@ -85,8 +87,10 @@ class PlaywrightPreviewIssuer:
         )
 
 
-(_video_studio_registration,) = resolve_installed_backend_registrations(("video-studio",))
-app = create_app(extra_routers=_video_studio_registration.routers)
+# 三层授权生产装配（C17 gate 接线）完成前，E2E 夹具直接挂载能力路由。
+app = create_app()
+for _capability_router in _video_studio_registration.routers:
+    app.include_router(_capability_router)
 app.state.video_material_upload_credential_issuer = PlaywrightCredentialIssuer()
 app.state.video_material_object_verifier = PlaywrightObjectVerifier(app.state.session_factory)
 app.state.video_material_preview_url_issuer = PlaywrightPreviewIssuer()

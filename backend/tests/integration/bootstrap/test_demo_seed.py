@@ -201,6 +201,8 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
         assert employee is not None and employee.published_version == 1
         assert employee.capabilities["file_upload"] is True
+        # C05 多轮会话交付后，演示员工必须开箱支持会话，用户验收无需手工开能力
+        assert employee.capabilities["conversation"] is True
         assert "Seed 本身不调用模型" in employee.role_description
         assert "手动发起任务" in employee.role_description
         assert "可能产生上游费用" in employee.role_description
@@ -264,3 +266,97 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
 
 async def _count(session: AsyncSession, model: type[Base]) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_grants_social_operations_entitlement_idempotently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from sqlalchemy import select
+
+    from agent_platform.infrastructure.database.repositories.entitlements import (
+        CapabilityEntitlementRecord,
+    )
+
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        records = (
+            await session.scalars(
+                select(CapabilityEntitlementRecord).where(
+                    CapabilityEntitlementRecord.tenant_id == DEMO_TENANT_ID
+                )
+            )
+        ).all()
+
+    assert len(records) == 1
+    entitlement = records[0]
+    assert entitlement.capability_id == "social-operations"
+    assert entitlement.status == "active"
+    assert entitlement.source == "demo-seed"
+    assert entitlement.expires_at is None
+
+@pytest.mark.asyncio
+async def test_demo_seed_adopts_migration_backfilled_tool_version(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """迁移 0028 会用随机 id 为存量工具回填 version=1；Seed 重放必须按业务键
+    (tool_id, version) 收编该行，而不是用稳定 id 再插一条撞唯一约束。"""
+    from uuid import uuid4
+
+    from agent_platform.bootstrap.demo_seed import DEMO_TOOL_ID
+    from agent_platform.infrastructure.database.repositories.tools import ToolVersionRecord
+
+    storage = MemoryArtifactStorage()
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+    # 模拟迁移回填：把 seed 建的版本行替换成随机 id 的等价行
+    async with session_factory() as session:
+        existing = (
+            await session.execute(
+                select(ToolVersionRecord).where(ToolVersionRecord.tool_id == DEMO_TOOL_ID)
+            )
+        ).scalar_one()
+        backfilled = ToolVersionRecord(
+            id=uuid4(),
+            tenant_id=existing.tenant_id,
+            tool_id=existing.tool_id,
+            version=existing.version,
+            description=existing.description,
+            input_schema=existing.input_schema,
+            risk_level=existing.risk_level,
+            approval_policy=existing.approval_policy,
+            change_source=existing.change_source,
+            created_at=existing.created_at,
+        )
+        await session.delete(existing)
+        await session.flush()
+        session.add(backfilled)
+        await session.commit()
+
+    result = await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+    assert result.created == 0
+
+    async with session_factory() as session:
+        versions = (
+            await session.execute(
+                select(ToolVersionRecord).where(ToolVersionRecord.tool_id == DEMO_TOOL_ID)
+            )
+        ).scalars().all()
+    assert len(versions) == 1

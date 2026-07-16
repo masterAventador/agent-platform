@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from opentelemetry._logs import LogRecord
+from opentelemetry.sdk._logs import LoggerProvider, ReadableLogRecord
+from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportResult
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Link, SpanContext, Status, StatusCode, TraceFlags
 
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
+from agent_platform.observability.metrics import (
+    active_operational_metrics,
+    set_operational_metrics,
+)
 from agent_platform.observability.telemetry import (
     InstrumentorSet,
+    SanitizingLogExporter,
     SanitizingSpanExporter,
     TelemetryProviders,
     configure_telemetry,
@@ -52,6 +64,71 @@ class RecordingTracerProvider(TracerProvider):
         self.shutdown_count += 1
 
 
+class RecordingMeterProvider(MeterProvider):
+    def __init__(self) -> None:
+        super().__init__(shutdown_on_exit=False)
+        self.flush_count = 0
+        self.shutdown_count = 0
+
+    def force_flush(self, timeout_millis: float = 30_000) -> bool:
+        self.flush_count += 1
+        return True
+
+    def shutdown(self, timeout_millis: float = 30_000) -> None:
+        self.shutdown_count += 1
+
+
+class RecordingLoggerProvider(LoggerProvider):
+    def __init__(self) -> None:
+        super().__init__(shutdown_on_exit=False)
+        self.flush_count = 0
+        self.shutdown_count = 0
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        self.flush_count += 1
+        return True
+
+    def shutdown(self) -> None:
+        self.shutdown_count += 1
+
+
+class RecordingCounter:
+    def __init__(self) -> None:
+        self.add_calls: list[tuple[int, dict[str, str | int]]] = []
+
+    def add(self, amount: int, attributes: dict[str, str | int] | None = None) -> None:
+        self.add_calls.append((amount, attributes or {}))
+
+
+class RecordingHistogram:
+    def __init__(self) -> None:
+        self.record_calls: list[tuple[float, dict[str, str | int]]] = []
+
+    def record(self, amount: float, attributes: dict[str, str | int] | None = None) -> None:
+        self.record_calls.append((amount, attributes or {}))
+
+
+class RecordingMeter:
+    def __init__(self) -> None:
+        self.counter = RecordingCounter()
+        self.histogram = RecordingHistogram()
+
+    def create_counter(self, *args: object, **kwargs: object) -> RecordingCounter:
+        return self.counter
+
+    def create_histogram(self, *args: object, **kwargs: object) -> RecordingHistogram:
+        return self.histogram
+
+
+class RecordingApiMetricProvider(RecordingMeterProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.meter = RecordingMeter()
+
+    def get_meter(self, *args: object, **kwargs: object) -> RecordingMeter:
+        return self.meter
+
+
 class RecordingSpanExporter(SpanExporter):
     def __init__(self) -> None:
         self.exported: tuple[ReadableSpan, ...] = ()
@@ -59,6 +136,18 @@ class RecordingSpanExporter(SpanExporter):
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         self.exported = tuple(spans)
         return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        return None
+
+
+class RecordingLogExporter(LogRecordExporter):
+    def __init__(self) -> None:
+        self.exported: tuple[ReadableLogRecord, ...] = ()
+
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
+        self.exported = tuple(batch)
+        return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
         return None
@@ -102,6 +191,8 @@ def test_enabled_telemetry_builds_trace_provider_with_injected_exporter() -> Non
     resource = telemetry.providers.tracer_provider.resource
     assert resource.attributes["service.name"] == "agent-platform-test"
     assert resource.attributes["deployment.environment.name"] == "test"
+    assert isinstance(telemetry.providers.meter_provider, MeterProvider)
+    assert isinstance(telemetry.providers.logger_provider, LoggerProvider)
 
     telemetry.shutdown()
 
@@ -127,6 +218,8 @@ def test_instrumentation_is_idempotent_and_disables_sensitive_http_capture() -> 
     instrumentors, libraries = make_instrumentors()
     providers = TelemetryProviders(
         tracer_provider=RecordingTracerProvider(),
+        meter_provider=RecordingMeterProvider(),
+        logger_provider=RecordingLoggerProvider(),
     )
     telemetry = configure_telemetry(
         AppSettings(otel_enabled=True),
@@ -156,10 +249,14 @@ def test_instrumentation_is_idempotent_and_disables_sensitive_http_capture() -> 
 
 def test_shutdown_flushes_and_closes_injected_trace_provider_once() -> None:
     tracer_provider = RecordingTracerProvider()
+    meter_provider = RecordingMeterProvider()
+    logger_provider = RecordingLoggerProvider()
     telemetry = configure_telemetry(
         AppSettings(otel_enabled=True),
         providers=TelemetryProviders(
             tracer_provider=tracer_provider,
+            meter_provider=meter_provider,
+            logger_provider=logger_provider,
         ),
         instrumentors=make_instrumentors()[0],
     )
@@ -169,6 +266,95 @@ def test_shutdown_flushes_and_closes_injected_trace_provider_once() -> None:
 
     assert tracer_provider.flush_count == 1
     assert tracer_provider.shutdown_count == 1
+    assert meter_provider.flush_count == 1
+    assert meter_provider.shutdown_count == 1
+    assert logger_provider.flush_count == 1
+    assert logger_provider.shutdown_count == 1
+
+
+def _make_recording_telemetry():  # type: ignore[no-untyped-def]
+    return configure_telemetry(
+        AppSettings(otel_enabled=True),
+        providers=TelemetryProviders(
+            tracer_provider=RecordingTracerProvider(),
+            meter_provider=RecordingMeterProvider(),
+            logger_provider=RecordingLoggerProvider(),
+        ),
+        instrumentors=make_instrumentors()[0],
+    )
+
+
+def test_shutdown_resets_the_operational_metrics_global_it_registered() -> None:
+    telemetry = _make_recording_telemetry()
+    try:
+        assert active_operational_metrics() is telemetry.operational_metrics
+
+        telemetry.shutdown()
+
+        assert active_operational_metrics() is None
+    finally:
+        set_operational_metrics(None)
+
+
+def test_shutdown_keeps_operational_metrics_registered_by_a_newer_telemetry() -> None:
+    first = _make_recording_telemetry()
+    second = _make_recording_telemetry()
+    try:
+        assert active_operational_metrics() is second.operational_metrics
+
+        first.shutdown()
+
+        assert active_operational_metrics() is second.operational_metrics
+
+        second.shutdown()
+
+        assert active_operational_metrics() is None
+    finally:
+        set_operational_metrics(None)
+
+
+def test_instrument_app_records_basic_api_metrics_without_query_or_body() -> None:
+    meter_provider = RecordingApiMetricProvider()
+    telemetry = configure_telemetry(
+        AppSettings(otel_enabled=True),
+        providers=TelemetryProviders(
+            tracer_provider=RecordingTracerProvider(),
+            meter_provider=cast(Any, meter_provider),
+            logger_provider=RecordingLoggerProvider(),
+        ),
+        instrumentors=make_instrumentors()[0],
+    )
+    app = FastAPI()
+
+    @app.post("/items/{item_id}")
+    async def create_item(item_id: str) -> dict[str, str]:
+        return {"item_id": item_id}
+
+    telemetry.instrument_app(app)
+
+    response = TestClient(app).post(
+        "/items/visible-id?token=must-not-enter-metrics",
+        json={"password": "must-not-enter-metrics"},
+    )
+
+    assert response.status_code == 200
+    assert meter_provider.meter.counter.add_calls == [
+        (
+            1,
+            {
+                "http.request.method": "POST",
+                "http.route": "/items/{item_id}",
+                "http.response.status_code": 200,
+            },
+        )
+    ]
+    assert meter_provider.meter.histogram.record_calls[0][1] == {
+        "http.request.method": "POST",
+        "http.route": "/items/{item_id}",
+        "http.response.status_code": 200,
+    }
+    rendered = repr(meter_provider.meter.counter.add_calls)
+    assert "must-not-enter-metrics" not in rendered
 
 
 def test_sanitizing_exporter_removes_sensitive_auto_instrumentation_data() -> None:
@@ -225,6 +411,53 @@ def test_sanitizing_exporter_removes_sensitive_auto_instrumentation_data() -> No
     assert exported.status.description is None
 
 
+def test_sanitizing_log_exporter_redacts_body_and_sensitive_attributes() -> None:
+    downstream = RecordingLogExporter()
+    exporter = SanitizingLogExporter(downstream)
+    record = ReadableLogRecord(
+        log_record=LogRecord(
+            severity_text="ERROR",
+            body="request failed token=must-not-enter-logs",
+            attributes={
+                "authorization": "Bearer must-not-enter-logs",
+                "safe.attribute": "kept",
+                "exception.stacktrace": "password=must-not-enter-logs",
+            },
+        ),
+        resource=Resource.create({"service.name": "test"}),
+    )
+
+    result = exporter.export((record,))
+
+    assert result is LogRecordExportResult.SUCCESS
+    exported = downstream.exported[0]
+    assert exported.log_record.body == "request failed token=[redacted]"
+    assert dict(exported.log_record.attributes or {}) == {"safe.attribute": "kept"}
+    assert "must-not-enter-logs" not in exported.to_json()
+
+
+def test_instrument_libraries_attaches_and_shutdown_removes_otel_logging_handler() -> None:
+    providers = TelemetryProviders(
+        tracer_provider=RecordingTracerProvider(),
+        meter_provider=RecordingMeterProvider(),
+        logger_provider=RecordingLoggerProvider(),
+    )
+    telemetry = configure_telemetry(
+        AppSettings(otel_enabled=True),
+        providers=providers,
+        instrumentors=make_instrumentors()[0],
+    )
+    application_logger = logging.getLogger("agent_platform")
+    before = tuple(application_logger.handlers)
+
+    telemetry.instrument_libraries()
+    attached = tuple(handler for handler in application_logger.handlers if handler not in before)
+
+    assert len(attached) == 1
+    telemetry.shutdown()
+    assert tuple(application_logger.handlers) == before
+
+
 @pytest.mark.asyncio
 async def test_create_app_lifespan_shuts_down_injected_telemetry() -> None:
     tracer_provider = RecordingTracerProvider()
@@ -232,6 +465,8 @@ async def test_create_app_lifespan_shuts_down_injected_telemetry() -> None:
         AppSettings(otel_enabled=True),
         providers=TelemetryProviders(
             tracer_provider=tracer_provider,
+            meter_provider=RecordingMeterProvider(),
+            logger_provider=RecordingLoggerProvider(),
         ),
         instrumentors=make_instrumentors()[0],
     )

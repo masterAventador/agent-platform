@@ -162,7 +162,8 @@ describe('B04 素材库页面', () => {
     })
   })
 
-  it('展示素材、签发短期上传凭证、确认上传并管理下载任务', async () => {
+  // 该用例覆盖完整上传-下载-删除链路，全量套件并发下接近默认 5s 超时，放宽到 15s。
+  it('展示素材、签发短期上传凭证、确认上传并管理下载任务', { timeout: 15_000 }, async () => {
     const user = userEvent.setup()
     render(<MediaLibraryPage workspaceId={workspaceId} />)
 

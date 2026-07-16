@@ -15,6 +15,7 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
 )
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
@@ -63,6 +64,7 @@ class RunResponse(BaseModel):
     tenant_id: UUID
     employee_id: UUID
     employee_version: int
+    created_by: UUID
     thread_id: str
     input: dict[str, JsonValue]
     status: str
@@ -83,6 +85,7 @@ class RunResponse(BaseModel):
             tenant_id=run.tenant_id,
             employee_id=run.employee_id,
             employee_version=run.employee_version,
+            created_by=run.created_by,
             thread_id=run.thread_id,
             input=run.input_data,
             status=run.status.value,
@@ -403,6 +406,19 @@ async def create_run(
                 action=RunCommandAction.START,
             )
         )
+        await emit_audit_event(
+            database_session,
+            tenant_id=run.tenant_id,
+            actor_user_id=user.id,
+            action="run.created",
+            resource_type="run",
+            resource_id=run.id,
+            metadata={
+                "employee_id": str(run.employee_id),
+                "employee_version": run.employee_version,
+                "attachment_count": len(attachment_files),
+            },
+        )
         try:
             await database_session.commit()
         except IntegrityError:
@@ -602,6 +618,18 @@ async def control_run(
                     **command_payload,
                 },
             )
+        )
+        await emit_audit_event(
+            database_session,
+            tenant_id=run.tenant_id,
+            actor_user_id=user.id,
+            action="run.control_requested",
+            resource_type="run",
+            resource_id=run.id,
+            metadata={
+                "requested_action": payload.action,
+                "reason_present": payload.reason is not None,
+            },
         )
         await database_session.commit()
     return RunResponse.from_entity(updated)

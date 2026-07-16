@@ -13,6 +13,8 @@ x-backend-environment: &backend-environment
   AGENT_PLATFORM_MINIO_SECURE: "false"
   AGENT_PLATFORM_RAGFLOW_URL: ${RAGFLOW_URL:-http://host.docker.internal:19380}
   AGENT_PLATFORM_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+  # 审计哈希链 HMAC 密钥：本地默认公开弱密钥仅限开发；生产必须显式覆盖。
+  AGENT_PLATFORM_AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-agent-platform-insecure-dev-audit-hmac-key}
   AGENT_PLATFORM_AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
   AGENT_PLATFORM_AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-lax}
   AGENT_PLATFORM_OTEL_ENABLED: ${OTEL_ENABLED:-false}

@@ -211,5 +211,5 @@ def test_unsatisfied_core_dependency_is_rejected_without_partial_install(
 def test_mock_host_normalizes_invalid_protocol_types_to_public_value_error(
     core_protocols: dict[object, object],
 ) -> None:
-    with pytest.raises(ValueError, match="^invalid Mock Host Core protocol$"):
+    with pytest.raises(ValueError, match="^invalid host Core protocol$"):
         MockCapabilityHost(core_protocols=core_protocols)  # type: ignore[arg-type]

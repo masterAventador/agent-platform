@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from langchain_core.tools import StructuredTool, ToolException
+from langchain_core.tools import StructuredTool
 
 from agent_platform.platform.tool_gateway import (
     PolicyContext,
@@ -45,7 +45,7 @@ class FailingGateway:
         context: PolicyContext,
     ) -> ToolInvocationOutcome:
         del invocation, context
-        raise ToolExecutionError("safe gateway failure")
+        raise ToolExecutionError()
 
 
 class BlockingExecutionGuard:
@@ -160,7 +160,8 @@ async def test_model_cannot_override_identity_or_policy_through_arguments() -> N
 
 
 @pytest.mark.asyncio
-async def test_deny_becomes_stable_tool_exception() -> None:
+async def test_deny_becomes_stable_tool_error_message_for_the_model() -> None:
+    """C09：调用点拒绝作为工具错误消息反馈给模型，而不是让整个任务失败。"""
     metadata = registry_tool()
     gateway = RecordingGateway(
         ToolInvocationOutcome(
@@ -174,8 +175,7 @@ async def test_deny_becomes_stable_tool_exception() -> None:
         policy_context=PolicyContext(allowed_tool_ids=frozenset()),
     ).adapt(metadata)
 
-    with pytest.raises(ToolException, match=r"^tool_denied:tool_not_allowed$"):
-        await tool.ainvoke({"customer_id": 42})
+    assert await tool.ainvoke({"customer_id": 42}) == "tool_denied:tool_not_allowed"
 
 
 @pytest.mark.asyncio
@@ -211,11 +211,10 @@ async def test_gateway_execution_error_is_sanitized_for_the_model() -> None:
         policy_context=PolicyContext(allowed_tool_ids=frozenset({metadata.id})),
     ).adapt(metadata)
 
-    with pytest.raises(ToolException, match=r"^tool_execution_failed$") as captured:
-        await tool.ainvoke({"customer_id": 42})
+    result = await tool.ainvoke({"customer_id": 42})
 
-    assert captured.value.__cause__ is None
-    assert captured.value.__context__ is None
+    assert result == "tool_execution_failed:tool_execution_failed"
+    assert "ToolExecutionError" not in str(result)
 
 
 @pytest.mark.asyncio

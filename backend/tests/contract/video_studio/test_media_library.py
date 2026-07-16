@@ -9,7 +9,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from agent_platform.api.app import create_app
-from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.capabilities.video_studio.media_library import (
     MAX_MATERIAL_SIZE_BYTES,
     InMemoryMaterialRepository,
@@ -19,6 +18,9 @@ from agent_platform.capabilities.video_studio.media_library import (
 from agent_platform.capabilities.video_studio.persistence import (
     SqlAlchemyMediaLibraryRepository,
 )
+from agent_platform.capabilities.video_studio.registration import (
+    VIDEO_STUDIO_BACKEND_REGISTRATION as VIDEO_STUDIO_REGISTRATION,
+)
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
@@ -27,8 +29,6 @@ from agent_platform.capabilities.video_studio.storage_credentials import (
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
-
-(VIDEO_STUDIO_REGISTRATION,) = resolve_installed_backend_registrations(("video-studio",))
 
 
 class AllowAllRateLimiter:
@@ -96,8 +96,10 @@ async def media_library_api() -> AsyncIterator[
         settings=AppSettings(auth_cookie_secure=False),
         session_factory=sessions,
         auth_rate_limiter=AllowAllRateLimiter(),
-        extra_routers=VIDEO_STUDIO_REGISTRATION.routers,
     )
+    # 三层授权生产装配（C17 gate 接线）完成前，契约测试直接挂载能力路由。
+    for capability_router in VIDEO_STUDIO_REGISTRATION.routers:
+        app.include_router(capability_router)
     verifier = ConfigurableObjectVerifier()
     app.state.video_material_upload_credential_issuer = RecordingCredentialIssuer()
     app.state.video_material_object_verifier = verifier

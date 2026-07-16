@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from agent_platform.platform.tools.entities import ToolRiskLevel
+from agent_platform.platform.tools.entities import ToolApprovalPolicy, ToolRiskLevel
 
 ToolRisk = ToolRiskLevel
 
@@ -46,6 +46,8 @@ class ToolDefinition:
     enabled: bool = True
     server_enabled: bool = True
     credential_references: tuple[str, ...] = ()
+    approval_policy: ToolApprovalPolicy = ToolApprovalPolicy.RISK_BASED
+    upstream_missing: bool = False
 
 
 @dataclass(frozen=True, slots=True)

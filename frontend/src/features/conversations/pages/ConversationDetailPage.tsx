@@ -1,15 +1,18 @@
 import { Button, Card, Empty, Flex, Input, List, Space, Spin, Tag, Typography } from 'antd'
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import {
   useAppendConversationMessage,
+  useCancelConversationRun,
   useConversation,
   useRetryConversation,
 } from '../api/queries'
 import './conversations.css'
 
+
+const terminalRunStatuses = new Set(['completed', 'failed', 'cancelled'])
 
 const runStatusText: Record<string, string> = {
   queued: '排队中',
@@ -28,11 +31,18 @@ const roleText: Record<string, string> = {
   error: '错误',
 }
 
-export function ConversationDetailPage() {
+export function ConversationDetailPage({
+  currentUserId,
+  canManageRuns,
+}: {
+  currentUserId: string
+  canManageRuns: boolean
+}) {
   const { conversationId } = useParams()
   const conversation = useConversation(conversationId)
   const appendMessage = useAppendConversationMessage(conversationId ?? '')
   const retry = useRetryConversation(conversationId ?? '')
+  const cancelRun = useCancelConversationRun(conversationId ?? '')
   const [content, setContent] = useState('')
 
   if (conversation.isPending) {
@@ -94,6 +104,17 @@ export function ConversationDetailPage() {
             renderItem={(run) => (
               <List.Item
                 actions={[
+                  !terminalRunStatuses.has(run.status)
+                  && (canManageRuns || run.created_by === currentUserId) ? (
+                    <Button
+                      key="cancel"
+                      danger
+                      loading={cancelRun.isPending && cancelRun.variables === run.id}
+                      onClick={() => cancelRun.mutate(run.id)}
+                    >
+                      取消任务
+                    </Button>
+                  ) : null,
                   run.status === 'failed' ? (
                     <Button
                       key="retry"
@@ -103,6 +124,7 @@ export function ConversationDetailPage() {
                       重试失败任务
                     </Button>
                   ) : null,
+                  <Link key="detail" to={`/runs/${run.id}`}>任务详情</Link>,
                 ].filter(Boolean)}
               >
                 <List.Item.Meta

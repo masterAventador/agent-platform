@@ -3,6 +3,11 @@
 from .local_file import (
     LocalCredentialConfigurationError,
     LocalFileCredentialResolver,
+    LocalFileCredentialStore,
 )
 
-__all__ = ["LocalCredentialConfigurationError", "LocalFileCredentialResolver"]
+__all__ = [
+    "LocalCredentialConfigurationError",
+    "LocalFileCredentialResolver",
+    "LocalFileCredentialStore",
+]

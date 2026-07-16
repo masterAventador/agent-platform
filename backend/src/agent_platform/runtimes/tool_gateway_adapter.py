@@ -158,6 +158,18 @@ class ToolExecutionBlocked(ToolException):
     """平台状态已禁止该 run 开始新的外部工具副作用。"""
 
 
+def _tool_error_as_model_feedback(error: ToolException) -> str:
+    """把调用点拒绝/失败转换为模型可见的稳定错误消息。
+
+    审批中断（ToolApprovalRequired）与取消守卫（ToolExecutionBlocked）必须
+    继续向运行时冒泡，不能被吞成普通工具错误。
+    """
+    if isinstance(error, (ToolApprovalRequired, ToolExecutionBlocked)):
+        raise error
+    message = str(error.args[0]) if error.args else "tool_execution_failed"
+    return message
+
+
 class ToolGatewayAdapter:
     """把 Registry 工具包装为仅经 Tool Gateway 执行的 LangChain 工具。"""
 
@@ -184,6 +196,7 @@ class ToolGatewayAdapter:
             description=metadata.description,
             args_schema=cast(dict[str, Any], metadata.input_schema),
             infer_schema=False,
+            handle_tool_error=_tool_error_as_model_feedback,
             metadata={
                 "agent_platform_tool_id": str(metadata.id),
                 "agent_platform_tool_risk": str(metadata.risk_level),
@@ -197,6 +210,7 @@ class ToolGatewayAdapter:
         async def invoke(**arguments: object) -> object | None:
             context = self._invocation_context
             execution_failed = False
+            failure_code = "tool_execution_failed"
             outcome: ToolInvocationOutcome | None = None
             try:
                 if self._execution_guard is not None:
@@ -231,11 +245,12 @@ class ToolGatewayAdapter:
                         ),
                     ),
                 )
-            except ToolExecutionError:
+            except ToolExecutionError as failure:
                 execution_failed = True
+                failure_code = failure.code
 
             if execution_failed:
-                raise ToolException("tool_execution_failed") from None
+                raise ToolException(f"tool_execution_failed:{failure_code}") from None
             if outcome is None:
                 raise ToolException("tool_execution_failed")
             if outcome.decision is PolicyDecision.DENY:

@@ -21,6 +21,30 @@ export interface RunEventPresentation {
   content: string | null
 }
 
+export interface KnowledgeCitationPresentation {
+  chunkId: string
+  documentName: string
+  content: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function knowledgeCitations(
+  payload: Record<string, unknown>,
+): KnowledgeCitationPresentation[] {
+  if (!Array.isArray(payload.citations)) return []
+  return payload.citations.flatMap((value) => {
+    if (!isRecord(value)) return []
+    const chunkId = typeof value.chunk_id === 'string' ? value.chunk_id : ''
+    const documentName = typeof value.document_name === 'string' ? value.document_name : ''
+    const content = typeof value.content === 'string' ? value.content : ''
+    if (!chunkId || !documentName || !content) return []
+    return [{ chunkId, documentName, content }]
+  })
+}
+
 export function formatRunEvent(
   type: string,
   payload: Record<string, unknown>,
@@ -32,6 +56,7 @@ export function formatRunEvent(
     'run.started': '任务开始执行',
     'run.progress': '任务取得新进展',
     'message.output': '模型输出',
+    'knowledge.retrieved': '检索知识库引用',
     'artifact.created': '生成任务产物',
     'run.completed': '任务执行完成',
     'run.failed': '任务执行失败',
@@ -42,6 +67,8 @@ export function formatRunEvent(
     label: labels[type] ?? type,
     content: type === 'message.output' && typeof payload.content === 'string'
       ? payload.content
+      : type === 'knowledge.retrieved' && typeof payload.citation_count === 'number'
+        ? `引用 ${payload.citation_count} 个知识片段`
       : type === 'artifact.created' && typeof payload.name === 'string'
         ? payload.name
         : null,

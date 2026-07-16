@@ -6,20 +6,28 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeVar
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.artifacts import (
+    SqlAlchemyFileRepository,
+)
 from agent_platform.infrastructure.database.repositories.audit import (
     SqlAlchemyToolAuditReader,
+)
+from agent_platform.infrastructure.database.repositories.conversation_dispatch import (
+    build_conversation_run_input,
+    create_conversation_run,
 )
 from agent_platform.infrastructure.database.repositories.conversations import (
     SqlAlchemyConversationMessageRepository,
     SqlAlchemyConversationRepository,
 )
 from agent_platform.infrastructure.database.repositories.employees import (
+    SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
@@ -42,10 +50,14 @@ from agent_platform.infrastructure.queue.redis_streams import (
     MalformedRunQueueMessage,
     RedisRunQueue,
     RunQueueDelivery,
+    RunQueueMessage,
 )
+from agent_platform.platform.artifacts.entities import File
 from agent_platform.platform.conversations.entities import (
+    Conversation,
     ConversationMessage,
     ConversationMessageRole,
+    conversation_followup_run_id,
     limit_conversation_message_content,
 )
 from agent_platform.platform.dynamic_io import (
@@ -54,6 +66,10 @@ from agent_platform.platform.dynamic_io import (
     InvalidDynamicSchema,
     has_effective_output_schema,
     validate_run_output,
+)
+from agent_platform.platform.employees.entities import (
+    EmployeeStatus,
+    is_runnable_employee_definition,
 )
 from agent_platform.platform.runs.commands import RunCommand
 from agent_platform.platform.runs.entities import Run, RunStatus
@@ -108,6 +124,7 @@ class WorkerFenced(RuntimeError):
 
 logger = logging.getLogger(__name__)
 RuntimeOperationResult = TypeVar("RuntimeOperationResult")
+_KNOWLEDGE_EVENT_NAMESPACE = UUID("8f3c1af2-6c1d-4be0-9dbb-1a4a9d8f5f77")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +230,7 @@ class RunWorker:
                 await self._abandon_runtime(delivery.message.run_id)
                 raise WorkerFenced from None
             await self._discard_dead_letter_runtime(delivery.message.run_id)
+            await self._dispatch_followup_after_dead_letter(delivery.message)
             await self._queue.acknowledge(delivery.delivery_id)
             await self._reconcile_dead_letter_mirrors()
             return True
@@ -295,6 +313,7 @@ class RunWorker:
         )
         if self._is_terminal(persisted_status):
             await self._release_runtime(run.id)
+            await self._dispatch_conversation_followup_safely(run)
             return 0
         return 1
 
@@ -314,6 +333,12 @@ class RunWorker:
             if await commands.is_processed(message.command_id):
                 if message.run_id in self._terminal_cleanup_pending:
                     await self._release_runtime(message.run_id)
+                # 重投递恢复窗口：核心结算已提交但派生可能未落库，此处幂等补派生
+                processed_run = await SqlAlchemyRunRepository(session).get(
+                    tenant_id=message.tenant_id, run_id=message.run_id
+                )
+                if processed_run is not None and self._is_terminal(processed_run.status):
+                    await self._dispatch_conversation_followup_safely(processed_run)
                 return
             run = await SqlAlchemyRunRepository(session).get(
                 tenant_id=message.tenant_id, run_id=message.run_id
@@ -339,15 +364,19 @@ class RunWorker:
         if terminal_noop:
             if message.action == "start":
                 await self._release_runtime(run.id)
+            await self._dispatch_conversation_followup_safely(run)
             return
         assert version is not None
 
         cancellation_command_ids: tuple[UUID, ...] = ()
+        knowledge_event: PlatformEvent | None = None
         pending_result = self._pending_results.get(run.id)
         if pending_result is not None:
             if pending_result.command_id != message.command_id:
                 raise RuntimeAlreadyPrepared(run.id)
             runtime = self._required_runtime(run.id)
+            # 事件流重收集时必须重建知识事件；确定性 event_id 保证已持久化时被去重。
+            knowledge_event = self._knowledge_event(run, self._prepared_runtimes[run.id])
             state = pending_result.state
             history = list(pending_result.history) if pending_result.history is not None else None
         elif message.action == "start":
@@ -361,6 +390,7 @@ class RunWorker:
                 run=run,
                 start_command_id=message.command_id,
             ):
+                await self._dispatch_conversation_followup_safely(run)
                 return
             try:
                 prepared = await self._runtime_resolver.resolve(run, version.definition)
@@ -381,6 +411,7 @@ class RunWorker:
             self._prepared_runtimes[run.id] = prepared
             self._active_runs[run.id] = run
             runtime = prepared.runtime
+            knowledge_event = self._knowledge_event(run, prepared)
             try:
                 marked_running = await self._mark_running(
                     run,
@@ -487,6 +518,8 @@ class RunWorker:
                     history=None,
                 )
                 raise
+        if knowledge_event is not None:
+            history = self._insert_knowledge_event(history, knowledge_event)
 
         try:
             persisted_status = await self._persist_runtime_result(
@@ -506,6 +539,8 @@ class RunWorker:
         self._pending_results.pop(run.id, None)
         if self._should_release(run.id, persisted_status):
             await self._release_runtime(run.id)
+        if self._is_terminal(persisted_status):
+            await self._dispatch_conversation_followup_safely(run)
 
     async def _persist_runtime_result(
         self,
@@ -800,6 +835,7 @@ class RunWorker:
                 )
                 await session.commit()
                 self._ownerships.pop(run.id, None)
+                await self._dispatch_conversation_followup_safely(run)
                 return
             await runs.update(
                 current.transition_to(
@@ -832,6 +868,7 @@ class RunWorker:
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
+        await self._dispatch_conversation_followup_safely(run)
 
     def _required_runtime(self, run_id: UUID) -> EmployeeRuntime:
         try:
@@ -953,11 +990,12 @@ class RunWorker:
             await self._assert_owned(session=session, run_id=run.id)
             runs = SqlAlchemyRunRepository(session)
             current = await runs.get_for_update(tenant_id=run.tenant_id, run_id=run.id)
-            if current is None or current.status in {
-                RunStatus.COMPLETED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-            }:
+            if current is None:
+                return
+            if self._is_terminal(current.status):
+                # 先提交释放 Run 行锁，再与其余终态分支一致地在事务外补派生
+                await session.commit()
+                await self._dispatch_conversation_followup_safely(run)
                 return
             error_code = "sandbox_lease_renewal_failed"
             await runs.update(
@@ -984,6 +1022,7 @@ class RunWorker:
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
+        await self._dispatch_conversation_followup_safely(run)
 
     async def _persist_orphaned_run_failure(
         self,
@@ -1008,6 +1047,7 @@ class RunWorker:
                 )
                 await session.commit()
                 self._ownerships.pop(run.id, None)
+                await self._dispatch_conversation_followup_safely(run)
                 return
             await runs.update(
                 current.transition_to(
@@ -1046,6 +1086,7 @@ class RunWorker:
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
+        await self._dispatch_conversation_followup_safely(run)
 
     async def _persist_recovered_snapshot(
         self,
@@ -1328,6 +1369,239 @@ class RunWorker:
             return value
         return json.dumps(TypeAdapter(JsonValue).validate_python(value), ensure_ascii=False)
 
+    async def _dispatch_followup_after_dead_letter(self, message: RunQueueMessage) -> None:
+        """死信结算同样属于轮次终态：尽力补派生，失败不影响死信处理。"""
+        try:
+            async with self._session_factory() as session:
+                run = await SqlAlchemyRunRepository(session).get(
+                    tenant_id=message.tenant_id, run_id=message.run_id
+                )
+        except Exception:
+            logger.error(
+                "conversation_followup_dead_letter_lookup_failed",
+                extra={"run_id": str(message.run_id)},
+            )
+            return
+        if run is not None and self._is_terminal(run.status):
+            await self._dispatch_conversation_followup_safely(run)
+
+    async def _dispatch_conversation_followup_safely(self, run: Run) -> None:
+        """终态结算后的自动续跑派生：独立安全事务，失败只记录日志，不影响已完成的结算。"""
+        if run.conversation_id is None:
+            return
+        try:
+            await self._dispatch_conversation_followup(
+                tenant_id=run.tenant_id,
+                conversation_id=run.conversation_id,
+            )
+        except Exception as error:
+            logger.error(
+                "conversation_followup_dispatch_failed",
+                extra={
+                    "run_id": str(run.id),
+                    "conversation_id": str(run.conversation_id),
+                    "error_type": type(error).__name__,
+                },
+            )
+
+    async def _dispatch_conversation_followup(
+        self,
+        *,
+        tenant_id: UUID,
+        conversation_id: UUID,
+    ) -> None:
+        async with self._session_factory() as session:
+            conversations = SqlAlchemyConversationRepository(session)
+            # 会话行锁与 API 追加消息的决策互斥：结算瞬间写入的排队消息
+            # 要么在本事务可见（被派生消费），要么其请求已看到无活跃 Run（自行开新轮）。
+            conversation = await conversations.get_for_update(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if conversation is None:
+                return
+            commands = SqlAlchemyRunCommandRepository(session)
+            followups = await commands.unprocessed_followup_commands_for_conversation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if not followups:
+                return
+            active = await conversations.latest_active_run(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if active is not None:
+                # 已有下一轮在跑（API 抢先开新轮或已派生），意图留待该轮结算时消费
+                return
+            messages = SqlAlchemyConversationMessageRepository(session)
+            stale_commands: list[RunCommand] = []
+            pending: list[tuple[RunCommand, ConversationMessage]] = []
+            for command in followups:
+                message = await self._followup_message(
+                    messages=messages,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    command=command,
+                )
+                if message is None:
+                    stale_commands.append(command)
+                else:
+                    pending.append((command, message))
+            if not pending:
+                for command in stale_commands:
+                    await commands.mark_processed(command.id)
+                await session.commit()
+                return
+            pending.sort(key=lambda pair: pair[1].sequence)
+            employee_version = await self._runnable_conversation_employee_version(
+                session=session,
+                conversation=conversation,
+            )
+            if employee_version is None:
+                # 员工当前不可运行：受控跳过并保留意图，员工恢复后由后续结算继续消费
+                logger.warning(
+                    "conversation_followup_skipped_employee_not_runnable",
+                    extra={
+                        "conversation_id": str(conversation_id),
+                        "employee_id": str(conversation.employee_id),
+                    },
+                )
+                for command in stale_commands:
+                    await commands.mark_processed(command.id)
+                await session.commit()
+                return
+            trigger_command, trigger_message = pending[0]
+            created_by = self._followup_requested_by(
+                command=trigger_command,
+                conversation=conversation,
+            )
+            attachment_files = await self._followup_attachment_files(
+                session=session,
+                tenant_id=tenant_id,
+                messages=[message for _, message in pending],
+            )
+            # 确定性幂等键兜底覆盖整个创建区段：仓储 add 会立即 flush，
+            # uuid5 主键冲突在 create_conversation_run 内部就会抛出，
+            # 不能只包住最终 commit，否则并发派生会被误报为派生失败。
+            try:
+                followup_run = await create_conversation_run(
+                    database_session=session,
+                    conversation=conversation,
+                    employee_version=employee_version,
+                    created_by=created_by,
+                    input_data=await build_conversation_run_input(
+                        messages=messages,
+                        conversation=conversation,
+                        content=pending[-1][1].content,
+                    ),
+                    attachment_files=attachment_files,
+                    run_id=conversation_followup_run_id(
+                        conversation_id=conversation.id,
+                        trigger_message_id=trigger_message.id,
+                    ),
+                )
+                for _, message in pending:
+                    await messages.bind_run(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        message_id=message.id,
+                        run_id=followup_run.id,
+                    )
+                for command in (*(command for command, _ in pending), *stale_commands):
+                    await commands.mark_processed(command.id)
+                await session.commit()
+            except IntegrityError:
+                # 并发派生同一触发消息：按已派生处理，不算失败
+                await session.rollback()
+                logger.warning(
+                    "conversation_followup_already_derived",
+                    extra={
+                        "conversation_id": str(conversation_id),
+                        "trigger_message_id": str(trigger_message.id),
+                    },
+                )
+
+    @staticmethod
+    async def _followup_message(
+        *,
+        messages: SqlAlchemyConversationMessageRepository,
+        tenant_id: UUID,
+        conversation_id: UUID,
+        command: RunCommand,
+    ) -> ConversationMessage | None:
+        try:
+            message_id = UUID(str(command.payload.get("message_id")))
+        except ValueError:
+            return None
+        message = await messages.get(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        )
+        if (
+            message is None
+            or message.run_id is not None
+            or message.role is not ConversationMessageRole.USER
+        ):
+            return None
+        return message
+
+    @staticmethod
+    def _followup_requested_by(*, command: RunCommand, conversation: Conversation) -> UUID:
+        try:
+            return UUID(str(command.payload.get("requested_by")))
+        except ValueError:
+            return conversation.created_by
+
+    @staticmethod
+    async def _runnable_conversation_employee_version(
+        *,
+        session: AsyncSession,
+        conversation: Conversation,
+    ) -> int | None:
+        employee = await SqlAlchemyEmployeeRepository(session).get(
+            tenant_id=conversation.tenant_id,
+            employee_id=conversation.employee_id,
+        )
+        if (
+            employee is None
+            or employee.status is not EmployeeStatus.PUBLISHED
+            or employee.published_version is None
+        ):
+            return None
+        version = await SqlAlchemyEmployeeVersionRepository(session).get(
+            tenant_id=conversation.tenant_id,
+            employee_id=conversation.employee_id,
+            version=employee.published_version,
+        )
+        if version is None or not is_runnable_employee_definition(version.definition):
+            return None
+        capabilities = version.definition.get("capabilities")
+        if not isinstance(capabilities, dict) or capabilities.get("conversation") is not True:
+            return None
+        return employee.published_version
+
+    @staticmethod
+    async def _followup_attachment_files(
+        *,
+        session: AsyncSession,
+        tenant_id: UUID,
+        messages: list[ConversationMessage],
+    ) -> list[File]:
+        files: list[File] = []
+        repository = SqlAlchemyFileRepository(session)
+        seen: set[UUID] = set()
+        for message in messages:
+            for file_id in message.attachment_ids:
+                if file_id in seen:
+                    continue
+                seen.add(file_id)
+                file = await repository.get(tenant_id=tenant_id, file_id=file_id)
+                if file is not None:
+                    files.append(file)
+        return files
+
     @staticmethod
     async def _settle_approval_commands(
         *,
@@ -1420,6 +1694,10 @@ class RunWorker:
 
     @staticmethod
     def _runtime_request(run: Run, prepared: PreparedRuntime) -> RuntimeStartRequest:
+        input_data = dict(run.input_data)
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is not None:
+            input_data["knowledge_context"] = knowledge_context.as_input_payload()
         return RuntimeStartRequest(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -1429,8 +1707,49 @@ class RunWorker:
             employee_definition=TypeAdapter(dict[str, JsonValue]).validate_python(
                 prepared.employee_definition
             ),
-            input_data=run.input_data,
+            input_data=TypeAdapter(dict[str, JsonValue]).validate_python(input_data),
         )
+
+    @staticmethod
+    def _knowledge_event(run: Run, prepared: PreparedRuntime) -> PlatformEvent | None:
+        knowledge_context = getattr(prepared, "knowledge_context", None)
+        if knowledge_context is None:
+            return None
+        payload = {
+            "citation_count": len(knowledge_context.citations),
+            **knowledge_context.as_input_payload(),
+        }
+        event = PlatformEvent.create(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            run_id=run.id,
+            sequence=1,
+            event_type=EventType.KNOWLEDGE_RETRIEVED,
+            payload=TypeAdapter(dict[str, JsonValue]).validate_python(payload),
+        )
+        # 重投递会重新生成本事件；event_id 必须按 run 确定，依托持久化 event_id 去重。
+        return event.model_copy(
+            update={
+                "event_id": uuid5(
+                    _KNOWLEDGE_EVENT_NAMESPACE,
+                    f"{EventType.KNOWLEDGE_RETRIEVED.value}:{run.id}",
+                )
+            }
+        )
+
+    @staticmethod
+    def _insert_knowledge_event(
+        history: list[PlatformEvent],
+        knowledge_event: PlatformEvent,
+    ) -> list[PlatformEvent]:
+        if any(event.type is EventType.KNOWLEDGE_RETRIEVED for event in history):
+            return history
+        started_index = next(
+            (index for index, event in enumerate(history) if event.type is EventType.RUN_STARTED),
+            -1,
+        )
+        insert_at = started_index + 1 if started_index >= 0 else 0
+        return [*history[:insert_at], knowledge_event, *history[insert_at:]]
 
     async def _claim_ownership(self, run: Run) -> RuntimeOwnership:
         async with self._session_factory() as session:

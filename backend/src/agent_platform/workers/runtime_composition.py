@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,6 +20,9 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactStorageOperationRepository,
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
+)
+from agent_platform.infrastructure.database.repositories.knowledge import (
+    SqlAlchemyKnowledgeBaseRepository,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
     EventSequenceConflict,
@@ -40,6 +44,19 @@ from agent_platform.platform.artifacts.services import (
     DEFAULT_STORAGE_REQUEST_TIMEOUT_SECONDS,
     ArtifactService,
     TaskAttachmentService,
+)
+from agent_platform.platform.knowledge.errors import (
+    InvalidKnowledgeProviderResponse,
+    KnowledgeProviderNotConfigured,
+    KnowledgeProviderRequestRejected,
+    KnowledgeProviderUnavailable,
+)
+from agent_platform.platform.knowledge.models import KnowledgeCitation
+from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.knowledge.retrieval import (
+    InvalidKnowledgeRetrievalConfig,
+    KnowledgeRetrievalConfig,
+    validate_knowledge_retrieval_config,
 )
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
@@ -146,6 +163,28 @@ class ModelGatewayUnavailable(PermanentRuntimePreparationError):
     code = "model_gateway_unavailable"
 
 
+class InvalidKnowledgeRuntimeResponse(PermanentRuntimePreparationError):
+    """知识供应商返回了平台无法安全解释的响应；消息不携带原始响应内容。"""
+
+    code = "invalid_knowledge_provider_response"
+
+
+class KnowledgeRuntimeRequestRejected(PermanentRuntimePreparationError):
+    """知识供应商明确拒绝了检索请求（认证、权限、资源或业务错误）；消息不携带原始响应内容。"""
+
+    code = "knowledge_provider_rejected"
+
+
+class KnowledgeRuntimeNotConfigured(PermanentRuntimePreparationError):
+    """知识库引用的供应商未在当前部署注册；部署配置缺陷，重投递无法恢复。"""
+
+    code = "knowledge_provider_not_configured"
+
+
+class TransientRuntimePreparationError(RuntimeError):
+    """运行时准备依赖暂时不可用；由队列重投递重试，消息不携带底层连接细节。"""
+
+
 class PublishedModel(GatewayModelReference):
     pass
 
@@ -154,6 +193,24 @@ class PublishedModel(GatewayModelReference):
 class PublishedSkillVersion:
     skill_id: UUID
     version: int
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeKnowledgeContext:
+    citations: tuple[KnowledgeCitation, ...]
+
+    def as_input_payload(self) -> dict[str, JsonValue]:
+        payload = {"citations": [citation.model_dump(mode="json") for citation in self.citations]}
+        return TypeAdapter(dict[str, JsonValue]).validate_python(payload)
+
+
+def _parse_knowledge_retrieval(value: object) -> KnowledgeRetrievalConfig:
+    if value is None:
+        return KnowledgeRetrievalConfig()
+    try:
+        return validate_knowledge_retrieval_config(value)
+    except InvalidKnowledgeRetrievalConfig:
+        raise UntrustedRuntimeDefinition("invalid knowledge retrieval configuration") from None
 
 
 def _parse_skill_versions(
@@ -177,6 +234,16 @@ def _parse_skill_versions(
     return tuple(parsed)
 
 
+def _knowledge_query_from_input(input_data: Mapping[str, JsonValue]) -> str:
+    question = input_data.get("question")
+    if isinstance(question, str) and question.strip():
+        return question.strip()
+    message = input_data.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return json.dumps(input_data, ensure_ascii=False, sort_keys=True, default=str)[:4000]
+
+
 @dataclass(frozen=True, slots=True)
 class PublishedRuntimeCapabilities:
     """从不可变员工版本读取的可信运行能力，不读取用户 input。"""
@@ -186,6 +253,8 @@ class PublishedRuntimeCapabilities:
     skill_ids: tuple[UUID, ...]
     skill_versions: tuple[PublishedSkillVersion, ...]
     tool_ids: tuple[UUID, ...]
+    knowledge_base_ids: tuple[UUID, ...]
+    knowledge_retrieval: KnowledgeRetrievalConfig
     workflow_id: UUID | None
     workflow_version: int | None
 
@@ -224,6 +293,14 @@ class PublishedRuntimeCapabilities:
                 skill_versions=_parse_skill_versions(definition.get("skill_versions"), skill_ids),
                 tool_ids=tuple(
                     TypeAdapter(list[UUID]).validate_python(definition.get("tool_ids", []))
+                ),
+                knowledge_base_ids=tuple(
+                    TypeAdapter(list[UUID]).validate_python(
+                        definition.get("knowledge_base_ids", [])
+                    )
+                ),
+                knowledge_retrieval=_parse_knowledge_retrieval(
+                    definition.get("knowledge_retrieval")
                 ),
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
@@ -359,6 +436,7 @@ class PreparedRuntimeResult:
     scope: SandboxScope
     sandbox_manager: SandboxManager
     sandbox_ttl: timedelta
+    knowledge_context: RuntimeKnowledgeContext | None = None
     _closed: bool = field(default=False, init=False)
 
     async def close(self) -> None:
@@ -403,6 +481,7 @@ class ComposedRuntimeResolver:
         gateway: ToolGatewayInvoker,
         runtime_selector: PlatformRuntimeSelector,
         model_resolver: PlatformModelResolver | None = None,
+        knowledge_provider_registry: KnowledgeProviderRegistry | None = None,
         sandbox_ttl: timedelta = DEFAULT_RUN_SANDBOX_TTL,
         artifact_operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
         artifact_operation_heartbeat_interval: float = (
@@ -418,6 +497,7 @@ class ComposedRuntimeResolver:
         self._gateway = gateway
         self._runtime_selector = runtime_selector
         self._model_resolver = model_resolver or PlatformModelResolver()
+        self._knowledge_provider_registry = knowledge_provider_registry
         self._sandbox_ttl = sandbox_ttl
         self._artifact_operation_lease_duration = artifact_operation_lease_duration
         self._artifact_operation_heartbeat_interval = artifact_operation_heartbeat_interval
@@ -433,6 +513,10 @@ class ComposedRuntimeResolver:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
         model = self._model_resolver.resolve(capabilities.model)
+        knowledge_context = await self._prepare_knowledge_context(
+            run=run,
+            capabilities=capabilities,
+        )
         scope = SandboxScope(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -448,6 +532,7 @@ class ComposedRuntimeResolver:
             definition=definition,
             capabilities=capabilities,
             model=model,
+            knowledge_context=knowledge_context,
             scope=scope,
             environment=environment,
             delete_on_error=True,
@@ -462,6 +547,10 @@ class ComposedRuntimeResolver:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
         model = self._model_resolver.resolve(capabilities.model)
+        knowledge_context = await self._prepare_knowledge_context(
+            run=run,
+            capabilities=capabilities,
+        )
         scope = SandboxScope(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -477,10 +566,69 @@ class ComposedRuntimeResolver:
             definition=definition,
             capabilities=capabilities,
             model=model,
+            knowledge_context=knowledge_context,
             scope=scope,
             environment=environment,
             delete_on_error=False,
         )
+
+    async def _prepare_knowledge_context(
+        self,
+        *,
+        run: Run,
+        capabilities: PublishedRuntimeCapabilities,
+    ) -> RuntimeKnowledgeContext | None:
+        if not capabilities.knowledge_base_ids:
+            return None
+        if self._knowledge_provider_registry is None:
+            raise UntrustedRuntimeDefinition("published knowledge is unavailable")
+
+        async with self._session_factory() as session:
+            knowledge_bases = await SqlAlchemyKnowledgeBaseRepository(session).list_by_ids(
+                tenant_id=run.tenant_id,
+                knowledge_base_ids=capabilities.knowledge_base_ids,
+            )
+        if {base.id for base in knowledge_bases} != set(capabilities.knowledge_base_ids):
+            raise UntrustedRuntimeDefinition("published knowledge is unavailable")
+
+        question = _knowledge_query_from_input(run.input_data)
+        citations: list[KnowledgeCitation] = []
+        grouped: dict[str, list[str]] = {}
+        for knowledge_base in knowledge_bases:
+            grouped.setdefault(knowledge_base.provider, []).append(knowledge_base.provider_id)
+
+        for provider_name, dataset_ids in grouped.items():
+            try:
+                provider = self._knowledge_provider_registry.resolve(provider_name)
+                result = await provider.retrieve(
+                    question=question,
+                    dataset_ids=dataset_ids,
+                    options=capabilities.knowledge_retrieval,
+                )
+            except KnowledgeProviderNotConfigured:
+                raise KnowledgeRuntimeNotConfigured(
+                    "knowledge provider is not configured for this deployment"
+                ) from None
+            except KnowledgeProviderUnavailable:
+                raise TransientRuntimePreparationError(
+                    "knowledge provider is temporarily unavailable"
+                ) from None
+            except KnowledgeProviderRequestRejected:
+                raise KnowledgeRuntimeRequestRejected(
+                    "knowledge provider rejected the retrieval request"
+                ) from None
+            except InvalidKnowledgeProviderResponse:
+                raise InvalidKnowledgeRuntimeResponse(
+                    "knowledge provider returned an uninterpretable response"
+                ) from None
+            allowed_dataset_ids = set(dataset_ids)
+            citations.extend(
+                citation
+                for citation in result.citations
+                if citation.dataset_id in allowed_dataset_ids
+            )
+
+        return RuntimeKnowledgeContext(citations=tuple(citations))
 
     async def _compose(
         self,
@@ -489,6 +637,7 @@ class ComposedRuntimeResolver:
         definition: dict[str, object],
         capabilities: PublishedRuntimeCapabilities,
         model: ResolvedModel,
+        knowledge_context: RuntimeKnowledgeContext | None,
         scope: SandboxScope,
         environment: RunExecutionEnvironment,
         delete_on_error: bool,
@@ -537,8 +686,12 @@ class ComposedRuntimeResolver:
                         tenant_id=run.tenant_id,
                         tool_id=tool_id,
                     )
-                    if tool is None or not tool.enabled:
+                    if tool is None:
+                        # 已删除的引用没有可组装的定义，保持 fail-closed。
                         raise UntrustedRuntimeDefinition("published tool is unavailable")
+                    # 禁用/上游移除的工具仍然组装：调用点由 Tool Gateway 策略
+                    # 拒绝并留下 tool.rejected 审计，避免单个工具下线导致
+                    # 员工其他能力整体不可用。
                     tool_metadata.append(tool)
 
             gateway_adapter = ToolGatewayAdapter(
@@ -754,6 +907,7 @@ class ComposedRuntimeResolver:
             scope=scope,
             sandbox_manager=self._sandbox_manager,
             sandbox_ttl=self._sandbox_ttl,
+            knowledge_context=knowledge_context,
         )
 
     async def aclose(self) -> None:

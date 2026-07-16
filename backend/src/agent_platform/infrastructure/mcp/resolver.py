@@ -52,6 +52,24 @@ class DenyStdioExecutionPolicy:
         return False
 
 
+class AllowlistStdioExecutionPolicy:
+    """仅允许运维显式配置的 stdio 命令；空清单等价于全部拒绝。"""
+
+    def __init__(self, allowed_commands: list[str] | tuple[str, ...]) -> None:
+        self._allowed_commands = frozenset(allowed_commands)
+
+    async def allows(
+        self,
+        *,
+        tenant_id: UUID,
+        server_id: UUID,
+        command: str,
+        args: tuple[str, ...],
+    ) -> bool:
+        del tenant_id, server_id, args
+        return command in self._allowed_commands
+
+
 class MCPClientResolutionError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -80,10 +98,12 @@ class DatabaseMCPClientResolver:
         *,
         client_builder: MCPClientBuilder | None = None,
         stdio_policy: StdioExecutionPolicy | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._server_reader = server_reader
         self._client_builder = client_builder or PythonSDKMCPClient
         self._stdio_policy = stdio_policy or DenyStdioExecutionPolicy()
+        self._timeout_seconds = timeout_seconds
 
     async def resolve(
         self,
@@ -99,50 +119,67 @@ class DatabaseMCPClientResolver:
         if server is None or not server.enabled:
             raise MCPServerUnavailableError
 
-        config = await self._config_for(
+        config = await build_server_config(
             server=server,
             tenant_id=tenant_id,
             credentials=credentials,
+            stdio_policy=self._stdio_policy,
+            timeout_seconds=self._timeout_seconds,
         )
         try:
             return self._client_builder(config)
         except Exception:
             raise MCPServerConfigurationError from None
 
-    async def _config_for(
-        self,
-        *,
-        server: McpServer,
-        tenant_id: UUID,
-        credentials: Mapping[str, str],
-    ) -> MCPServerConfig:
-        if server.transport is McpTransport.STREAMABLE_HTTP:
-            if not server.endpoint:
-                raise MCPServerConfigurationError
+
+async def build_server_config(
+    *,
+    server: McpServer,
+    tenant_id: UUID,
+    credentials: Mapping[str, str],
+    stdio_policy: StdioExecutionPolicy,
+    timeout_seconds: float | None = None,
+) -> MCPServerConfig:
+    if server.transport is McpTransport.STREAMABLE_HTTP:
+        if not server.endpoint:
+            raise MCPServerConfigurationError
+        if timeout_seconds is None:
             return MCPStreamableHTTPConfig(
                 url=_validated_http_endpoint(server.endpoint),
                 headers=dict(credentials),
             )
+        return MCPStreamableHTTPConfig(
+            url=_validated_http_endpoint(server.endpoint),
+            headers=dict(credentials),
+            timeout_seconds=timeout_seconds,
+        )
 
-        if not server.command:
-            raise MCPServerConfigurationError
-        args = tuple(server.args)
-        try:
-            allowed = await self._stdio_policy.allows(
-                tenant_id=tenant_id,
-                server_id=server.id,
-                command=server.command,
-                args=args,
-            )
-        except Exception:
-            raise MCPStdioExecutionDeniedError from None
-        if not allowed:
-            raise MCPStdioExecutionDeniedError
+    if not server.command:
+        raise MCPServerConfigurationError
+    args = tuple(server.args)
+    try:
+        allowed = await stdio_policy.allows(
+            tenant_id=tenant_id,
+            server_id=server.id,
+            command=server.command,
+            args=args,
+        )
+    except Exception:
+        raise MCPStdioExecutionDeniedError from None
+    if not allowed:
+        raise MCPStdioExecutionDeniedError
+    if timeout_seconds is None:
         return MCPStdioConfig(
             command=server.command,
             args=args,
             env=dict(credentials),
         )
+    return MCPStdioConfig(
+        command=server.command,
+        args=args,
+        env=dict(credentials),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _validated_http_endpoint(endpoint: str) -> str:

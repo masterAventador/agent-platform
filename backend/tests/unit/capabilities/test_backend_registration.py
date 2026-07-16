@@ -3,18 +3,17 @@ from __future__ import annotations
 import pytest
 from fastapi import APIRouter
 
-from agent_platform.bootstrap.capabilities import (
-    UnknownInstalledCapabilityError,
-    resolve_installed_backend_registrations,
-)
+from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.capabilities.registration import (
     BackendCapabilityRegistration,
     BackendRegistrationValidationError,
 )
+from agent_platform.capabilities.registry import DuplicateCapabilityError
 from agent_platform.capabilities.video_studio.manifest import VIDEO_STUDIO_MANIFEST
 from agent_platform.capabilities.video_studio.registration import (
     VIDEO_STUDIO_BACKEND_REGISTRATION,
 )
+from agent_platform.config import AppSettings
 
 
 def test_video_studio_backend_registration_declares_routes_and_models() -> None:
@@ -67,14 +66,8 @@ def test_backend_registration_requires_routers_and_models() -> None:
         )
 
 
-def test_bootstrap_resolves_installed_capabilities_fail_closed() -> None:
-    assert resolve_installed_backend_registrations(()) == ()
-
-    registrations = resolve_installed_backend_registrations(("video-studio",))
-    assert [item.manifest.capability_id for item in registrations] == ["video-studio"]
-
-    with pytest.raises(UnknownInstalledCapabilityError):
-        resolve_installed_backend_registrations(("video-studio", "not-a-capability"))
-
-    with pytest.raises(UnknownInstalledCapabilityError):
-        resolve_installed_backend_registrations(("video-studio", "video-studio"))
+def test_bootstrap_rejects_duplicate_installed_capability() -> None:
+    with pytest.raises(DuplicateCapabilityError):
+        resolve_installed_backend_registrations(
+            AppSettings(installed_capabilities=("social-operations", "social-operations"))
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
+from time import perf_counter
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
@@ -8,6 +9,8 @@ import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+
+from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 
 
 class ModelGatewayConfigurationError(ValueError):
@@ -63,13 +66,16 @@ class LiteLLMGatewayReadinessProbe:
         api_key: SecretStr,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         self._base_url = _validate_gateway_base_url(base_url.get_secret_value())
         self._api_key = _require_gateway_key(api_key)
         self._timeout_seconds = timeout_seconds
         self._transport = transport
+        self._metrics = metrics
 
     async def assert_ready(self, aliases: frozenset[str]) -> None:
+        started = perf_counter()
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout_seconds,
@@ -87,10 +93,22 @@ class LiteLLMGatewayReadinessProbe:
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
             }
         except (httpx.HTTPError, KeyError, TypeError, ValueError):
+            self._record_metric("failed", started)
             raise ModelGatewayReadinessError("model gateway readiness check failed") from None
         if not aliases.issubset(advertised):
+            self._record_metric("failed", started)
             raise ModelGatewayReadinessError(
                 "model gateway does not advertise all required model aliases"
+            )
+        self._record_metric("succeeded", started)
+
+    def _record_metric(self, outcome: str, started: float) -> None:
+        if self._metrics is not None:
+            self._metrics.record(
+                component=OperationalComponent.MODEL_GATEWAY,
+                operation="readiness",
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1_000,
             )
 
 

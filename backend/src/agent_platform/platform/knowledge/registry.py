@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from agent_platform.platform.knowledge.errors import KnowledgeProviderUnavailable
+from agent_platform.platform.knowledge.errors import KnowledgeProviderNotConfigured
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 
 
@@ -29,4 +29,6 @@ class KnowledgeProviderRegistry:
         try:
             return self._providers[provider_name]
         except KeyError as error:
-            raise KnowledgeProviderUnavailable("知识库供应商当前不可用") from error
+            raise KnowledgeProviderNotConfigured(
+                f"知识库供应商 {provider_name} 未在当前部署注册"
+            ) from error

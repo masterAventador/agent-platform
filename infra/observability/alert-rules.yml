@@ -1,0 +1,102 @@
+groups:
+  - name: agent-platform-c14-operability
+    interval: 30s
+    rules:
+      - alert: AgentPlatformApiHighErrorRate
+        expr: |
+          sum(rate(agent_platform_api_server_requests_total{http_response_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(agent_platform_api_server_requests_total[5m])), 1)
+          > 0.05
+        for: 5m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: api
+        annotations:
+          summary: API 5xx 比例超过 5%
+          runbook: 检查 Jaeger Trace、API 日志和最近部署。
+      - alert: AgentPlatformApiLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(agent_platform_api_server_duration_milliseconds_bucket[5m])) by (le)
+          ) > 2000
+        for: 10m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: api
+        annotations:
+          summary: API P95 延迟超过 2 秒
+          runbook: 按 correlation_id 关联 Trace，检查数据库、Redis 和外部服务耗时。
+      - alert: AgentPlatformWorkerRunFailures
+        expr: increase(agent_platform_worker_runs_failed_total[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: worker
+        annotations:
+          summary: Worker 最近 10 分钟出现 Run 失败
+          runbook: 查看 run.failed 事件、Worker 结构化日志和对应 Trace。
+      - alert: AgentPlatformQueueDeadLetters
+        expr: increase(agent_platform_queue_dead_letters_total[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: critical
+          domain: queue
+        annotations:
+          summary: 队列出现死信
+          runbook: 进入运维页面检查死信、原 Run 和结算状态。
+      - alert: AgentPlatformModelGatewayFailures
+        expr: increase(agent_platform_model_gateway_requests_total{outcome="failed"}[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: model-gateway
+        annotations:
+          summary: 模型网关调用失败
+          runbook: 检查 LiteLLM、上游 provider、预算和 fallback 状态。
+      - alert: AgentPlatformRagFlowFailures
+        expr: increase(agent_platform_ragflow_requests_total{outcome="failed"}[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: ragflow
+        annotations:
+          summary: RAGFlow 请求失败
+          runbook: 检查 Knowledge Service、RAGFlow API、解析任务和网络。
+      - alert: AgentPlatformSandboxFailures
+        expr: increase(agent_platform_sandbox_operations_total{outcome="failed"}[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: critical
+          domain: sandbox
+        annotations:
+          summary: Sandbox 操作失败
+          runbook: 检查 Sandbox Controller、租约、Docker 资源和清理 tombstone。
+      - alert: AgentPlatformClientErrors
+        expr: increase(agent_platform_client_errors_total[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: warning
+          domain: client
+        annotations:
+          summary: 客户端错误上报增加
+          runbook: 按 request_id/correlation_id 关联前端日志、后端 Trace 和用户操作。
+      - alert: AgentPlatformAuditIngestionFailures
+        expr: increase(agent_platform_audit_events_failed_total[10m]) > 0
+        for: 0m
+        labels:
+          service: agent-platform
+          severity: critical
+          domain: audit
+        annotations:
+          summary: 审计事件写入失败
+          runbook: 审计失败会影响不可抵赖证据，优先检查数据库、迁移和写入错误。

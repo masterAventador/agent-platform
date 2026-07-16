@@ -422,6 +422,26 @@ class SqlAlchemyRunCommandRepository:
         )
         return [self._to_entity(record) for record in result.scalars()]
 
+    async def unprocessed_followup_commands_for_conversation(
+        self,
+        *,
+        tenant_id: UUID,
+        conversation_id: UUID,
+    ) -> list[RunCommand]:
+        """会话范围内所有未消费的自动续跑意图（含挂在历史轮次上的遗留意图）。"""
+        result = await self._session.execute(
+            select(RunCommandRecord)
+            .join(RunRecord, RunRecord.id == RunCommandRecord.run_id)
+            .where(
+                RunCommandRecord.tenant_id == tenant_id,
+                RunRecord.conversation_id == conversation_id,
+                RunCommandRecord.processed_at.is_(None),
+                RunCommandRecord.action == RunCommandAction.FOLLOWUP.value,
+            )
+            .order_by(RunCommandRecord.created_at)
+        )
+        return [self._to_entity(record) for record in result.scalars()]
+
     async def unprocessed_cancel_commands(self, *, run_id: UUID) -> list[RunCommand]:
         result = await self._session.execute(
             select(RunCommandRecord)

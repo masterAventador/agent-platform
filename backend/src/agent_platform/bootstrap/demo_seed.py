@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid5
 
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -26,12 +27,19 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
     EmployeeVersionRecord,
 )
+from agent_platform.infrastructure.database.repositories.entitlements import (
+    CapabilityEntitlementRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
     TenantRecord,
 )
-from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.database.repositories.tools import (
+    McpServerRecord,
+    ToolRecord,
+    ToolVersionRecord,
+)
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
 )
@@ -68,10 +76,12 @@ DEMO_COMPLETED_RUN_ID = uuid5(_DEMO_NAMESPACE, "completed-run")
 DEMO_FAILED_RUN_ID = uuid5(_DEMO_NAMESPACE, "failed-run")
 DEMO_MCP_SERVER_ID = uuid5(_DEMO_NAMESPACE, "disabled-mcp-server")
 DEMO_TOOL_ID = uuid5(_DEMO_NAMESPACE, "disabled-tool")
+DEMO_TOOL_VERSION_ID = uuid5(_DEMO_NAMESPACE, "disabled-tool-version-1")
 DEMO_DEAD_LETTER_ID = uuid5(_DEMO_NAMESPACE, "settled-dead-letter")
 DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
+DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 
 DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
 DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
@@ -109,6 +119,7 @@ class DemoSeedSummary:
 
 type DemoRecord = (
     UserRecord
+    | CapabilityEntitlementRecord
     | TenantRecord
     | TenantMembershipRecord
     | EmployeeRecord
@@ -117,6 +128,7 @@ type DemoRecord = (
     | RunEventRecord
     | McpServerRecord
     | ToolRecord
+    | ToolVersionRecord
     | RunDeadLetterRecord
     | FileRecord
     | TaskAttachmentRecord
@@ -221,6 +233,17 @@ async def _upsert_record(
 ) -> tuple[bool, bool]:
     identity = desired.event_id if isinstance(desired, RunEventRecord) else desired.id
     existing = cast(DemoRecord | None, await session.get(type(desired), identity))
+    if existing is None and isinstance(desired, ToolVersionRecord):
+        # 迁移回填可能已用随机 id 建立了同 (tool_id, version) 的行；
+        # Seed 必须按业务唯一键收编该行，避免撞 uq_tool_versions_number。
+        existing = (
+            await session.execute(
+                select(ToolVersionRecord).where(
+                    ToolVersionRecord.tool_id == desired.tool_id,
+                    ToolVersionRecord.version == desired.version,
+                )
+            )
+        ).scalar_one_or_none()
     if existing is None:
         session.add(desired)
         return True, False
@@ -255,7 +278,7 @@ def _demo_records(
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
-            "conversation": False,
+            "conversation": True,
             "scheduled_tasks": False,
             "file_upload": True,
         },
@@ -306,6 +329,22 @@ def _demo_records(
             ("name", "slug"),
         ),
         (
+            CapabilityEntitlementRecord(
+                id=DEMO_SOCIAL_ENTITLEMENT_ID,
+                tenant_id=DEMO_TENANT_ID,
+                capability_id="social-operations",
+                status="active",
+                source="demo-seed",
+                expires_at=None,
+                granted_at=_DEMO_CREATED_AT,
+                granted_by=DEMO_USER_ID,
+                revoked_at=None,
+                revoked_by=None,
+                revision=1,
+            ),
+            ("capability_id", "status", "source", "expires_at", "revoked_at", "revoked_by"),
+        ),
+        (
             TenantMembershipRecord(
                 id=DEMO_MEMBERSHIP_ID,
                 tenant_id=DEMO_TENANT_ID,
@@ -350,7 +389,7 @@ def _demo_records(
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 capabilities={
-                    "conversation": False,
+                    "conversation": True,
                     "scheduled_tasks": False,
                     "file_upload": True,
                 },
@@ -499,6 +538,30 @@ def _demo_records(
                 "input_schema",
                 "risk_level",
                 "enabled",
+            ),
+        ),
+        (
+            ToolVersionRecord(
+                id=DEMO_TOOL_VERSION_ID,
+                tenant_id=DEMO_TENANT_ID,
+                tool_id=DEMO_TOOL_ID,
+                version=1,
+                description="禁用的本地演示工具，不会发起外部调用。",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.READ.value,
+                approval_policy="risk_based",
+                change_source="initial",
+                created_at=_DEMO_CREATED_AT,
+            ),
+            (
+                "tenant_id",
+                "tool_id",
+                "version",
+                "description",
+                "input_schema",
+                "risk_level",
+                "approval_policy",
+                "change_source",
             ),
         ),
         (

@@ -5,7 +5,11 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
     FileRecord,
     TaskAttachmentRecord,
 )
-from agent_platform.infrastructure.database.repositories.audit import ToolAuditRecord
+from agent_platform.infrastructure.database.repositories.audit import (
+    AuditChainStateRecord,
+    AuditEventRecord,
+    ToolAuditRecord,
+)
 from agent_platform.infrastructure.database.repositories.auth import (
     AuthSessionRecord,
     UserRecord,
@@ -18,6 +22,9 @@ from agent_platform.infrastructure.database.repositories.dead_letters import Run
 from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeRecord,
     EmployeeVersionRecord,
+)
+from agent_platform.infrastructure.database.repositories.entitlements import (
+    CapabilityEntitlementRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.infrastructure.database.repositories.model_gateway import (
@@ -63,6 +70,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     McpServerRecord,
     ToolRecord,
     SandboxLeaseRecord,
+    AuditChainStateRecord,
+    AuditEventRecord,
     ToolAuditRecord,
     TenantModelGatewayPolicyRecord,
     ModelGatewayProvisioningCommandRecord,
@@ -70,6 +79,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     TaskAttachmentRecord,
     ArtifactRecord,
     ArtifactStorageOperationRecord,
+    CapabilityEntitlementRecord,
 )
 
 

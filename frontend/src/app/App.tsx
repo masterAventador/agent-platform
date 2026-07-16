@@ -1,13 +1,14 @@
 import { useIsMutating, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Flex, Layout, Result, Select, Space, Typography } from 'antd'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Link, Route, Routes, useNavigate } from 'react-router-dom'
+import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 
 import { isTenantMutationFor } from '../api/tenant'
 import { useCurrentUser, useLogout } from '../features/auth/api/queries'
 import type { CurrentUser } from '../features/auth/api/auth'
 import { ProtectedRoute } from '../features/auth/components/ProtectedRoute'
 import { WorkspaceCapabilityGate } from '../features/workspaces/components/WorkspaceCapabilityGate'
+import { reportClientEvent } from '../observability/client-events'
 import {
   getWorkspaceCapabilities,
   workspacePermissions,
@@ -96,6 +97,11 @@ const DeadLettersPage = lazy(() =>
     default: module.DeadLettersPage,
   })),
 )
+const AuditObservabilityPage = lazy(() =>
+  import('../features/operations/pages/AuditObservabilityPage').then((module) => ({
+    default: module.AuditObservabilityPage,
+  })),
+)
 export function App() {
   return (
     <Suspense fallback={<RouteLoading />}>
@@ -125,6 +131,7 @@ function PlatformShell() {
 
 function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   const logout = useLogout()
+  const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { activeWorkspace, isReconciled, select } = useWorkspaceSelection(user)
@@ -143,6 +150,15 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
   useEffect(() => {
     if (pendingActiveWorkspaceMutations === 0) setWorkspaceSwitchWarning(undefined)
   }, [pendingActiveWorkspaceMutations])
+
+  useEffect(() => {
+    if (activeWorkspace !== undefined) {
+      void reportClientEvent(
+        { operation: 'page', outcome: 'succeeded', duration_ms: 0 },
+        activeWorkspace.id,
+      )
+    }
+  }, [activeWorkspace, location.pathname])
 
   const signOut = async () => {
     await logout.mutateAsync()
@@ -248,7 +264,10 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             <Link to="/skills">Skill 中心</Link>
             {capabilities.canManageTools && <Link to="/tools">工具与 MCP</Link>}
             {capabilities.canManageOperations && (
-              <Link to="/operations/dead-letters">任务运维</Link>
+              <>
+                <Link to="/operations/dead-letters">任务运维</Link>
+                <Link to="/operations/audit-observability">审计与观测</Link>
+              </>
             )}
             {availableModules.flatMap(({ descriptor }) => descriptor.navigation).map((entry) => (
               <Link key={entry.path} to={entry.path}>{entry.label}</Link>
@@ -365,7 +384,10 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 permission={workspacePermissions.runsExecute}
                 title="无权访问会话中心"
               >
-                <ConversationDetailPage />
+                <ConversationDetailPage
+                  currentUserId={user.id}
+                  canManageRuns={capabilities.canManageRuns}
+                />
               </WorkspaceCapabilityGate>
             )}
           />
@@ -410,6 +432,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 title="无权访问死信管理"
               >
                 <DeadLettersPage />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/operations/audit-observability"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.operationsManage}
+                title="无权访问审计与观测"
+              >
+                <AuditObservabilityPage />
               </WorkspaceCapabilityGate>
             )}
           />

@@ -5,6 +5,10 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from agent_platform.api.dependencies.authentication import build_auth_service
+from agent_platform.api.dependencies.capabilities import (
+    capability_permissions_for_workspaces,
+)
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.tenants import (
     SqlAlchemyWorkspaceRepository,
 )
@@ -35,12 +39,21 @@ class UserResponse(BaseModel):
     workspaces: list["WorkspaceResponse"]
 
     @classmethod
-    def from_entity(cls, user: User, workspaces: list[WorkspaceAccess]) -> "UserResponse":
+    def from_entity(
+        cls,
+        user: User,
+        workspaces: list[WorkspaceAccess],
+        capability_permissions: dict[UUID, list[str]] | None = None,
+    ) -> "UserResponse":
+        granted = capability_permissions or {}
         return cls(
             id=user.id,
             email=user.email,
             email_verified=user.email_verified,
-            workspaces=[WorkspaceResponse.from_access(access) for access in workspaces],
+            workspaces=[
+                WorkspaceResponse.from_access(access, granted.get(access.tenant.id, []))
+                for access in workspaces
+            ],
         )
 
 
@@ -52,15 +65,20 @@ class WorkspaceResponse(BaseModel):
     permissions: list[str]
 
     @classmethod
-    def from_access(cls, access: WorkspaceAccess) -> "WorkspaceResponse":
+    def from_access(
+        cls,
+        access: WorkspaceAccess,
+        capability_permissions: list[str] | None = None,
+    ) -> "WorkspaceResponse":
+        role_permissions = [
+            permission.value for permission in permissions_for_role(access.role)
+        ]
         return cls(
             id=access.tenant.id,
             name=access.tenant.name,
             slug=access.tenant.slug,
             role=access.role.value,
-            permissions=sorted(
-                permission.value for permission in permissions_for_role(access.role)
-            ),
+            permissions=sorted({*role_permissions, *(capability_permissions or [])}),
         )
 
 
@@ -107,6 +125,42 @@ async def register(payload: CredentialsRequest, request: Request) -> UserRespons
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 user.id
             )
+            if workspaces:
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.member_added",
+                    resource_type="tenant_membership",
+                    resource_id=user.id,
+                    metadata={"role": workspaces[0].role.value},
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="tenant.role_assigned",
+                    resource_type="tenant_membership",
+                    resource_id=user.id,
+                    metadata={
+                        "role": workspaces[0].role.value,
+                        "permission_count": len(permissions_for_role(workspaces[0].role)),
+                    },
+                )
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=user.id,
+                    action="auth.registered",
+                    resource_type="user",
+                    resource_id=user.id,
+                    metadata={"workspace_count": len(workspaces)},
+                )
+            capability_permissions = await capability_permissions_for_workspaces(
+                request=request,
+                database_session=database_session,
+                workspaces=workspaces,
+            )
             await database_session.commit()
         except (
             RegistrationUnavailable,
@@ -114,7 +168,7 @@ async def register(payload: CredentialsRequest, request: Request) -> UserRespons
         ) as error:
             _raise_auth_error(error)
             raise AssertionError("unreachable") from error
-    return UserResponse.from_entity(user, workspaces)
+    return UserResponse.from_entity(user, workspaces, capability_permissions)
 
 
 @router.post("/login", response_model=UserResponse)
@@ -132,6 +186,21 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 issued_session.user.id
             )
+            if workspaces:
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=workspaces[0].tenant.id,
+                    actor_user_id=issued_session.user.id,
+                    action="auth.login_succeeded",
+                    resource_type="user",
+                    resource_id=issued_session.user.id,
+                    metadata={"workspace_count": len(workspaces)},
+                )
+            capability_permissions = await capability_permissions_for_workspaces(
+                request=request,
+                database_session=database_session,
+                workspaces=workspaces,
+            )
             await database_session.commit()
         except (InvalidCredentials, RateLimitExceeded) as error:
             _raise_auth_error(error)
@@ -147,7 +216,7 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
         samesite=settings.auth_cookie_same_site,
         path="/",
     )
-    return UserResponse.from_entity(issued_session.user, workspaces)
+    return UserResponse.from_entity(issued_session.user, workspaces, capability_permissions)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -159,10 +228,15 @@ async def current_user(request: Request) -> UserResponse:
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 user.id
             )
+            capability_permissions = await capability_permissions_for_workspaces(
+                request=request,
+                database_session=database_session,
+                workspaces=workspaces,
+            )
         except AuthenticationRequired as error:
             _raise_auth_error(error)
             raise AssertionError("unreachable") from error
-    return UserResponse.from_entity(user, workspaces)
+    return UserResponse.from_entity(user, workspaces, capability_permissions)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

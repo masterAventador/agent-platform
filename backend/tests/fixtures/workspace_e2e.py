@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
@@ -27,6 +28,8 @@ from agent_platform.platform.employees.entities import (
     RuntimeType,
 )
 from agent_platform.platform.tenants.entities import Tenant
+
+load_database_models()
 
 
 def _isolated_e2e_database_url() -> str:

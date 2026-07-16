@@ -6,6 +6,7 @@ import { useParams } from 'react-router-dom'
 import { useActiveWorkspaceId } from '../../workspaces/store'
 import { ResourceAccessError } from '../../system/components/ResourceAccessError'
 import { getPlatformAdapter } from '../../../platform'
+import { reportClientEvent } from '../../../observability/client-events'
 import {
   runKeys,
   useArtifacts,
@@ -16,14 +17,14 @@ import {
 } from '../api/queries'
 import { downloadArtifact, type Artifact } from '../api/runs'
 import { StructuredOutput } from '../../dynamic-io/StructuredOutput'
-import { formatRunEvent, formatRunInput, runStatusLabels } from './status'
+import { formatRunEvent, formatRunInput, knowledgeCitations, runStatusLabels } from './status'
 import './runs.css'
 
 
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled'])
 const streamEvents = [
   'run.started', 'run.progress', 'message.output', 'approval.required',
-  'artifact.created', 'run.completed', 'run.failed', 'run.cancelled',
+  'knowledge.retrieved', 'artifact.created', 'run.completed', 'run.failed', 'run.cancelled',
 ]
 
 export function RunDetailPage({
@@ -50,13 +51,40 @@ export function RunDetailPage({
     const source = new EventSource(`/api/v1/runs/${runId}/stream?${search}`, {
       withCredentials: true,
     })
+    const startedAt = Date.now()
+    const recordConnected = () => {
+      void reportClientEvent(
+        {
+          operation: 'sse',
+          outcome: 'succeeded',
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        },
+        tenantId,
+      )
+    }
+    const recordFailed = () => {
+      void reportClientEvent(
+        {
+          operation: 'sse',
+          outcome: 'failed',
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        },
+        tenantId,
+      )
+    }
+    source.addEventListener('open', recordConnected)
+    source.addEventListener('error', recordFailed)
     const refresh = () => {
       void queryClient.invalidateQueries({ queryKey: runKeys.detail(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.events(tenantId, runId) })
       void queryClient.invalidateQueries({ queryKey: runKeys.artifacts(tenantId, runId) })
     }
     streamEvents.forEach((type) => source.addEventListener(type, refresh))
-    return () => source.close()
+    return () => {
+      source.removeEventListener('open', recordConnected)
+      source.removeEventListener('error', recordFailed)
+      source.close()
+    }
   }, [queryClient, runId, runStatus, tenantId])
 
   if (run.isPending) {
@@ -143,6 +171,9 @@ export function RunDetailPage({
           <div className="run-event-list">
             {events.data.map((event) => {
               const presentation = formatRunEvent(event.type, event.payload)
+              const citations = event.type === 'knowledge.retrieved'
+                ? knowledgeCitations(event.payload)
+                : []
               return (
                 <div
                   className="run-event-item"
@@ -153,6 +184,18 @@ export function RunDetailPage({
                     <Typography.Text strong>{presentation.label}</Typography.Text>
                     {presentation.content && (
                       <Typography.Text>{presentation.content}</Typography.Text>
+                    )}
+                    {citations.length > 0 && (
+                      <div className="run-knowledge-citations">
+                        {citations.map((citation) => (
+                          <div className="run-knowledge-citation" key={citation.chunkId}>
+                            <Typography.Text strong>{citation.documentName}</Typography.Text>
+                            <Typography.Paragraph type="secondary">
+                              {citation.content}
+                            </Typography.Paragraph>
+                          </div>
+                        ))}
+                      </div>
                     )}
                     <Typography.Text type="secondary">序号 {event.sequence}</Typography.Text>
                   </Space>

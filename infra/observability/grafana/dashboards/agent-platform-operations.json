@@ -1,0 +1,95 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Jaeger Trace 搜索",
+      "type": "link",
+      "url": "http://127.0.0.1:16686/"
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "agent-platform-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "sum(rate(agent_platform_api_server_requests_total[$__rate_interval])) by (http_response_status_code)",
+          "legendFormat": "HTTP {{http_response_status_code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "API 请求速率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "agent-platform-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_platform_api_server_duration_milliseconds_bucket[$__rate_interval])) by (le))",
+          "legendFormat": "API P95",
+          "refId": "A"
+        }
+      ],
+      "title": "API P95 耗时",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "agent-platform-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "targets": [
+        {"expr": "increase(agent_platform_worker_runs_failed_total[$__range])", "legendFormat": "Worker Run 失败", "refId": "A"},
+        {"expr": "increase(agent_platform_queue_dead_letters_total[$__range])", "legendFormat": "队列死信", "refId": "B"},
+        {"expr": "sum(increase(agent_platform_model_gateway_requests_total{outcome=\"failed\"}[$__range]))", "legendFormat": "模型网关失败", "refId": "C"},
+        {"expr": "sum(increase(agent_platform_ragflow_requests_total{outcome=\"failed\"}[$__range]))", "legendFormat": "RAGFlow 失败", "refId": "D"},
+        {"expr": "sum(increase(agent_platform_sandbox_operations_total{outcome=\"failed\"}[$__range]))", "legendFormat": "Sandbox 失败", "refId": "E"},
+        {"expr": "increase(agent_platform_client_errors_total[$__range])", "legendFormat": "客户端错误", "refId": "F"},
+        {"expr": "increase(agent_platform_audit_events_failed_total[$__range])", "legendFormat": "审计写入失败", "refId": "G"}
+      ],
+      "title": "跨域故障计数",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "agent-platform-loki"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 16},
+      "id": 4,
+      "options": {"dedupStrategy": "none", "enableLogDetails": true, "showCommonLabels": false, "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true},
+      "targets": [
+        {
+          "expr": "{service_name=~\"agent-platform.*\"} | json | correlation_id != \"\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "结构化日志（按 correlation_id 定位）",
+      "type": "logs"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["agent-platform", "c14", "operations"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "Agent Platform 运维总览",
+  "uid": "agent-platform-operations",
+  "version": 1
+}

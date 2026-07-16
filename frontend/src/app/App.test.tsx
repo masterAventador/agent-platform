@@ -18,7 +18,7 @@ const installedSocialCapability = {
   frontend_entries: ['social.routes.v1'],
   permissions: [...socialPermissions],
 }
-let capabilityRegistryResponse = {
+let capabilityRegistryResponse: { schema_version: string, capabilities: unknown[] } = {
   schema_version: '1.0',
   capabilities: [installedSocialCapability],
 }
@@ -114,6 +114,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '审计与观测' })).toBeInTheDocument()
     expect(await screen.findByRole('link', { name: '设备与平台账号' })).toHaveAttribute(
       'href',
       '/video/account',
@@ -159,7 +160,11 @@ describe('App', () => {
   it('模块已安装但租户未授权时隐藏入口且直达路由受控拒绝', async () => {
     capabilityRegistryResponse = {
       schema_version: '1.0',
-      capabilities: [{ ...installedSocialCapability, tenant_entitled: false }],
+      capabilities: [{
+        capability_id: 'social-operations',
+        deployment_installed: true,
+        tenant_entitled: false,
+      }],
     }
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 

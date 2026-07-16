@@ -3,10 +3,15 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agent_platform.platform.audit.hashing import (
+    INSECURE_DEV_AUDIT_HMAC_KEY,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     validate_gateway_alias,
 )
+
+_AUDIT_HMAC_KEY_MIN_LENGTH = 32
 
 
 class AppSettings(BaseSettings):
@@ -54,6 +59,11 @@ class AppSettings(BaseSettings):
     artifact_storage_tombstone_rescan_seconds: int = Field(default=5, ge=1, le=60)
     artifact_unbound_file_ttl_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
     artifact_unbound_file_cleanup_interval_seconds: int = Field(default=300, ge=5, le=86_400)
+    # 审计哈希链 HMAC 密钥：只经环境变量注入，绝不落数据库、绝不进日志。
+    audit_hmac_key: SecretStr = SecretStr("")
+    audit_retention_days: int = Field(default=180, ge=1, le=3_650)
+    audit_retention_sweep_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    audit_retention_sweep_batch_limit: int = Field(default=1_000, ge=1, le=10_000)
     cos_region: str | None = None
     cos_secret_id: SecretStr = SecretStr("")
     cos_secret_key: SecretStr = SecretStr("")
@@ -61,6 +71,12 @@ class AppSettings(BaseSettings):
     cos_scheme: Literal["http", "https"] = "https"
     local_credentials_file: str | None = None
     local_credentials_repository_root: str | None = None
+    mcp_connection_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    mcp_stdio_allowed_commands: list[str] = Field(default_factory=list)
+    tool_invocation_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
+    tool_invocation_max_read_retries: int = Field(default=2, ge=0, le=10)
+    tool_circuit_failure_threshold: int = Field(default=5, ge=1, le=100)
+    tool_circuit_cooldown_seconds: float = Field(default=30.0, gt=0, le=3_600)
     sandbox_provider: Literal["local-controller"] = "local-controller"
     sandbox_controller_url: str = "http://sandbox-controller:8090"
     sandbox_controller_secret: SecretStr = SecretStr("")
@@ -84,6 +100,10 @@ class AppSettings(BaseSettings):
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
+    installed_capabilities: tuple[str, ...] = ("social-operations",)
+    social_operations_offline_after_seconds: int = Field(default=90, ge=5, le=3_600)
+    social_operations_claim_lease_seconds: int = Field(default=60, ge=5, le=3_600)
+    social_operations_state_path: str | None = None
 
     @field_validator("llm_gateway_allowed_aliases")
     @classmethod
@@ -123,6 +143,20 @@ class AppSettings(BaseSettings):
             raise ValueError("production auth cookies must be Secure and SameSite=None for Tauri")
         if "*" in self.cors_allowed_origins:
             raise ValueError("credentialed CORS must use exact origins")
+        audit_key = self.audit_hmac_key.get_secret_value()
+        if self.app_environment in ("staging", "production"):
+            if (
+                len(audit_key) < _AUDIT_HMAC_KEY_MIN_LENGTH
+                or audit_key == INSECURE_DEV_AUDIT_HMAC_KEY
+            ):
+                raise ValueError(
+                    "staging/production requires an explicit audit HMAC key of at least "
+                    f"{_AUDIT_HMAC_KEY_MIN_LENGTH} characters (dev key is rejected)"
+                )
+        elif not audit_key:
+            # 开发/测试环境允许回退到公开弱密钥，保证本机开箱可用；仍然是 HMAC，
+            # 不存在无密钥哈希路径。
+            self.audit_hmac_key = SecretStr(INSECURE_DEV_AUDIT_HMAC_KEY)
         if self.artifact_storage_provider == "tencent-cos" and (
             not self.cos_region
             or not self.cos_secret_id.get_secret_value()

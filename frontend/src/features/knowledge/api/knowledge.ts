@@ -60,18 +60,56 @@ export async function listDocuments(
   ).data
 }
 
-export async function uploadDocument(
+export async function uploadDocuments(
   tenantId: string,
   knowledgeBaseId: string,
+  files: File[],
+): Promise<KnowledgeDocument[]> {
+  const body = new FormData()
+  files.forEach((file) => body.append('files', file))
+  return (
+    await apiClient.post(`/knowledge-bases/${knowledgeBaseId}/documents/batch`, body, {
+      ...tenantRequestConfig(tenantId),
+    })
+  ).data
+}
+
+export async function retryDocumentParsing(
+  tenantId: string,
+  knowledgeBaseId: string,
+  documentId: string,
+): Promise<void> {
+  await apiClient.post(
+    `/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/retry`,
+    {},
+    tenantRequestConfig(tenantId),
+  )
+}
+
+export async function replaceDocument(
+  tenantId: string,
+  knowledgeBaseId: string,
+  documentId: string,
   file: File,
 ): Promise<KnowledgeDocument> {
   const body = new FormData()
   body.append('file', file)
   return (
-    await apiClient.post(`/knowledge-bases/${knowledgeBaseId}/documents`, body, {
+    await apiClient.put(`/knowledge-bases/${knowledgeBaseId}/documents/${documentId}`, body, {
       ...tenantRequestConfig(tenantId),
     })
   ).data
+}
+
+export async function deleteDocument(
+  tenantId: string,
+  knowledgeBaseId: string,
+  documentId: string,
+): Promise<void> {
+  await apiClient.delete(
+    `/knowledge-bases/${knowledgeBaseId}/documents/${documentId}`,
+    tenantRequestConfig(tenantId),
+  )
 }
 
 export async function retrieve(

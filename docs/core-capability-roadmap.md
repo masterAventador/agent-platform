@@ -51,7 +51,8 @@
 - MCP Server、Tool Registry、Tool Gateway、风险审批和工具调用审计；
 - 本机 Docker Sandbox Controller、租约清理和安全资源限制；
 - LiteLLM 官方镜像、稳定模型别名和阿里百炼 `qwen-plus` 真实推理调用；
-- OpenTelemetry Trace 和本机 Compose 基础设施；
+- OpenTelemetry Trace/Metrics/Logs、告警规则和本机 Compose 基础设施；
+- 全平台审计协议、HMAC-SHA256 密钥签名审计链、脱敏、保留清扫和运维审计入口；
 - React Web 的认证、工作区切换、员工、任务、知识、Skill、Tool 和死信页面。
 
 ### 3.2 仍不完整或尚未实现的能力
@@ -62,19 +63,19 @@
 | Tauri 桌面客户端 | 已完成 | 共享 React、`PlatformAdapter`、macOS/Windows 构建和真实桌面 E2E 已落地 | C02 |
 | 全栈真实验收与工作台 | 已完成 | 本地 Stub 成功/受控失败整栈闭环、工作台真实数据、Tauri 内核心流程及百炼真实请求均已通过 | C03 |
 | 文件与产物 | 已完成 | 租户隔离的附件、沙箱物化、持久产物目录与客户端闭环已落地 | C04 |
-| 多轮会话 | 待集成 | 已具备会话/消息/任务关系、追加输入、错误重试、权限隔离和正式 E2E；活跃任务后的自动排队续跑与会话页直接取消体验仍需主线收口 | C05 |
+| 多轮会话 | 已完成 | 会话/消息/任务关系、追加输入、错误重试、权限隔离、活跃任务后自动续跑派生与会话内直接取消已合入主线并通过双复审、完整回归与常驻栈真实冒烟 | C05 |
 | 动态输入输出 | 已完成 | `input_schema` 已驱动动态表单、前后端运行时校验和文件输入；`output_schema` 已驱动结构化卡片、表格与 JSON 展示，并在 Worker 与真实运行时边界执行受控校验 | C06 |
-| 知识运行时 | 部分完成 | 知识库能独立检索，但未形成员工绑定和 RAG 注入闭环 | C07 |
+| 知识运行时 | 已完成 | 员工绑定、版本化检索配置（召回/阈值/重排/元数据过滤）、运行时 RAG 注入与可追溯引用已合入主线并通过真实 RAGFlow 验收 | C07 |
 | Skill 生命周期 | 已完成 | 草稿、版本、安全审核、发布、下线、删除、回滚、内置安装、引用保护、差异和使用关系界面已闭环 | C08 |
-| Tool/MCP 生命周期 | 部分完成 | 缺自动发现同步、连接测试、编辑删除和凭据产品化 | C09 |
+| Tool/MCP 生命周期 | 待集成 | C09 已合入主线（连接测试、自动发现同步、编辑删除、版本化与凭据产品化）；审批中心协议待 C13、生产凭据待 C18、stdio 传输 E2E 缺口待补 | C09 |
 | 长期记忆 | 未实现 | 无 Memory 领域、数据库、API、运行时和用户管理能力 | C10 |
 | 工作流/混合员工 | 未开放 | 前端强制禁用，生产 Workflow Registry 没有可用流程 | C11 |
 | 定时任务 | 未实现 | 配置字段存在但强制关闭，无调度、历史和失败治理 | C12 |
 | 审批中心 | 部分完成 | 只有任务详情控制，无独立审批记录、待办、超时和通知 | C13 |
-| 审计与可观测性 | 部分完成 | 审计只覆盖工具；只有 Trace，无 Metrics/Logs/告警 | C14 |
+| 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 部分完成 | 缺成员邀请、角色管理、密码找回、验证、SSO/MFA | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
-| Capability/Entitlement | 未实现 | 无能力注册表、企业授权、交付 Profile 和三层启用校验 | C17 |
+| Capability/Entitlement | 🧪 待集成（已合入主线，待 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已合入主线；Core+视频组合与 Worker 侧接线待 B04 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
 | 协议契约自动化 | 部分完成 | 缺 OpenAPI 快照、TS 生成、事件全量导出和漂移检查 | C19 |
 | 发布、升级与灾备 | 未实现 | 缺签名、公证、自动更新、灰度、备份、恢复、HA 和容灾 | C20 |
@@ -187,11 +188,13 @@
 
 ### C05 多轮会话与追加输入
 
-**状态：`🧪 待集成`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-16**
 
-**待集成日期：2026-07-16**
+**完成日期：2026-07-16**
+
+终审记录：主线收口（自动续跑派生 + 会话内取消）经独立规格复审（PASS，六条完成定义全部满足、E2E 确认真实用户路径）与代码质量复审（PASS，M1 幂等兜底边界/L1 锁序/L4 防线测试按复审整改完成）后以 --no-ff 合入 main；合并后后端全量 1079 通过（0 失败——顺带根治 Alembic fileConfig 禁用既有 logger 导致的套件级日志断言隔离缺陷）、完整 Playwright 20 项与运行时 E2E 5 项通过；常驻栈重建后以真实用户路径完成两轮会话冒烟（发送→回复→追加→第二轮回复上屏）；Demo Seed 演示员工已开箱启用会话能力（幂等纠偏，验收无需手工开能力）。遗留观察项（不阻塞）：员工下线期间保留意图与手动新轮的轻度双重消费语义、派生失败后至下一结算点的 UX 延迟，见质量复审记录。
 
 完成定义：
 
@@ -204,7 +207,11 @@
 
 2026-07-16 待集成记录：已新增 `20260716_0021` 会话迁移，建立 `conversations`、`conversation_messages` 与 `runs.conversation_id`，真实 PostgreSQL 升级已由 Playwright global setup 验证；后端契约覆盖新建/列表/详情/追加消息、`waiting_for_input` 真实 `MESSAGE` command、失败重试、上下文裁剪和 Owner/Admin/Member 访问隔离；Worker 会把 `message.output` 和失败事件落回会话时间线；前端提供会话中心、详情消息时间线、员工详情“开始会话”、追加输入、附件 ID 展示和失败重试；正式 Playwright 覆盖“发布员工 → 开始会话 → 追加两轮输入 → 回到会话中心持久列表”。
 
-待主线收口风险：活跃 `queued/running/waiting_approval` 任务期间追加消息当前持久化为 `queued_after_current`，尚未自动在当前任务终结后派生下一轮 Run；会话页展示关联任务和失败重试，但取消仍依赖既有任务详情控制入口，后续应补会话内直接取消/跳转体验后再转为 `✅ 已完成`。
+2026-07-16 主线收口记录（分支 `task/c05-conversation-closure`，与 C07/C09/C17 并行，经用户批准；无新增迁移，待主代理终审后转 `✅ 已完成`）：
+
+- **自动续跑派生**：活跃 `queued/running/waiting_approval` 期间追加的消息，除持久化为 `queued_after_current` 外，还会在当前活跃 Run 上落一条 `FOLLOWUP` 意图命令（payload 携带 `message_id` 与 `requested_by`，创建时即置 `dispatched_at`，永不进入执行队列）；Worker 在每个终态结算点（正常结算、准备失败、续租失败、孤儿恢复、pre-start 取消、terminal-noop、命令重投递、死信结算）之后，在独立安全事务中锁定会话行、扫描会话内全部未消费意图、确认无活跃 Run 后合并派生下一轮 Run——复用与 API 相同的 `create_conversation_run`/`build_conversation_run_input` 共享创建路径（新模块 `conversation_dispatch.py`），派生 Run 使用 `uuid5(conversation_id, 触发消息)` 确定性幂等键，消息绑定、附件物化、START 命令与意图结清同事务提交；多条排队消息合并为一轮（`message` 取最后一条、上下文含全部）；派生 Run 归属触发消息作者（`requested_by`）；员工版本沿用会话既有语义（派生时的当前发布版本），员工不可运行时受控跳过并保留意图；派生失败仅记录日志，不阻塞原 Run 结算；API 追加消息与 Worker 派生通过会话行锁（`get_for_update`）互斥，消除结算瞬间的丢失/双跑竞态；`dispatch=false` 存储型消息不带意图命令，永不触发自动续跑。
+- **会话内取消**：`RunResponse` 暴露 `created_by`；会话详情页对活跃关联任务提供「取消任务」（复用 `/runs/{id}/control` cancel，仅创建者或 RUNS_MANAGE 可见）与「任务详情」跳转；会话详情在存在活跃任务时 2 秒轮询刷新，取消与自动续跑结果实时反映到时间线。
+- **质量复审整改（同分支）**：M1——uuid5 幂等冲突实际在仓储 flush 边界抛出，原兜底只包住 commit 导致并发派生被误报 `conversation_followup_dispatch_failed`（ERROR）；已按 RED（`test_followup_uuid5_conflict_is_treated_as_already_derived_not_failure` 先复现 ERROR 误报）→ GREEN 把 IntegrityError 兜底扩到整个创建区段，命中时按 WARNING `conversation_followup_already_derived` 处理且结算不受影响。L1——`_persist_renewal_failure` 终态分支先提交释放 Run 行锁再派生，与其余终态分支一致。L4——新增 `tests/unit/queue/test_dispatcher.py` 直接覆盖 dispatcher 对 FOLLOWUP 命令“兜底结清但绝不入队”的防线。整改后 `uv run pytest tests/contract/conversations tests/integration/queue/test_run_worker.py tests/unit -q`（697 passed，2 skipped）、`uv run pytest tests/unit tests/contract -q`（900 passed）、`ruff check .`、`mypy` 全过。
 
 ### C06 动态输入 Schema 与结构化输出
 
@@ -227,13 +234,30 @@
 
 ### C07 知识库完整生命周期与运行时 RAG
 
-**状态：`🚧 进行中`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-16**
 
+**完成日期：2026-07-17**
+
+终审记录：经独立规格复审（结论 a——完成定义六条全部满足，引用 E2E 零 route 拦截全真实链路）与代码质量复审（PASS，校验单源/fail-closed/事件幂等/租户隔离/瞬永错误分类经对抗推敲）后合入 main。合入前完成迁移 0027 重链至 0026、README 与 manage.sh 的 TEI 默认模型矛盾修正（默认 bge-small-en-v1.5 英文-only，中文语料需 RAGFLOW_TEI_MODEL=BAAI/bge-m3 覆盖）。合并后后端全量 1198 通过、前端 213、默认 Playwright 23/23、runtime E2E 6/6（含知识引用闭环与 C05 场景）；真实 RAGFlow v0.25.6 独立栈集成验收通过（数据集/双文档/meta_fields/解析/检索契约/top_k/阈值/元数据过滤命中与不命中/删除，栈用后销毁）；常驻栈重建后真实用户冒烟通过（知识库页 + 员工编辑器知识绑定与引用说明）。已声明限制：重排端到端待配置重排模型的实例后补验（rerank_id 传参已在单元层验证，用例留有 TEST_RAGFLOW_RERANK_ID 开关）；knowledge.retrieved 事件键当前支持单 run 单检索；编辑器元数据过滤字段名无候选提示。附带发现并规避：默认 Playwright 套件多 worker 缩容存在 worker 退出挂起（与本条目无关，已固定单 worker 并记录待查）。
+
 2026-07-16 进度与复审记录：实现工作在 `task/c07-knowledge-runtime` 分支进行（WIP 提交 `8d483ce`），员工编辑器知识库选择、发布引用校验、文档批量上传/重试/替换/删除、`knowledge.retrieved` 事件与任务详情引用展示已有代码和单元/契约测试；独立评估确认架构方向正确（RAGFlow 零侵入、Provider 检索 fail-closed、越权片段过滤），可作为继续开发基线。**该分支曾把本条目虚标为已完成，已纠正，以主线本文为准**。继续开发必须先解决：`workers/main.py` 未注入 `knowledge_provider_registry`（生产 Worker 知识链路整体断开）；RAGFlow 断连被误映射为永久性 `invalid_runtime_definition`；畸形响应未捕获无测试；`knowledge_retrieval` 元数据过滤为端到端死代码（领域快照与 API 均无该字段）；重排配置未实现；批量上传/替换中途失败无补偿；引用与文档生命周期 Playwright E2E 缺失。分支叠在 C14 分支之上，回主线时仅 `knowledge/ragflow.py` 的 `operation` kwarg 依赖 C14 新签名，需一并处理。
 
-完成定义：
+2026-07-16 高危缺陷修复轮（分支已 rebase 到最新 main、与 C14 解耦，`operation` kwarg 已随 rebase 移除）：按 TDD 完成上述阻断项修复——生产 Worker 装配注入 RAGFlow `knowledge_provider_registry`（配置来源与 API 侧一致，RED `test_production_worker_assembly_wires_knowledge_runtime_for_bound_employees`）；断连改映射 `TransientRuntimePreparationError` 交由队列重投递重试、畸形响应受控映射稳定错误码 `invalid_knowledge_provider_response`（RED `test_knowledge_provider_outage_is_transient_and_never_a_permanent_definition_error`、`test_malformed_knowledge_provider_response_fails_with_a_stable_controlled_code`）；`knowledge.retrieved` 事件改按 run 确定性 `event_id` 并在事件流重收集分支重建，重投递不重复不丢失（RED `test_knowledge_event_survives_redelivery_without_duplicate_or_loss` 等 2 项）；批量上传加 20 个上限并在中途失败时尽力补偿删除已上传文档，替换失败补偿删除新文档保持旧文档原状（RED 契约用例 4 项）；`knowledge_retrieval` 解析死代码按删除规范整段移除，**元数据过滤/召回参数后续随全链路（领域实体、API、发布快照、前端编辑器）单独实现**；前端知识库详情页重试/删除改按行 pending、操作失败显示 Alert 提示，并删除死代码 `useUploadKnowledgeDocument`；同步 `contracts/events/platform-event.schema.json` 补上 `knowledge.retrieved`。验证：`cd backend && uv run pytest tests/unit/knowledge tests/unit/workers tests/contract/knowledge tests/contract/employees tests/integration/queue/test_run_worker.py -q`（175 passed, 2 skipped）；`uv run pytest tests/unit tests/contract -q`（875 passed）；`uv run ruff check .`、改动文件 `ruff format --check` 通过（全仓库 format 未达标为 main 既有状态，非本轮引入）；`uv run mypy`（181 文件通过）；`cd frontend && pnpm exec vitest run src/features/knowledge src/features/employees/pages/EmployeeEditorPage.test.tsx src/features/runs --reporter=dot`（37 passed）；`pnpm lint && pnpm typecheck` 通过。仍未满足的完成定义：重排配置、元数据过滤/召回参数全链路、引用与文档生命周期 Playwright E2E、真实 RAGFlow 集成验收。
+
+2026-07-16 中级缺陷修复（复审发现：知识 Provider 错误分类过粗）：此前 `knowledge/ragflow.py` 的 `_request` 把 `raise_for_status()` 的 4xx（API Key 错、无权限、数据集已删）和 RAGFlow `code != 0` 业务错误一律抛成瞬态 `KnowledgeProviderUnavailable`，Worker 侧再映射为 `TransientRuntimePreparationError`，导致永久性配置/权限/资源错误也烧满 5 次队列重投才进死信，且死信呈现为泛化 `DELIVERY_PROCESSING_ERROR`。按 TDD 修复：client 层新增永久性错误 `KnowledgeProviderRequestRejected`（消息仅含脱敏稳定原因——HTTP 状态码或业务错误码，不泄露原始响应体），4xx 与 `code != 0` 抛该类型，网络错误/超时/5xx 保持瞬态 `KnowledgeProviderUnavailable`；Worker 侧 `runtime_composition.py` 新增 `KnowledgeRuntimeRequestRejected(PermanentRuntimePreparationError)`，稳定错误码 `knowledge_provider_rejected`，立即受控永久失败不重投；API 侧新增异常处理器把该类型映射为 502 `knowledge_provider_rejected`（瞬态错误维持 503 `knowledge_provider_unavailable` 契约不变）。RED 用例：`test_ragflow_4xx_status_is_permanent_rejection_without_leaking_response[401/403/404]`、`test_ragflow_business_error_envelope_rejects_permanently_without_leaking`、`test_ragflow_transport_and_server_failures_stay_transient_unavailable`（4 参数瞬态回归）、`test_rejected_knowledge_provider_request_is_permanent_with_stable_code`、`test_rejected_knowledge_provider_fails_permanently_without_redelivery`、`test_knowledge_provider_rejection_returns_permanent_bad_gateway_error`。验证：`uv run pytest tests/unit/knowledge tests/unit/workers tests/contract/knowledge tests/integration/queue/test_run_worker.py -q`（166 passed, 2 skipped）；`uv run pytest tests/unit tests/contract -q`（883 passed）；`uv run ruff check .` 与 `uv run mypy`（181 文件）通过。
+
+2026-07-16 复审低级遗留（暂不修复，后续轮次处理）：其一，未配置 RAGFlow（或知识库记录的 provider 名未注册）时，`KnowledgeProviderRegistry.resolve` 抛瞬态 `KnowledgeProviderUnavailable`，绑定知识库的任务会走满重投递才失败，失败模式噪声大，宜识别为受控永久失败（**已在收口轮修复，见下**）；其二，`knowledge.retrieved` 事件 `event_id` 仅按 `run.id` 取键，单次运行仅支持一条检索事件，未来同一 run 多次检索（多轮对话中途检索、Agent 主动检索工具）时需扩展事件键设计（仍遗留）。
+
+2026-07-16 收口轮（召回参数/重排/元数据过滤全链路 + 引用与文档生命周期 E2E + 真实 RAGFlow 验收；分支基于 merge origin/main 后的工作区，待主代理验收提交）：
+- **检索配置全链路（TDD）**：新增平台单一配置来源 `platform/knowledge/retrieval.py`（`KnowledgeRetrievalConfig`，字段名对齐 RAGFlow v0.25.6 官方检索 API：`page_size` 默认 5=原行为、`similarity_threshold` 0-1 默认 0.2、`vector_similarity_weight` 0-1 默认 0.3、`top_k` ≥1 默认 1024、`keyword`、`rerank_id`（重排模型 ID，None=关闭）、`metadata_condition`（`logic` and/or + `conditions[{name, comparison_operator∈官方 11 种, value}]`），strict + extra=forbid fail-closed；无效配置在员工定义阶段受控 422 `invalid_knowledge_retrieval`（含 path/reason，对齐 C06 风格）。全链路 = `EmployeeDraft.knowledge_retrieval` 领域字段 + 发布 snapshot 固化全量显式值（旧发布版本无该键 → Worker 按默认配置解释，版本化语义成立）+ API 请求/响应模型 + 迁移 `20260716_0027`（employees 表新增 JSON 列；编号协调：0025 为 C14 HMAC、0026 为 C17，暂 down_revision=0024，后合入者重链）+ 前端员工编辑器「知识检索配置」面板（召回条数/相似度阈值/向量权重/Top K/关键词增强/重排模型 ID/元数据过滤 Form.List，选中知识库时显示，编辑回填）+ Worker `PublishedRuntimeCapabilities.knowledge_retrieval` 解析（非法快照 fail-closed `UntrustedRuntimeDefinition`）传入 `provider.retrieve(options=...)`；知识库详情页检索测试接口复用同一配置模型。RED→GREEN：`tests/unit/knowledge/test_retrieval_config.py`（先 ModuleNotFoundError）、`test_ragflow_retrieve_sends_all_v0_25_6_retrieval_options`、`test_published_knowledge_retrieval_config_is_honored_per_version`、`test_invalid_published_knowledge_retrieval_config_fails_closed`、契约 `test_knowledge_retrieval_config_full_chain_create_publish_and_version_freeze`/`test_knowledge_retrieval_defaults_apply_when_config_is_omitted`/`test_invalid_knowledge_retrieval_config_is_rejected_fail_closed`（5 参数）、前端编辑器 3 项新用例。
+- **真实契约缺陷修复**：对照 v0.25.6 官方 tag 源码（`api/apps/restful_apis/chunk_api.py` 的 key_mapping）发现真实检索响应文档名字段是 `document_keyword` 而非 `document_name`，且 `document_metadata` 仅在请求携带 `include_metadata` 时注入——原 client 与 Stub 均用错误字段名，对真实实例检索会全部落入 `invalid_knowledge_provider_response`。已修复 client（改用 `document_keyword`、请求恒发 `include_metadata: true`、`document_metadata` 可缺省）并将 `tests/fixtures/ragflow_stub.py` 重写为契约对齐形态（真实 chunk 字段、`top_k<=0` 业务错误信封、`include_metadata` 语义、`page_size` 截断、`metadata_condition` 过滤语义、`parse-fail` 文件名确定性解析失败场景）。RED：`test_ragflow_retrieve_parses_the_real_v0_25_6_chunk_shape`。
+- **未注册 provider 遗留修复**：`KnowledgeProviderRegistry.resolve` 未注册名改抛新永久错误 `KnowledgeProviderNotConfigured`；Worker 映射 `KnowledgeRuntimeNotConfigured`（code `knowledge_provider_not_configured`，立即受控永久失败不烧重投，RED `test_unregistered_knowledge_provider_is_a_permanent_configuration_error`）；API 侧映射 503 `knowledge_provider_not_configured`（契约用例同步收紧）。
+- **E2E（隔离端口 + 随机 Compose project）**：`knowledge.spec.ts` 新增文档生命周期用例（批量上传 2 文档、确定性解析失败、重试解析转成功、替换文档、删除文档、检索引用指向替换后文档），2 项通过；新增 `knowledge-runtime.spec.ts` 引用闭环（创建知识库→上传→解析→创建员工绑定知识库并配置召回条数/关键词增强→发布→发起任务→真实 Worker 检索→任务详情 `knowledge.retrieved` 引用卡片含文档名与片段内容→刷新后仍在），随 `bash infra/platform/test-runtime-e2e.sh`（真实 PostgreSQL/Redis/MinIO/API/Dispatcher/Worker/Sandbox Controller/RAGFlow Stub/Web）4 项全过（3 项既有 runtime 回归 + 1 项新引用闭环）；`employees.spec.ts`、`runs.spec.ts` 回归通过；每轮结束随机 project 容器/网络/卷复查为零。
+- **真实 RAGFlow v0.25.6 集成验收（通过）**：`infra/ragflow/manage.sh` 拉起锁定 v0.25.6 官方独立栈（官方华为云镜像源 `swr.cn-north-4`，独立网络/卷/端口，未触碰 `agent-platform-dev` 常驻栈与他项目 `ragflow-local-threshold-*`）。过程中按 TDD 之外的基础设施最小修正修复 manage.sh 三处真实问题：①宿主端口硬编码与常驻开发栈 Redis(16379)/SSH 隧道(18080/19000/19001)冲突——新增 `RAGFLOW_*_PORT` 环境变量覆盖（默认不变）；②官方 profile 组合未启用任何 embedding，文档解析必然失败 "No default embedding model is set"——默认启用官方 `tei-cpu` profile，并经 `compose.override.yml` 向 ragflow 容器透传实际 `COMPOSE_PROFILES`（官方 .env 不透传该值，RAGFlow 依赖它启用 TEI 默认 embedding）；③TEI 预置 Qwen3-Embedding-0.6B 与 bge-m3 在本机 CPU warmup OOM（exit 137 崩溃循环）——默认改为最小预置模型 `bge-small-en-v1.5`，可 `RAGFLOW_TEI_MODEL` 覆盖；README 同步更新，`manage.sh config` 契约断言（13306/ES_JAVA_OPTS/mem_limit）复核通过。验收用例 `tests/integration/knowledge/test_real_ragflow.py`（`TEST_RAGFLOW_URL`/`TEST_RAGFLOW_API_KEY` 显式门禁，无凭据 skip，对齐真实 COS 门禁模式）对真实实例 1 项通过：数据集创建、双文档上传、官方 API 设置 `meta_fields`、解析等待 DONE、默认检索（引用返回、`document_keyword` 契约、`document_metadata` 注入、score∈[0,1]）、`page_size=1` 限流、`top_k`/`similarity_threshold` 生效、高阈值过滤为空、元数据过滤命中（仅 HR 文档）与不命中（空结果）、文档删除、数据集删除；结束后本轮栈已 down、容器/网络/卷复查为零。**重排端到端未在真实实例验证**：TEI 仅提供 embedding，该实例无已配置的重排模型；`rerank_id` 传参正确性已在单元层验证，真实重排验证需配置重排模型的实例（用例支持 `TEST_RAGFLOW_RERANK_ID` 显式启用），列入遗留。
+- **验证命令**：`cd backend && uv run pytest tests/unit/knowledge tests/unit/workers tests/contract/knowledge tests/contract/employees tests/integration/queue/test_run_worker.py -q`（219 passed, 2 skipped）；`uv run pytest tests/unit tests/contract -q`（951 passed）；`uv run pytest tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py -q`（71 passed, 2 skipped，升级/降级含 0027）；`uv run ruff check .`、`uv run mypy`（186 文件）；`cd frontend && pnpm exec vitest run src/features/knowledge src/features/employees --reporter=dot`（47 passed）、全量 vitest 204 passed（复跑两次确认；一次偶发 social-operations 5s 超时经干净树对照与单独复跑确认为并行负载下的既有脆弱用例、非本轮引入）、`pnpm lint`/`pnpm typecheck`/`pnpm build` 通过；Playwright 全部使用 `PLAYWRIGHT_COMPOSE_PROJECT_NAME` + 随机 `PLAYWRIGHT_*_PORT` 隔离端口。
+- **本轮遗留**：①`knowledge.retrieved` 事件键单检索事件限制（见上）；②真实实例重排端到端验证（需配置重排模型）；③员工编辑器元数据过滤字段名无候选提示（依赖知识库文档 metadata 治理，随后续知识库元数据管理功能考虑）。
 
 - 员工编辑器可选择有权限的知识库，发布时校验引用；
 - Worker 通过 Knowledge Service 检索并将结果注入运行时；
@@ -263,7 +287,11 @@
 
 ### C09 Tool/MCP 完整生命周期与凭据产品化
 
-**状态：`⬜ 未开始`**
+**状态：`🧪 待集成`（已合入主线；审批中心协议待 C13、生产凭据服务待 C18、stdio 传输 E2E 缺口待补）**
+
+**开始日期：2026-07-16**
+
+开工说明：前置 C03 已满足；经用户批准与 C07/C17/C14 收尾并行（文件域独立）。实现分支 `task/c09-tool-mcp-lifecycle`，迁移编号占用 `20260716_0027`（down_revision 暂指 0024，主代理合并时统一重链）。审批协议集成待 C13、生产凭据待 C18，对应部分按 `🧪 待集成`处理。
 
 完成定义：
 
@@ -273,6 +301,24 @@
 - 工具调用超时、重试、熔断、错误转换和审计完整；
 - 客户端可查看连接状态、同步差异、调用记录和失败原因；
 - HTTP/stdio、恶意 Server、凭据脱敏和审批 E2E 通过。
+
+2026-07-16 实现记录（本任务提交，待主代理验收）：
+
+- **生命周期**：MCP Server 增加连接测试（`POST /mcp-servers/{id}/connection-test`）、自动发现同步（`POST /{id}/sync`，按 name 对齐、新增/变更/上游移除差异语义、每 Server 保留最近 20 条同步报告）、编辑（PATCH，transport 不可变）、删除（对齐 C08 引用保护：被员工草稿/已发布版本引用时 409）；同步在 Server 行锁内应用（并发互斥），新发现工具 fail-closed 默认 `enabled=false + risk=external`，上游移除的 discovered 工具标记 `upstream_missing` 保护而非删除，调用点由 Gateway 以 `tool_upstream_missing` 拒绝；
+- **版本化与审批策略**：`tools` 增加 `origin/approval_policy/upstream_missing/version`，新增 `tool_versions` 快照表（initial/update/sync/rollback 变更来源），定义变更自动升版本、支持回滚为新版本；审批策略 `risk_based/always/never` 三档，destructive+never 在校验层拒绝且策略引擎纵深防御强制审批；
+- **凭据产品化**：复用 `infrastructure/secrets/` 本地凭据服务，新增 `LocalFileCredentialStore`（0600、原子替换、flock 互斥、仓库外强制），`PUT/DELETE /mcp-servers/{id}/credentials` 使用服务端生成的 `local://mcp-servers/{id}` 引用；凭据仅在探测/执行边界短时解析，API 响应、审计与日志不回显明文（API 级契约验收覆盖）；
+- **网关韧性**：`ResilientToolExecutor` 稳定错误码转换（tool_timeout/tool_remote_error/credential_unavailable 等）+ 仅只读工具有界重试（副作用工具绝不自动重试）；每 (tenant, server) 内存熔断器（阈值/冷却可配、容量有界），熔断拒绝发生在 STARTED claim 之前，不改既有 invocation claim/TOCTOU 崩溃安全协议；stdio 传输经 `AllowlistStdioExecutionPolicy`（默认全拒绝，`AGENT_PLATFORM_MCP_STDIO_ALLOWED_COMMANDS` 显式放行）；
+- **调用记录**：新增 `GET /tool-invocations`（tenant 隔离、按 tool/server 过滤），前端工具页展示连接状态、同步差异弹窗、版本历史/回滚、调用记录与失败原因；员工可用工具过滤补充 `upstream_missing`；
+- **运行语义修正**：员工绑定的工具被禁用/上游移除时不再让整个任务在准备阶段失败，改为组装后在调用点由 Gateway 拒绝并写 `tool.rejected` 审计（已删除引用仍 fail-closed）；
+- **验收**：`tests/fixtures/mcp_stub.py`（官方 FastMCP 协议栈 + 故障注入控制端点）支撑三层真实边界验收——API 级恶意/超慢/畸形 Server 与凭据脱敏（`tests/integration/mcp/test_lifecycle_api_with_real_stub.py`）、Playwright 真实用户路径（`e2e/tools.spec.ts`：注册→连接测试→同步→差异→凭据配置→脱敏断言）、真实 Worker 端到端（`e2e/runtime.spec.ts`：员工任务经 Tool Gateway 调用 stub 工具成功，禁用后调用被拒且审计与界面记录可见）；
+- **待集成**：审批策略与独立审批中心的协议对接（C13）；生产级凭据服务 Vault/KMS 与轮换（C18，当前本地凭据服务仅限开发/演示）；stdio 真实拉起进程的端到端验收依赖部署侧允许清单配置，当前以单元/契约层验证 allowlist 语义。
+- **已知取舍 / follow-up**（2026-07-16 质量复审后记录）：
+  - 员工编辑器的可绑定校验（`are_bindable`）尚未把 `upstream_missing` 计入不可绑定条件——上游已移除的工具仍出现在绑定候选（运行时调用点会拒绝，安全不受影响），属于 UX 不一致，待后续对齐；
+  - `tool_versions` 随显式更新/回滚/同步变更增长且无裁剪策略；增长由人工操作驱动、速率可控，暂不设上限，量级出现问题时再补保留策略；
+  - 凭据配置为“先写本地凭据文件、后提交 DB `secret_reference`”两步操作：DB 提交失败会留下孤立的凭据文件条目（不泄露、不影响正确性，重新配置即覆盖），生产凭据服务（C18）引入事务性/对账机制时一并解决；
+  - 同步遇到与 MANUAL 工具同名的上游工具时静默跳过（不覆盖管理员定义、计入未变化），暂未在同步报告中单列“冲突”类别，需要更强可观测性时再扩展报告结构。
+
+验证命令（本任务实际执行）：`uv run pytest tests/unit tests/contract tests/integration/tools tests/integration/mcp tests/integration/database -q`、`TEST_DATABASE_URL=<真实PG> uv run pytest tests/integration/database/test_migrations.py -q`（含既有 tool 行回填的真实 PostgreSQL 迁移回归）、`uv run ruff check . && uv run mypy`、`pnpm exec vitest run`、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 `pnpm exec playwright test e2e/tools.spec.ts`（PLAYWRIGHT_COMPOSE_PROJECT_NAME + 随机端口）、`pnpm e2e:runtime`。
 
 ### C10 平台级长期记忆
 
@@ -328,11 +374,21 @@
 
 ### C14 全平台审计、Metrics、Logs 与告警
 
-**状态：`🚧 进行中`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-16**
 
+**完成日期：2026-07-17**
+
+2026-07-17 隔离验收栈终验记录（本任务提交）：`bash infra/platform/test-mvp-profile.sh` 完整通过（exit 0，随机项目名 `agent-platform-mvp-test-27090`，验后容器/网络自动销毁、保留卷断言通过）——镜像构建与迁移（含 `20260716_0025` HMAC TOFU 回填）、Demo Seed、Playwright mvp-profile 3 项（含附件→真实 Agent→派生产物全栈闭环）、真实 Tauri 桌面 wdio 1 项、生产 Worker→LiteLLM→Stub 链路、真实 PostgreSQL 并发下 artifact 租户边界与 Saga claim/CAS/renewal、profile 状态/保留卷/失败重启清理/并发启动拒绝/工作树镜像隔离全部通过。前两轮同套件功能测试全绿，但执行环境缺 `rg` 二进制导致脚本自身断言步骤 exit 127 误判失败；已把 `infra/platform/test-mvp-profile.sh`（10 处）与 `infra/platform/test.sh`（2 处）的 `rg --quiet` 替换为 POSIX `grep -q`/`grep -Eq`，消除未声明的工具依赖（同批提交）。日志中 postgres 的 duplicate key/FK 报错为 PG 并发约束测试故意触发的负路径，非缺陷。
+
 2026-07-16 复审退回记录：实现位于 `task/c14-audit-observability` 分支（`d310b52`、`f8edb27`、`6923a52`），独立代码质量复审结论为 FAIL，退回实现状态，禁止按当前 HEAD 合入。阻断项：S1 审计失败指标全链路未接线（`repositories/audit.py` 从不记录 `audit.events.failed`，critical 告警永不触发，单测直接构造终态制造覆盖假象）；S2 审计保留仅有 `purge_before` 库级原语，无任何调度或端点，审计表无界增长；S3 注册流程对同一语义重复写入 5 条审计事件且 `tenant_membership`/`tenant_member` 两套 resource_type 并存；S4 每租户序列并发只在 SQLite（`with_for_update` no-op）验证；S5 多个已声明指标 operation 为死代码。修复须先补 RED 测试再集中修复，并基于新 HEAD 重新执行双重复审。合入时必须剔除该分支夹带的 `12c58da` CLAUDE.md 串行规则改动（用户已取消，撤销提交 `0abbbf1` 在 C07 分支上）；该分支迁移 `20260716_0024` 与 B04 分支同号，先合入者保留 0024，后合入者改号。
+
+2026-07-16 阻断项修复记录（本任务提交，状态保持进行中，等待重新双重复审）：已先合入最新 main（CLAUDE.md 取 main 版本，`git diff origin/main -- CLAUDE.md` 为空，`12c58da` 夹带的串行规则改动已被 main 覆盖）。逐项修复（均先 RED 后 GREEN）：S1 审计仓储 `add`/`verify_integrity`/`purge_before` 经真实写入路径记录 `OperationalMetrics`（AUDIT persist/verify/retention），`Telemetry` 构造时注册进程级 metrics 供仓储回退使用，唯一约束冲突与 DB 异常均触发 `agent_platform.audit.events.failed`，critical 告警链路打通；同时删除 `test_operational_metrics.py` 中 AUDIT 直接构造终态的假覆盖，真实路径断言移至 `tests/unit/observability/test_audit_metrics.py`。S2 复用 C04 后台清扫模式新增配置驱动的审计保留清扫：`audit_retention_days`/`audit_retention_sweep_interval_seconds`/`audit_retention_sweep_batch_limit`，API lifespan 常驻任务按固定间隔（成功失败同节流）调用 `purge_expired_audit_events` 逐租户清理并保持哈希链可校验，失败仅记录受控日志。S3 注册流程审计事件去重为每语义恰好一条（`auth.registered`/`tenant.member_added`/`tenant.role_assigned`），resource_type 全仓统一为 `tenant_membership`。S4 新增 `tests/integration/audit/test_postgres_audit_sequence_concurrency.py`，按既有 `TEST_DATABASE_URL` 门禁在真实 PostgreSQL 上验证 12 并发写入序列唯一、连续且完整性校验通过（本机临时 PG 容器实测通过，无 PG 时条件跳过）。S5 删除声明但从不记录的死 operation（WORKER recovery/heartbeat、QUEUE setup/ack/reclaim、MODEL_GATEWAY chat、SANDBOX heartbeat/file/command、RAGFLOW health）。S6 删除迁移测试中 `audit_chain_state_columns` 的重复计算与重复断言。S7 已知局限：审计哈希链为纯 SHA-256 链接、无 HMAC 密钥与外部锚定，可检测常规篡改，但无法防御能够全量重写数据库（含链头状态）的攻击者伪造整条链；如需更强不可抵赖性需引入密钥化签名或外部锚定，本轮不实现。验证命令：`cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q`；`uv run pytest tests/unit tests/contract -q`；`TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q`（真实 PostgreSQL）；`uv run ruff check . && uv run mypy`。
+
+2026-07-16 第二轮复审修复记录（本任务提交，状态保持进行中，等待重新双重复审）：逐项先 RED 后 GREEN。M1 保留清扫由“单 session 遍历全租户、循环结束才一次 commit”改为每租户独立事务提交：`purge_expired_audit_events` 改收 `async_sessionmaker`，逐租户开独立 session 清理并提交，单租户链锁不再跨越后续租户处理期（此前首个租户 `audit_chain_states` 行锁持有到全部租户处理完，期间该租户所有审计写入被整段阻塞）；单租户失败仅记录受控日志并计入 `AuditRetentionSweepResult.failed_tenants`，其余租户照常清理，部分成功语义显式返回，`api/app.py` 分别记录 purged/partial-failure 日志。M2 `_verify_integrity` 由一次性 `all()` 物化整租户审计表改为按 sequence 键集分页滚动校验（`batch_size` 默认 1000、区间 1..10000），滚动哈希前缀语义不变，篡改、跨块边界篡改、尾删检测契约测试全部保持通过；RED 用例以 SQL 语句计数断言按块查询先失败。L1 `Telemetry.shutdown()` 复位自己注册的进程级 `_active_operational_metrics`（仅当全局仍指向自身时复位，不覆盖更新 Telemetry 的注册值），消除 shutdown 后残留已关闭 meter 污染同进程后续用例。L2 仓储 `_record_metric` 增加受控异常隔离（吞异常记 debug 日志），指标 instrument 抛异常不再回滚/阻断已成功的审计写入。G1 修复前端 `src/features/operations/api/audit.test.ts` 断言笔误（mock 返回 `sequence: 2` 却断言 3，该用例自创建起未通过过，属测试笔误非产品缺陷），修复后 `src/features/operations` 5 文件 16 项真实通过。遗留 follow-up（本轮不实现，后续按需处理）：L3 审计写入 flush 成功但外层事务 commit 阶段失败时不计入 `audit.events.failed` 的窄盲区；L4 `ToolAuditSink`（`tool_audit_events` 通道）持久化失败不进审计失败指标，审计失败指标的覆盖范围界定待明确；L5 `/client-events` 上报无速率限制，客户端可高频上报制造告警投毒面；S7 哈希链无 HMAC/外部锚定局限持续有效。验证命令与结果：`cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q`（68 项通过）；`uv run pytest tests/unit tests/contract -q`（896 项通过）；`uv run ruff check . && uv run mypy`（185 个源码文件通过）；临时 PG 容器下 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q`（7 项通过，容器已删除）；`cd frontend && pnpm exec vitest run src/features/operations --reporter=dot`（5 文件 16 项通过）。
+
+2026-07-16 S7 HMAC 密钥签名加固记录（本任务提交，`task/c14-audit-hmac` 分支，先 RED 后 GREEN）：审计哈希链由纯 SHA-256 升级为 HMAC-SHA256 密钥签名。密钥来源：`AGENT_PLATFORM_AUDIT_HMAC_KEY`（`AppSettings.audit_hmac_key`，SecretStr，绝不落数据库、绝不进日志）；staging/production 缺失、短于 32 字符或等于公开开发密钥时 Settings 校验直接拒绝启动，运行期未装配密钥时审计写入与校验抛受控 `AuditHmacKeyNotConfiguredError` fail-closed，不存在无密钥哈希回退路径；local/development/test 默认回退公开开发密钥 `agent-platform-insecure-dev-audit-hmac-key` 保证本机开箱可用。算法标识：`audit_events.hash_algorithm` 列（legacy `sha256` / 新事件 `hmac-sha256.v1`，带版本号为多密钥轮换预留），HMAC 载荷纳入算法标识做域隔离。链头封印：`audit_chain_states.head_seal`/`head_seal_algorithm` 为链头+保留边界（head_sequence、head_hash、retained_from_sequence、retention_previous_hash）的 HMAC 封印，写入与保留清扫时同步重算；校验时封印缺失或不匹配直接判定失败，使能够全量重写数据库（含链头）的无密钥攻击者无法伪造自洽链。存量兼容：迁移 `20260716_0025` 增列并对存量链头一次性封印回填（TOFU，以迁移时刻状态为信任起点；存在存量链头而非开发环境缺密钥时迁移 fail-closed）；校验按事件各自算法执行，legacy 事件只允许作为链前缀，HMAC 事件之后再出现 legacy 事件即判定完整性失败（禁止静默降级）。开发栈配置同步：`infra/compose/platform.yml` 注入 `AGENT_PLATFORM_AUDIT_HMAC_KEY`（默认开发密钥）、`.env.platform`/`.env.platform.example` 与 `infra/platform/mvp-profile.sh`（生成、允许列表、清理）补 `AUDIT_HMAC_KEY`，既有 `agent-platform-dev` 栈无需重建 env 即可工作。**S7 局限大幅收窄（非完全解除）**：无密钥全量重写攻击已被检出（RED 用例证明旧实现对伪造链返回 valid=True）。剩余威胁面如实声明：a) 持有服务端 HMAC 密钥的攻击者；b) 将整个数据库回滚到历史合法快照的攻击者——历史封印对历史状态自洽、无需密钥即可通过校验，防御需要外部锚定（如定期把链头封印写入对象存储/外部公证）或单调性对账，归 C18。**密钥轮换与外部锚定本轮不做，列为 C18 跟进项**（算法标识与封印算法列已为多密钥版本预留）。安全复审后追加硬化：事件哈希校验改用常量时间比较（hmac.compare_digest）；HMAC 事件载荷加入 purpose 用途域（与链头封印 purpose 域隔离，legacy 载荷字节保持不变）。运维注意：迁移 0025 的 downgrade 会丢弃 hash_algorithm 列，若库中已有 HMAC 事件，降级后再升级会把它们误标为 legacy 导致整链校验失败（fail-closed 非安全漏洞，但对 HMAC 数据不可逆），生产降级前必须备份。新增 RED→GREEN 用例：错误密钥校验失败、无密钥全量重写攻击检出、legacy+HMAC 混合链通过、HMAC 后降级拒绝、密钥缺失 fail-closed、保留清扫封印续算、保留边界篡改检出、迁移封印回填与 downgrade、Settings 密钥策略、`create_app` 装配。验证：`cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q`（78 项通过，含既有篡改/尾删/跨块契约全部保持通过）；`uv run pytest tests/unit tests/contract -q`（917 项通过）；`uv run ruff check . && uv run mypy`（187 个源码文件通过）；临时 PG 容器 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q`（7 项通过，容器已删除）；`python3 -m unittest discover -s infra/platform -p 'test_contract.py'`（44 项通过）。
 
 完成定义：
 
@@ -343,6 +399,14 @@
 - 提供运维 Dashboard、告警规则、关联 ID 和故障定位入口；
 - 后续 C15-C17 新增的企业管理、模型治理和能力授权必须在各自任务中接入同一审计协议；
 - 审计不可抵赖、日志脱敏、指标和告警测试通过。
+
+完成说明：
+
+- 后端新增通用 `audit_events` 存储、Repository、租户隔离查询、JSONL 导出、完整性校验和按时间保留清理；审计事件在仓储边界统一递归脱敏，并通过租户内递增序号、前序哈希和事件哈希形成可校验链；
+- 当前已有认证、员工、任务、知识、Skill 和 Tool 关键操作已接入统一审计协议；后续 C15-C17 的成员、权限、模型治理和能力授权操作必须在各自任务中接入同一协议，不得另起审计通道；
+- FastAPI、SQLAlchemy、HTTPX、Redis 和结构化日志已接入 OpenTelemetry；API 请求数、耗时和 Trace/Logs 具备 correlation_id 关联；Worker、Redis 队列、模型网关、RAGFlow 客户端和 Sandbox Provider 已通过低基数 `OperationalMetrics` 记录操作次数、耗时和失败计数；
+- `infra/observability/alert-rules.yml` 固化 API、Worker、队列、模型网关、RAGFlow、沙箱、客户端和审计写入失败的指标名与告警规则；当前已有 API、Worker、队列、模型网关、RAGFlow 和沙箱指标真实接入，后续客户端错误和审计写入失败按同一低基数指标协议补齐；
+- 前端新增“审计与观测”运维入口，可查看审计事件、关联 correlation_id、打开本机 Jaeger，并标明 JSONL 导出接口。
 
 ### C15 企业、成员与完整账号体系
 
@@ -374,7 +438,32 @@
 
 ### C17 Capability Registry、Entitlement 与交付 Profile
 
-**状态：`⬜ 未开始`**
+**状态：`🧪 待集成`**
+
+**开始日期：2026-07-16**
+
+开工说明：前置 C14 已合入主线；经用户批准与 C14 收尾（HMAC 加固）并行。实现分支 `task/c17-entitlements`。迁移编号协调：C14 HMAC 加固占用 `20260716_0025`，本条目使用 `20260716_0026`（暂 down_revision=0024，后合入者负责重链）。video-studio 相关三层校验接线在 B04 分支合入后补齐，本条目先覆盖 Core + social-operations 与 Core-only 组合矩阵。
+
+实现记录（2026-07-16，本任务提交，分支 `task/c17-entitlements`）：
+
+- `platform/entitlements/` 建立租户×能力授权领域（active/revoked + 到期读取时判定 + `evaluate_capability_availability` 单一可用性判定源），`infrastructure/database/repositories/entitlements.py` 提供 revision CAS + 唯一约束的幂等 grant/revoke 仓储，迁移 `20260716_0026_create_capability_entitlements`；
+- `capabilities/registry.py` 落地生产 `CapabilityHost`（原 MockCapabilityHost 校验逻辑上移共享，Mock 改为薄子类），`bootstrap/capabilities.py` 组合根按 `AGENT_PLATFORM_INSTALLED_CAPABILITIES` 显式安装清单装配（未知能力/无后端宿主集成的能力启动即失败，fail-closed）；
+- 新增 Core 路由根 `capabilities`：`GET /api/v1/capabilities/registry` 按「部署安装 ∩ 租户 Entitlement ∩ 用户 RBAC」三层裁剪返回；未授权条目不携带 frontend_entries/permissions。管理入口为 Owner（`workspace.manage`）范围内的 `PUT/DELETE /api/v1/capabilities/entitlements/{capability_id}` + `GET` 列表，全部经 `emit_audit_event` 留审计（设计取舍：MVP 无平台运营方角色，授权动作由企业 Owner 自管，生产运营方角色留待 C15/C18 收紧）；
+- social-operations（B02/B08）路由首次挂入生产 App，统一经 `create_capability_gate` 每请求实时三层校验（未授权 403 fail-closed、Core-only Profile 下 404、Entitlement 查询失败 5xx 拒绝）；能力内审计事件经请求内缓冲、响应发出前桥接落库到 C14 统一审计（跨租户事件直接拒绝）；撤销后新调用（含任务入队/认领）立即 403，存量本地任务由设备端租约超时/紧急停止兜底；
+- 登录/`/auth/me` 的 workspace permissions 按 Entitlement + 角色附加能力权限码（OWNER/ADMIN 获全部 manifest 权限，MEMBER 不授予）；前端 `capability-registry` 数据源切换为真实 API，Zod schema 收紧为「已授权条目才允许携带声明」的判别联合，保持失败关闭；
+- Demo Seed 以稳定 ID 幂等授予演示租户 social-operations（source=demo-seed）；
+- 组合矩阵：Core-only 与 Core+social 由契约测试覆盖（Core-only 下登录/员工/知识/Skill/Tool 全部可用、social 路由 404、registry 为空）；Core+视频与目标客户组合待 B04 合入后补；
+- 验证命令：`uv run pytest tests/unit tests/contract tests/integration/database tests/integration/bootstrap -q`（971 passed）、`uv run ruff check .`、`uv run mypy`（0 错误）、`pnpm test`（43 文件 199 用例）、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 Playwright `capability-entitlements.spec.ts + social-operations.spec.ts`（5 passed，随机项目名/端口，验后自动销毁）；
+- 待集成项：① B04 合入后补 video-studio 后端宿主接线与 Core+视频组合矩阵；② Worker 侧尚无能力任务处理器（social.jobs.v1 未在主线实现），`evaluate_capability_availability` 已作为 API/Worker 共用判定源导出，B04/B08 Worker 接入时必须复用；③ Sidecar 下载与云凭据签发的未授权拦截随对应能力落地时接入同一 gate。
+
+复审修复记录（2026-07-16，双复审后集中修复，本任务提交）：
+
+- C1 迁移多头：已在分支内合并 origin/main（含 C14 HMAC 加固 `20260716_0025`），`20260716_0026` 的 down_revision 重链至 `20260716_0025`，迁移测试 head 断言同步更新；
+- I2 审计桥接语义：实测本版 FastAPI 的 yield 依赖 teardown 在响应发送之后执行，原 teardown 抛 500 会被吞（客户端 201、审计静默丢失）；已改为 endpoint 包装层在响应构造前 flush（`wrap_capability_router`），业务成功但审计写入失败时客户端收到显式 500（`capability_audit_flush_failed`）且审计不落半写。**已知不一致语义**：能力服务的业务副作用（如设备注册的内存/SQLite 状态）此时已持久化，客户端 500 后重试同一 device_id 会得到 409；运维补偿 = 依据 500 响应与 `capability_audit_flush_failed` 日志人工核对，设备注册幂等化（同租户同 device_id 重放返回既有记录）列为 follow-up；
+- I1/L3 硬化：Entitlement 授予新增部署安装校验，对未安装能力（含 Core-only Profile 下所有能力）授予返回 409 `capability_not_installed`，fail-closed；
+- 授权治理定位（主代理拍板）：**当前 Entitlement 由租户 Owner（`workspace.manage`）自助管理，不构成商业购买闸门；平台运营方/计费侧闸门待 C15/C18 收紧**；
+- 完成定义第 7 条中「交付 Profile 变更」的审计：部署安装清单（`AGENT_PLATFORM_INSTALLED_CAPABILITIES`）属部署层环境配置，其变更发生在进程外，无租户内审计主体，归 C18/运维域（部署配置变更留痕）处理；租户可见的授权/撤销已全部接入 C14 审计；
+- 记录项：L1 registry 对未授权租户返回的裸条目（capability_id + 安装布尔）暴露部署拓扑——MVP 接受，前端需要该信息区分「未授权」与「未安装」语义；L2 前端 registry 响应任一条目畸形即整表解析失败（fail-closed 优先，接受单能力故障放大为全部能力不可用）；L4 登录/`/auth/me` 的能力权限附加为每工作区×每能力逐条查询（N+1），当前安装能力数 ≤2 可接受，能力包增多时改批量查询（follow-up）。
 
 完成定义：
 
@@ -394,6 +483,7 @@
 完成定义：
 
 - 接入 Vault/KMS/云密钥服务，支持加密、轮换、撤销和访问审计；
+- 审计哈希链 HMAC 密钥纳入密钥管理并支持轮换（C14 跟进项：`hash_algorithm`/`head_seal_algorithm` 已带版本标识，轮换需支持多密钥版本共存校验且不破坏存量链校验）；
 - Tauri 使用系统安全凭据存储，禁止长期 Token 落入 `localStorage`；
 - Demo 明文密钥全部废止；正式交付分支、配置和制品不得继续包含，已经进入 Git 历史的泄漏凭据通过禁用和轮换处置；
 - 生产沙箱使用独立隔离服务，具备租户隔离、网络策略和容量治理；
@@ -444,22 +534,24 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 ## 6. 当前验证基线
 
-基线日期：2026-07-16。
+基线日期：2026-07-17。
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | 默认环境收集 1051 项：1012 通过、39 跳过、0 失败；39 个条件跳过均明确标注缺少 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱或显式真实腾讯云 COS 凭据，不计作对应真实依赖验收通过 |
+| 后端 Pytest | C09 合入后默认环境 1264 通过、42 跳过、0 失败；条件跳过均明确标注缺少真实 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱、真实腾讯云 COS 或真实 RAGFlow 凭据 |
 | 后端 Unit + Contract | 863 项通过；新增覆盖动态输入输出契约、前端不可表达 JSON Schema 关键字拒绝、动态 properties 必须关闭 additionalProperties、历史已发布动态 Schema 运行入口 fail-closed、历史已发布文件字段 Schema 未启用 `file_upload` 时即使文件字段可选且本次未提交文件也 fail-closed、legacy 自由输入与零字段动态空输入兼容、浏览器 RegExp 不兼容 pattern 拒绝、文件控件约束收窄、数组文件语义拒绝、动态文件字段与本次附件绑定、幂等重放固定原员工版本 Schema、前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
-| Mypy | 181 个源码文件通过 |
-| 前端 Vitest | 40 个测试文件、188 项测试通过；新增动态输入表单、数字/字符串枚举提交、可选布尔字段不静默提交 false、必填布尔字段未触碰时按 false 提交、正则/日期/数值倍数/数组长度与唯一性校验、浏览器不兼容 pattern 受控错误、数组 item 类型解析、动态文件幂等重试、零字段动态空输入、员工编辑器 Schema JSON 配置与非法 JSON 拦截、结构化输出展示、metadata-only/空/legacy 输出 Schema 兼容、员工编辑器默认空输出 Schema 和任务详情结构化结果回归，并保留既有同步双击互斥、上传后 Run 失败补偿、任务意图换键、Skill 生命周期和幂等请求头契约 |
+| Mypy | 200 个源码文件通过（C09 合入后） |
+| 前端 Vitest | C09 合入后 44 个测试文件、221 项测试通过 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过 |
-| Playwright Web 业务回归 | 15 项完整回归通过；PostgreSQL、Redis、MinIO 与 API 均支持测试进程传入的随机隔离端口，C04 附件场景以延迟上传同步双击验证 1 upload/1 Run；另有正式随机 MVP Profile 3 项真实 Worker/Sandbox 纵切通过，测试容器、网络和卷已销毁 |
+| Playwright Web 业务回归 | C09 合入后 24 项完整回归通过（单 worker 干净退出，状态 passed；含审计观测、能力授权、知识生命周期与 MCP 工具生命周期用例）；runtime 专用配置 7 项通过（真实 Worker/Sandbox/MCP stub/RAGFlow stub，含知识引用闭环、自动续跑、会话取消与 MCP 调用/禁用拒绝）；多 worker 缩容退出挂起已定位并暂以单 worker 规避，根因待查 |
 | C06 动态输入输出专项 | RED 阶段后端新增契约和 Worker 用例先覆盖默认空对象 Schema 误判、结构化输出违规未受控失败和真实运行时 JSON 字符串未解析；前端新增用例先覆盖员工详情缺 Schema 表单、任务详情缺结构化结果展示。复审补充覆盖文件型字段未启用 `file_upload`、历史已发布文件字段 Schema 未启用 `file_upload` 且本次未提交文件时运行入口 fail-open、动态 properties 必须关闭 `additionalProperties`、历史已发布动态 Schema 在运行入口 fail-closed、legacy 自由输入兼容、浏览器 RegExp 不兼容 pattern 后端拒绝且前端受控失败、文件控件额外约束、数组元素文件语义、零字段动态空输入、动态文件字段与本次 `attachment_ids` 绑定、真实员工编辑器 Schema 配置入口、动态表单无法渲染的嵌套输入 Schema、前端无法一致表达的 JSON Schema 关键字、发布 v2 后旧幂等键重放仍固定原 Run/原版本 `output_schema`、DeepAgent 数字标量结构化输出、字符串 Schema 下普通数字文本不误转、可选布尔字段不静默提交 false、必填布尔字段未触碰时按 false 提交、正则、日期、数值倍数、数组长度和唯一性。GREEN 阶段 `cd backend && uv run pytest tests/contract/runs/test_dynamic_io.py -q` 29 项通过；`cd backend && uv run pytest -q` 1012 项通过、39 跳过；`cd backend && uv run pytest tests/unit tests/contract -q` 863 项通过；`.venv/bin/ruff check .`、`.venv/bin/mypy` 181 个源码文件通过；`cd frontend && pnpm test -- --reporter=dot` 40 个文件、188 项通过；`pnpm lint`、`pnpm typecheck`、`pnpm build` 通过；`bash infra/platform/test-runtime-e2e.sh` 使用随机端口和独立 Compose 项目完成普通 Worker、结构化输入输出、取消慢模型 3 项真实运行时 E2E，结构化场景通过真实编辑器配置 Schema，不再通过 route 篡改员工定义，结束后临时容器、网络和卷清理完成 |
 | C08 Skill 生命周期专项 | RED 阶段后端新增测试先失败于缺少 `skills.security`、`skills.builtin` 和固定版本物化类型，前端新增组件测试先失败于缺少“安全审核结果”面板；GREEN 阶段 `uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py tests/unit/workers/test_runtime_composition.py -q` 47 项通过；合并 C05 后发现 `/api/v1/conversations` 未进入能力包 Core API 保留根契约，已补齐 `CORE_API_ROUTE_ROOTS` 并通过 manifest 契约 8 项；正式 Skill Playwright E2E 1 项通过，按 running 状态接管本轮启动的独立 Compose 依赖并自动 `down -v`，测试 project 容器、网络和卷复查为 0 |
+| C14 审计与观测专项 | RED 阶段后端先补出审计元数据仓储边界脱敏、审计哈希链完整性、保留清理、请求 correlation_id 传递和观测告警域覆盖用例；GREEN 阶段 `cd backend && uv run pytest tests/contract/test_health.py tests/contract/audit/test_audit_events.py tests/unit/observability/test_telemetry.py tests/integration/database/test_migrations.py -q` 31 项通过；补强 Worker、队列、模型网关、RAGFlow 和 Sandbox 操作指标后，`cd backend && uv run pytest tests/unit/observability/test_operational_metrics.py -q` 2 项通过、`cd backend && uv run pytest tests/unit/workers/test_main.py tests/unit/knowledge/test_ragflow_client.py -q` 42 项通过、`cd backend && uv run pytest tests/unit/queue/test_redis_run_queue_claim.py tests/unit/queue/test_redis_run_queue_dlq.py tests/integration/queue/test_redis_run_queue.py tests/integration/queue/test_run_dead_letters.py -q` 24 项通过/6 项条件跳过、`cd backend && uv run pytest tests/unit/observability/test_telemetry.py tests/unit/workers/test_runtime_adapters.py tests/unit/workers/test_main.py tests/unit/runtimes/test_deep_agent_runtime.py -q` 57 项通过、`cd backend && uv run pytest tests/unit/llm/test_litellm_gateway.py tests/unit/sandbox/test_local_controller_provider.py tests/unit/sandbox/test_controller.py tests/unit/sandbox/test_manager.py tests/unit/workers/test_sandbox_janitor.py -q` 86 项通过；`cd backend && uv run ruff check . && uv run mypy` 184 个源码文件通过；`uv run --project backend python infra/observability/test_config.py` 通过 Collector 与告警规则配置校验；`cd frontend && pnpm exec tsc -b --noEmit && pnpm exec oxlint` 通过；前端 vitest 证据更正：此前记录的"4 个文件、28 项通过"在当时不成立——`src/features/operations/api/audit.test.ts` 存在断言笔误（mock `sequence: 2` 断言 3），其中 1 项自创建起失败；修正笔误后实测 `cd frontend && pnpm exec vitest run src/features/operations/api/audit.test.ts src/features/operations/api/queries.test.tsx src/features/operations/pages/AuditObservabilityPage.test.tsx src/app/App.test.tsx --reporter=dot` 4 个文件、28 项通过，`pnpm exec vitest run src/features/operations --reporter=dot` 5 个文件、16 项通过；正式 Playwright 审计运维入口使用隔离端口验证审计查询、页面展示和资源清理。第二轮复审修复（M1 每租户独立事务清扫、M2 完整性分块滚动校验、L1 telemetry 全局复位、L2 审计写入对指标异常免疫）后回归：`cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q` 68 项通过；`uv run pytest tests/unit tests/contract -q` 896 项通过；`uv run ruff check . && uv run mypy` 185 个源码文件通过；临时 PG 容器 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q` 7 项通过（容器已删除）。S7 HMAC 密钥签名加固（`task/c14-audit-hmac`）：RED 用例证明旧实现对无密钥全量重写伪造链返回 valid=True、保留边界篡改不被检出、密钥缺失不 fail-closed；GREEN 后 `cd backend && uv run pytest tests/unit/observability tests/contract/audit tests/integration/database/test_migrations.py -q` 78 项通过（既有篡改/尾删/跨块契约全部保持通过）；`uv run pytest tests/unit tests/contract -q` 917 项通过；`uv run ruff check . && uv run mypy` 187 个源码文件通过；临时 PG 容器 `TEST_DATABASE_URL=... uv run pytest tests/integration/audit -q` 7 项通过（含迁移 `20260716_0025` 真实 PG 升级，容器已删除）；`python3 -m unittest discover -s infra/platform -p 'test_contract.py'` 44 项通过。2026-07-17 隔离验收栈终验 `bash infra/platform/test-mvp-profile.sh` 完整通过（exit 0：镜像构建、迁移 0025 TOFU 回填、Demo Seed、Playwright 3 项、真实 Tauri wdio 1 项、生产 Worker 链路、真实 PG 并发、profile 治理断言全过，验后资源销毁）；验收脚本 `rg --quiet` 已全部替换为 `grep -q` 消除未声明工具依赖 |
+| C17 能力授权专项（分支内，待合入） | RED 阶段先失败于缺少 `platform/entitlements` 领域、`capability_entitlements` 迁移/仓储、生产 `CapabilityHost`、组合根、`GET /api/v1/capabilities/registry` 三层裁剪、social 路由三层 gate、Demo Seed 授予与前端裁剪条目 schema；GREEN 阶段 `cd backend && uv run pytest tests/unit tests/contract tests/integration/database tests/integration/bootstrap -q` 971 项通过；`uv run ruff check .`、`uv run mypy`（194 文件）通过；`cd frontend && pnpm test` 43 文件 199 项通过；`pnpm lint`、`pnpm typecheck`、`pnpm build` 通过；隔离随机端口/项目名 Playwright `capability-entitlements.spec.ts`（未授权租户菜单不可见且直达被拒；Owner 授予后菜单可见、真实注册设备成功、撤销后入口消失且直连 API 403）与既有 `social-operations.spec.ts` 共 5 项通过；随后第二个隔离随机栈跑完整 Playwright Web 回归 22 项通过（原 20 项 + C17 新增 2 项），两轮验收栈容器/网络/卷均自动销毁 |
 | Tauri Rust | 2 项凭据键校验与 3 项本地执行器集成测试通过；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过 |
 | PlatformAdapter | Web/Tauri 双实现覆盖文件、外链、通知和安全凭据；2 个测试文件、6 项测试通过，业务源码无 Tauri 直连 |
 | Tauri 桌面 E2E | macOS 本机 3 项真实应用启动、IPC、凭据失败关闭与无端口 Sidecar 生命周期通过；另有 1 项固定 Demo 账号的完整 MVP 核心纵切通过。测试 App 隐藏且不占 Dock，正式构建无 WebDriver 测试标记 |
@@ -478,12 +570,12 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C01 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | `cd backend && uv run pytest -ra`；`uv run ruff check .`；`uv run mypy`；`cd ../frontend && pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/litellm/test.sh config`；`bash infra/litellm/test.sh stub-matrix` |
 | C02 | 已完成 | 2026-07-14 | 2026-07-14 | 本任务提交 | pnpm 11 工作区配置与构建脚本白名单通过 `pnpm install --frozen-lockfile` 校验；`pnpm test && pnpm lint && pnpm typecheck && pnpm build`；`pnpm exec playwright test --trace=off`；`cargo test --locked`；`cargo clippy --all-targets --all-features -- -D warnings`；`pnpm test:tauri`；GitHub Actions 运行 29334098300 的 macOS/Windows 正式构建与真实桌面冒烟通过 |
 | C03 | 已完成 | 2026-07-14 | 2026-07-15 | 本任务提交 | MVP Profile 纵切：`python3 infra/platform/test_contract.py`（42 项通过）；`bash infra/compose/test.sh config`；`bash infra/litellm/test.sh config`（17 项配置契约、3 项 Stub HTTP 协议通过）；`bash infra/litellm/test.sh stub-matrix`；`bash infra/platform/test.sh config`；`bash infra/platform/test-mvp-profile.sh`；`uv run --directory backend pytest tests/unit tests/contract -q`（580 项通过）；`uv run --directory backend pytest tests/unit/workers tests/integration/database/test_migrations.py -q`（65 项通过）；工作台后端契约/映射 8 项、前端工作台 API/查询/页面 9 项及前端全量 98 项通过；`uv run ruff check . ../infra/platform/test_contract.py`；`uv run mypy`。Profile 已具备私有 allowlist dotenv、路径/权限/端口/网络校验、同 Profile 锁、失败启动按容器/网络/卷稳定名称快照清理本轮差集、环境状态缺失与 LiteLLM 网络检查异常时失败关闭、外来网络保留并报错、网络删除失败传播、分组端口预检、启动中断按 `INT=130`、`TERM=143` 与原始 `ERR` 状态仅清理一次、当前工作树专属镜像与真实恢复验收。本地 Stub 的 Playwright 纵切已覆盖成功与受控失败两条真实链路；工作台以租户和既有 RBAC 语义聚合员工、任务、全部运行状态、失败数及系统健康，失败链路同时校验 PostgreSQL 中的 Run、错误码和 `run.failed` 事件。`TAURI_MVP_WEB_URL=http://127.0.0.1:18080 pnpm test:tauri` 在隐藏、无 Dock 的真实 macOS App 中以固定 Demo 账号完成登录、员工发布、任务执行、终态与工作台纵切；`pnpm test:tauri` 的 3 项原生冒烟通过；`bash infra/litellm/test.sh real-provider` 通过隔离 LiteLLM 的 `general-purpose` 别名调用阿里百炼 `qwen-plus`，返回 23 Token，临时 Docker 资源清零 |
-| C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，本轮无凭据故 1 skip |
-| C05 | 🧪 待集成 | 2026-07-16 | —（2026-07-16 完成质量收口；活跃任务自动续跑与会话内取消尚未收口，见第 4 节） | 本任务提交 | RED：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py -q` 首次 404；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q` 首次会话消息为空；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q` 首次准备失败未写回会话 error 消息；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion -q` 首次会话投影保存 12099 字符、超过 PostgreSQL `conversation_messages.content` 12000 边界；`cd frontend && pnpm test -- src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx` 首次缺模块；员工详情“开始会话”用例首次找不到按钮。GREEN：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q`（14 passed）；`cd backend && uv run ruff check . && uv run mypy`；`cd frontend && pnpm exec vitest run src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx src/features/employees/pages/EmployeeDetailPage.test.tsx src/app/App.test.tsx src/features/runs/pages/RunDetailPage.test.tsx --reporter=dot`（47 passed）；`cd frontend && pnpm lint && pnpm typecheck && pnpm build`；`PLAYWRIGHT_*` 隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，真实 PostgreSQL/Redis/MinIO/API/Web，结束后 Docker 容器、网络、卷和残留进程已清理） |
+| C04 | 已完成 | 2026-07-15 | 2026-07-16（质量收口） | 本任务提交 | 原纵切保持闭环，并完成最终质量加固：ASGI 层在 multipart/认证前对重复、伪造声明长度与流式 receive 统一限流；API、Controller 和 Sandbox 统一 25 MiB，9 MiB 与边界上传→Run→物化均通过；未绑定文件采用客户端补偿 + 服务端 TTL，原子保护已绑定文件且清扫受 300 秒节流；同步 UI mutex 与服务端幂等键共同防重，改变任务意图会换键；存储 Provider 与底层 SDK 具备硬超时/禁重试边界，持久 tombstone 在覆盖超时证明边界的窗口内重扫迟到 put、跨重启续扫并在最终删除失败时记录后退休；首次 Worker 物化异常或取消均删除新建 Sandbox/lease。本轮质量收口新增 0020 迁移，连同 C04 既有 0018/0019 建模迁移，升级/降级/存量数据通过。后端 919/39 skip、前端 Vitest 119、Ruff/Mypy/Typecheck/Build 全过；正式 C04 脚本含 46 通过/1 条件 skip、真实 25 MiB Docker Sandbox、随机完整栈 Playwright 3 项和 PostgreSQL Saga 并发 2 项，资源清零且未触碰 `agent-platform-dev`；真实 COS 保留显式外部门禁，质量收口当轮无凭据故 1 skip；2026-07-16 补：用户开通开发桶与子账号后，`TEST_COS_*` 真实 COS 门禁首次执行并通过——首跑即暴露 Provider 对真实 `StreamBody` 调用不存在的 `close()` 的缺陷（单测假实现曾放宽契约），已按 RED→GREEN 修复（假实现对齐真实 SDK 契约 + Provider 改为关闭 raw stream），单测 5、真实 COS 1、全量 896、ruff/mypy 全过 |
+| C05 | ✅ 已完成 | 2026-07-16 | 2026-07-16（质量收口 + 主线收口 + 终审合入） | 本任务提交（merge 合入） | RED：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py -q` 首次 404；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline -q` 首次会话消息为空；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q` 首次准备失败未写回会话 error 消息；`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion -q` 首次会话投影保存 12099 字符、超过 PostgreSQL `conversation_messages.content` 12000 边界；`cd frontend && pnpm test -- src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx` 首次缺模块；员工详情“开始会话”用例首次找不到按钮。GREEN：`cd backend && uv run pytest tests/contract/conversations/test_conversations.py tests/integration/database/test_migrations.py tests/integration/queue/test_run_worker.py::test_worker_persists_message_output_into_conversation_timeline tests/integration/queue/test_run_worker.py::test_worker_bounds_long_message_output_without_blocking_run_completion tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged -q`（14 passed）；`cd backend && uv run ruff check . && uv run mypy`；`cd frontend && pnpm exec vitest run src/features/conversations/api/conversations.test.ts src/features/conversations/pages/ConversationDetailPage.test.tsx src/features/employees/pages/EmployeeDetailPage.test.tsx src/app/App.test.tsx src/features/runs/pages/RunDetailPage.test.tsx --reporter=dot`（47 passed）；`cd frontend && pnpm lint && pnpm typecheck && pnpm build`；`PLAYWRIGHT_*` 隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，真实 PostgreSQL/Redis/MinIO/API/Web，结束后 Docker 容器、网络、卷和残留进程已清理）。主线收口 RED：`cd backend && uv run pytest tests/contract/conversations -q` 首次失败于缺 `followup` 意图命令与 `RunResponse.created_by`；`uv run pytest tests/integration/queue/test_run_worker.py -k followup` 7 条新用例中 5 条首次失败于无派生实现（另 2 条为反向用例）；`uv run pytest tests/unit/platform/conversations -q` 首次失败于缺 `conversation_followup_run_id`；前端 `pnpm exec vitest run src/features/conversations/pages/ConversationDetailPage.test.tsx` 新增取消/跳转用例首次 3 条失败；runtime E2E 自动续跑用例首次失败暴露时序不确定（followup 计数为 0），改用 `slow-complete` 夹具模型固定活跃窗口。主线收口 GREEN：`cd backend && uv run pytest tests/contract/conversations tests/integration/queue/test_run_worker.py -q`（72 passed，2 skipped）；`uv run pytest tests/unit tests/contract -q`（899 passed）；`uv run ruff check . && uv run mypy`；`cd frontend && pnpm exec vitest run src/features/conversations src/features/runs --reporter=dot`（28 passed）及全量 vitest（200 passed）；`pnpm lint && pnpm typecheck`；`PLAYWRIGHT_COMPOSE_PROJECT_NAME` + `PLAYWRIGHT_*_PORT` 随机隔离端口下 `pnpm exec playwright test e2e/conversations.spec.ts --reporter=line`（1 passed，含会话内取消入口与任务详情跳转，隔离栈自动销毁）；`PLAYWRIGHT_COMPOSE_PROJECT_NAME=随机 bash infra/platform/test-runtime-e2e.sh`（5 passed：原有 3 条 + 「活跃任务期间追加消息→当前任务终结后自动跑下一轮→时间线两轮输出」+「会话页直接取消执行中任务→已取消终态」，真实 PostgreSQL/Redis/MinIO/API/Dispatcher/Worker/Sandbox/Web，随机端口，资源自动清理） |
 | C06 | 已完成 | 2026-07-16 | 2026-07-16 | 本任务提交 | RED：`cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_worker_treats_legacy_default_object_output_schema_as_unstructured tests/integration/queue/test_run_worker.py::test_worker_rejects_completed_output_that_violates_employee_output_schema tests/unit/runtimes/test_deep_agent_runtime.py::test_deep_agent_runtime_parses_json_text_for_structured_output_schema -q` 先暴露历史默认 Schema 误判、违规输出未受控失败和 JSON 字符串未解析；前端员工详情和任务详情新增动态 IO 用例先失败于缺少 Schema 表单与结构化展示；复审补充覆盖 file control/`file_upload` 不一致、历史已发布文件字段 Schema 未启用 `file_upload` 且本次未提交文件时运行入口 fail-open、dynamic properties 未关闭 `additionalProperties`、历史已发布动态 Schema 运行入口 fail-open、legacy 自由输入与零字段动态空输入兼容、浏览器 RegExp 不兼容 pattern 后端放行/前端崩溃、文件字段额外约束、数组文件语义、动态文件附件绑定、真实编辑器 Schema 配置、无法渲染的嵌套输入 Schema、前端无法一致表达的 JSON Schema 关键字、发布 v2 后旧幂等键重放固定原 Run/原版本 `output_schema`、数字标量结构化输出、字符串 Schema 下普通数字文本不误转、可选布尔字段、必填布尔字段和 JSON Schema 关键约束。GREEN：`cd backend && uv run pytest tests/contract/runs/test_dynamic_io.py -q`（29 passed）；`cd backend && uv run pytest -q`（1012 passed、39 skipped）；`cd backend && uv run pytest tests/unit tests/contract -q`（863 passed）；`cd backend && .venv/bin/ruff check . && .venv/bin/mypy`（181 个源码文件通过）；`cd frontend && pnpm test -- --reporter=dot`（40 个文件、188 项通过）；`cd frontend && pnpm lint && pnpm typecheck && pnpm build`；`bash infra/platform/test-runtime-e2e.sh`（独立随机端口真实 PostgreSQL/Redis/MinIO/API/Worker/Sandbox/Web，3 项通过，资源清理完成） |
 | C08 | 已完成 | 2026-07-16 | 2026-07-16 | 本任务提交 | RED：`uv run --directory backend pytest tests/unit/skills/test_security_review.py tests/unit/skills/test_builtin_installer.py tests/unit/skills/test_materializer.py tests/contract/skills/test_skills.py -q` 先失败于缺少安全审核、内置安装和固定版本物化接口；`pnpm --dir frontend test src/features/skills/pages/SkillDetailPage.test.tsx` 先失败于缺少“安全审核结果”面板。GREEN：`uv run --directory backend pytest tests/unit/skills tests/contract/skills tests/integration/database/test_migrations.py tests/unit/workers/test_runtime_composition.py -q` 47 项通过；`uv run --directory backend pytest tests/unit/capabilities/test_manifest.py::test_reserved_core_api_route_roots_match_the_running_app_contract tests/unit/capabilities/test_manifest.py::test_manifest_rejects_core_api_route_root -q` 8 项通过；`uv run --directory backend pytest -q` 976 通过、39 跳过；`uv run --directory backend ruff check .` 通过；`uv run --directory backend mypy` 180 个源码文件通过；`pnpm --dir frontend test` 39 个文件、169 项通过；`pnpm --dir frontend lint`、`pnpm --dir frontend typecheck`、`pnpm --dir frontend build` 通过；独立端口和独立 Compose 项目的 `pnpm --dir frontend exec playwright test skills.spec.ts --trace=off` 1 项通过，Playwright 按 running 状态记录本轮 ownership 并自动 `down -v`，`agent-platform-playwright` 与 C08 隔离 project 容器、网络和卷复查均为 0 |
-| C07 | 🚧 进行中 | 2026-07-16 | — | 分支 `task/c07-knowledge-runtime`（WIP `8d483ce`） | 独立评估：可作继续开发基线；生产 Worker 装配缺失等阻断项见第 4 节 C07 记录 |
-| C14 | 🚧 进行中（复审退回） | 2026-07-16 | — | 分支 `task/c14-audit-observability`（`6923a52`） | 代码质量复审 FAIL：S1-S5 见第 4 节 C14 记录；修复并重审前禁止合入 |
+| C07 | ✅ 已完成 | 2026-07-16 | 2026-07-17 | 本任务提交（merge 合入） | 双复审通过后合入：迁移 0027 重链 0026；后端全量 1198、默认 Playwright 23/23（单 worker）、runtime E2E 6/6；真实 RAGFlow v0.25.6 独立栈验收通过（检索契约/元数据过滤/生命周期，栈用后销毁）；常驻栈真实用户冒烟通过；已声明限制（重排端到端待重排模型实例、事件键单检索）见第 4 节终审记录 |
+| C14 | ✅ 已完成 | 2026-07-16 | 2026-07-17 | 本任务提交（两次 merge 合入 + 收口提交） | 三轮复审后主体合入 main；用户决定立即加固 S7，HMAC 密钥签名分支经安全复审（一轮整改 + 增量确认 PASS）合入：合并后后端全量 1067 通过、Playwright 20/20（隔离端口）、常驻栈重建后以真实用户路径冒烟通过（登录 → 审计页 → `auth.login_succeeded` 以 `hmac-sha256.v1` 落库、链头封印生效、迁移 0025 TOFU 回填完成）。2026-07-17 隔离验收栈终验 `bash infra/platform/test-mvp-profile.sh` 完整通过（exit 0，详见第 4 节 C14 终验记录与第 6 节基线）；剩余威胁面（持钥攻击者、整库回滚需外部锚定）已如实声明归 C18；L3-L5 follow-up 见第 4 节 C14 记录 |
 | C09-C13、C15-C20 | 尚未开始 | — | — | — | 按第 4 节逐项更新 |
 
 C05 补充质量验证：代码复审发现会话失败投影除准备失败外，还需要显式覆盖续租失败和孤儿运行恢复失败；进一步复审发现会话投影与 Run 状态、事件、command、ownership/approval 收尾共处同一事务，若 `conversation_messages` 序号并发冲突或投影异常会拖垮核心运行收尾。已补充 RED 用例 `test_worker_completion_survives_conversation_projection_failure` 与 `test_recovered_snapshot_survives_conversation_projection_failure`，修复后投影改为核心事务提交后的独立安全事务，唯一约束冲突最多重试 3 次，最终失败只记录受控日志，不影响 Run 结果。已通过 `cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged tests/integration/queue/test_run_worker.py::test_renewal_failure_marks_running_run_failed_and_releases_environment tests/integration/queue/test_run_worker.py::test_started_tool_without_advanced_checkpoint_fails_uncertain_without_replay -q`（3 passed）、投影异常降级组（5 passed），并通过包含会话契约、迁移、正常输出、超长输出、三条失败投影和五条投影异常降级的综合后端目标回归（21 passed），确保三条直接失败路径都会写入 `conversation_messages` 的 error 消息，且投影失败不泄露底层异常细节、不阻断核心收尾。

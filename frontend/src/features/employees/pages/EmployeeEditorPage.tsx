@@ -1,14 +1,27 @@
-import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Form, Input, InputNumber, Select, Space, Typography } from 'antd'
 import { useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { usePublishedSkills } from '../../skills/api/queries'
 import { useAvailableTools } from '../../tools/api/queries'
-import type { EmployeeWriteDefinition, WorkMode } from '../api/employees'
+import { useKnowledgeBases } from '../../knowledge/api/queries'
+import type {
+  EmployeeWriteDefinition,
+  KnowledgeMetadataComparisonOperator,
+  KnowledgeRetrievalConfig,
+  WorkMode,
+} from '../api/employees'
+import { defaultKnowledgeRetrievalConfig } from '../api/employees'
 import { getEmployeeApiErrorMessage } from '../api/errors'
 import { useCreateEmployee, useEmployee, useUpdateEmployee } from '../api/queries'
 import './employees.css'
 
+
+interface RetrievalFilterFormValue {
+  name: string
+  comparisonOperator: KnowledgeMetadataComparisonOperator
+  value: string
+}
 
 interface EmployeeFormValues {
   name: string
@@ -23,7 +36,32 @@ interface EmployeeFormValues {
   outputSchemaText: string
   skillIds: string[]
   toolIds: string[]
+  knowledgeBaseIds: string[]
+  retrievalPageSize: number
+  retrievalSimilarityThreshold: number
+  retrievalVectorWeight: number
+  retrievalTopK: number
+  retrievalKeyword: boolean
+  retrievalRerankId: string
+  retrievalFilterLogic: 'and' | 'or'
+  retrievalFilters: RetrievalFilterFormValue[]
 }
+
+const comparisonOperatorOptions: { value: KnowledgeMetadataComparisonOperator, label: string }[] = [
+  { value: 'contains', label: '包含' },
+  { value: 'not contains', label: '不包含' },
+  { value: 'start with', label: '开头是' },
+  { value: 'empty', label: '为空' },
+  { value: 'not empty', label: '不为空' },
+  { value: '=', label: '=' },
+  { value: '≠', label: '≠' },
+  { value: '>', label: '>' },
+  { value: '<', label: '<' },
+  { value: '≥', label: '≥' },
+  { value: '≤', label: '≤' },
+]
+
+const valuelessOperators: ReadonlySet<string> = new Set(['empty', 'not empty'])
 
 const defaultValues: EmployeeFormValues = {
   name: '',
@@ -38,6 +76,57 @@ const defaultValues: EmployeeFormValues = {
   outputSchemaText: formatJson({}),
   skillIds: [],
   toolIds: [],
+  knowledgeBaseIds: [],
+  retrievalPageSize: defaultKnowledgeRetrievalConfig.page_size,
+  retrievalSimilarityThreshold: defaultKnowledgeRetrievalConfig.similarity_threshold,
+  retrievalVectorWeight: defaultKnowledgeRetrievalConfig.vector_similarity_weight,
+  retrievalTopK: defaultKnowledgeRetrievalConfig.top_k,
+  retrievalKeyword: defaultKnowledgeRetrievalConfig.keyword,
+  retrievalRerankId: '',
+  retrievalFilterLogic: 'and',
+  retrievalFilters: [],
+}
+
+function retrievalFormValues(config: KnowledgeRetrievalConfig): Pick<EmployeeFormValues,
+  'retrievalPageSize' | 'retrievalSimilarityThreshold' | 'retrievalVectorWeight'
+  | 'retrievalTopK' | 'retrievalKeyword' | 'retrievalRerankId'
+  | 'retrievalFilterLogic' | 'retrievalFilters'> {
+  return {
+    retrievalPageSize: config.page_size,
+    retrievalSimilarityThreshold: config.similarity_threshold,
+    retrievalVectorWeight: config.vector_similarity_weight,
+    retrievalTopK: config.top_k,
+    retrievalKeyword: config.keyword,
+    retrievalRerankId: config.rerank_id ?? '',
+    retrievalFilterLogic: config.metadata_condition?.logic ?? 'and',
+    retrievalFilters: config.metadata_condition?.conditions.map((condition) => ({
+      name: condition.name,
+      comparisonOperator: condition.comparison_operator,
+      value: condition.value,
+    })) ?? [],
+  }
+}
+
+function retrievalConfigFromForm(values: EmployeeFormValues): KnowledgeRetrievalConfig {
+  // 检索配置区未挂载（未选择知识库）时表单值缺字段，回退平台默认值。
+  const defaults = defaultKnowledgeRetrievalConfig
+  const filters = values.retrievalFilters ?? []
+  return {
+    page_size: values.retrievalPageSize ?? defaults.page_size,
+    similarity_threshold: values.retrievalSimilarityThreshold ?? defaults.similarity_threshold,
+    vector_similarity_weight: values.retrievalVectorWeight ?? defaults.vector_similarity_weight,
+    top_k: values.retrievalTopK ?? defaults.top_k,
+    keyword: values.retrievalKeyword ?? defaults.keyword,
+    rerank_id: (values.retrievalRerankId ?? '').trim() || null,
+    metadata_condition: filters.length === 0 ? null : {
+      logic: values.retrievalFilterLogic ?? 'and',
+      conditions: filters.map((filter) => ({
+        name: filter.name,
+        comparison_operator: filter.comparisonOperator,
+        value: valuelessOperators.has(filter.comparisonOperator) ? '' : filter.value,
+      })),
+    },
+  }
 }
 
 export function EmployeeEditorPage() {
@@ -48,9 +137,11 @@ export function EmployeeEditorPage() {
   const navigate = useNavigate()
   const skills = usePublishedSkills()
   const tools = useAvailableTools()
+  const knowledgeBases = useKnowledgeBases()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
   const selectedWorkMode = Form.useWatch('workMode', form) ?? 'autonomous'
+  const selectedKnowledgeBaseIds = Form.useWatch('knowledgeBaseIds', form) ?? []
   const legacyDefinition = editingEmployee.data?.definition
   const hasLegacyWorkMode = legacyDefinition?.work_mode !== undefined
     && legacyDefinition.work_mode !== 'autonomous'
@@ -74,6 +165,10 @@ export function EmployeeEditorPage() {
       outputSchemaText: formatJson(employee.definition.output_schema),
       skillIds: employee.definition.skill_ids,
       toolIds: employee.definition.tool_ids,
+      knowledgeBaseIds: employee.definition.knowledge_base_ids,
+      ...retrievalFormValues(
+        employee.definition.knowledge_retrieval ?? defaultKnowledgeRetrievalConfig,
+      ),
     })
   }, [editingEmployee.data, form])
 
@@ -113,7 +208,8 @@ export function EmployeeEditorPage() {
       },
       skill_ids: values.skillIds,
       tool_ids: values.toolIds,
-      knowledge_base_ids: existing?.knowledge_base_ids ?? [],
+      knowledge_base_ids: values.knowledgeBaseIds,
+      knowledge_retrieval: retrievalConfigFromForm(values),
       approval_policy: existing?.approval_policy ?? {},
       release_strategy: existing?.release_strategy ?? { mode: 'all' },
     }
@@ -273,6 +369,93 @@ export function EmployeeEditorPage() {
               })}
             />
           </Form.Item>
+          <Form.Item label="知识库" name="knowledgeBaseIds">
+            <Select
+              mode="multiple"
+              virtual={false}
+              loading={knowledgeBases.isPending}
+              placeholder="选择当前企业可用的知识库"
+              options={knowledgeBases.data?.map((knowledgeBase) => ({
+                value: knowledgeBase.id,
+                label: knowledgeBase.name,
+              }))}
+            />
+          </Form.Item>
+          <Typography.Paragraph type="secondary">
+            任务运行时会检索已绑定知识库并展示可追溯引用；发布时后端会再次校验知识库仍属于当前企业。
+          </Typography.Paragraph>
+          {selectedKnowledgeBaseIds.length > 0 && (
+            <Card size="small" className="employee-retrieval-card" title="知识检索配置">
+              <Typography.Paragraph type="secondary">
+                以下参数对齐 RAGFlow 检索能力，发布时随员工版本固化；旧版本任务仍按发布时的配置检索。
+              </Typography.Paragraph>
+              <Space wrap size="large">
+                <Form.Item label="召回条数" name="retrievalPageSize">
+                  <InputNumber min={1} max={30} />
+                </Form.Item>
+                <Form.Item label="相似度阈值" name="retrievalSimilarityThreshold">
+                  <InputNumber min={0} max={1} step={0.05} />
+                </Form.Item>
+                <Form.Item label="向量相似度权重" name="retrievalVectorWeight">
+                  <InputNumber min={0} max={1} step={0.05} />
+                </Form.Item>
+                <Form.Item label="Top K" name="retrievalTopK">
+                  <InputNumber min={1} max={4096} />
+                </Form.Item>
+              </Space>
+              <Form.Item name="retrievalKeyword" valuePropName="checked">
+                <Checkbox>关键词增强</Checkbox>
+              </Form.Item>
+              <Form.Item label="重排模型 ID" name="retrievalRerankId">
+                <Input placeholder="留空表示不启用重排；填写知识服务中配置的重排模型 ID" />
+              </Form.Item>
+              <Form.Item label="元数据过滤逻辑" name="retrievalFilterLogic">
+                <Select
+                  virtual={false}
+                  style={{ width: 160 }}
+                  options={[
+                    { value: 'and', label: '满足全部条件' },
+                    { value: 'or', label: '满足任一条件' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.List name="retrievalFilters">
+                {(fields, { add, remove }) => (
+                  <>
+                    {fields.map((field) => (
+                      <Space key={field.key} align="baseline" wrap>
+                        <Form.Item
+                          label="字段名"
+                          name={[field.name, 'name']}
+                          rules={[{ required: true, message: '请输入元数据字段名' }]}
+                        >
+                          <Input placeholder="例如 department" />
+                        </Form.Item>
+                        <Form.Item label="运算符" name={[field.name, 'comparisonOperator']}>
+                          <Select
+                            virtual={false}
+                            style={{ width: 120 }}
+                            options={comparisonOperatorOptions}
+                          />
+                        </Form.Item>
+                        <Form.Item label="比较值" name={[field.name, 'value']}>
+                          <Input placeholder="例如 HR" />
+                        </Form.Item>
+                        <Button onClick={() => remove(field.name)}>删除条件</Button>
+                      </Space>
+                    ))}
+                    <Form.Item>
+                      <Button
+                        onClick={() => add({ name: '', comparisonOperator: '=', value: '' })}
+                      >
+                        添加过滤条件
+                      </Button>
+                    </Form.Item>
+                  </>
+                )}
+              </Form.List>
+            </Card>
+          )}
           <Space>
             <Button
               type="primary"

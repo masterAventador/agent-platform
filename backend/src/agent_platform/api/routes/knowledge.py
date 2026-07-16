@@ -1,12 +1,14 @@
+import logging
 from hashlib import sha256
 from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile, status
-from pydantic import BaseModel, Field, JsonValue, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.knowledge import (
     SqlAlchemyKnowledgeBaseRepository,
 )
@@ -17,11 +19,17 @@ from agent_platform.platform.knowledge.models import (
 )
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.knowledge.retrieval import (
+    KnowledgeMetadataCondition,
+    KnowledgeRetrievalConfig,
+)
 from agent_platform.platform.tenants.permissions import TenantPermission
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/knowledge-bases", tags=["knowledge"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+MAX_DOCUMENT_BATCH_SIZE = 20
 
 
 class CreateKnowledgeBaseRequest(BaseModel):
@@ -52,7 +60,7 @@ class RetrieveRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
     ]
     limit: int = Field(default=10, ge=1, le=30)
-    metadata_condition: dict[str, JsonValue] | None = None
+    metadata_condition: KnowledgeMetadataCondition | None = None
 
 
 def _not_found() -> HTTPException:
@@ -85,6 +93,52 @@ async def _get_base(request: Request, tenant_id: UUID, knowledge_base_id: UUID) 
     return value
 
 
+async def _read_document_upload(file: UploadFile) -> bytes:
+    content = await file.read(MAX_DOCUMENT_BYTES + 1)
+    if len(content) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={"code": "document_too_large", "message": "文档不能超过 50 MB"},
+        )
+    return content
+
+
+async def _upload_document(
+    *,
+    provider: KnowledgeProvider,
+    dataset_id: str,
+    file: UploadFile,
+) -> KnowledgeDocument:
+    content = await _read_document_upload(file)
+    return await provider.upload_document(
+        dataset_id=dataset_id,
+        filename=file.filename or "document",
+        content=content,
+        content_type=file.content_type or "application/octet-stream",
+    )
+
+
+async def _delete_documents_best_effort(
+    *,
+    provider: KnowledgeProvider,
+    dataset_id: str,
+    documents: list[KnowledgeDocument],
+) -> None:
+    """失败补偿：尽力删除本次已上传的文档，补偿失败只记录日志、不掩盖原错误。"""
+    if not documents:
+        return
+    try:
+        await provider.delete_documents(
+            dataset_id=dataset_id,
+            document_ids=[document.provider_id for document in documents],
+        )
+    except Exception:
+        logger.warning(
+            "knowledge_document_compensation_failed",
+            extra={"dataset_id": dataset_id, "document_count": len(documents)},
+        )
+
+
 @router.post("", response_model=KnowledgeBaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_knowledge_base(
     payload: CreateKnowledgeBaseRequest,
@@ -113,6 +167,15 @@ async def create_knowledge_base(
         )
         try:
             await SqlAlchemyKnowledgeBaseRepository(session).add(value)
+            await emit_audit_event(
+                session,
+                tenant_id=access.tenant.id,
+                actor_user_id=user.id,
+                action="knowledge_base.created",
+                resource_type="knowledge_base",
+                resource_id=value.id,
+                metadata={"provider": value.provider},
+            )
             await session.commit()
         except IntegrityError as error:
             await session.rollback()
@@ -146,7 +209,7 @@ async def delete_knowledge_base(
     tenant_id: TenantHeader = None,
 ) -> None:
     async with request.app.state.session_factory() as session:
-        _, access = await resolve_workspace(
+        user, access = await resolve_workspace(
             request=request,
             database_session=session,
             tenant_id=tenant_id,
@@ -161,6 +224,15 @@ async def delete_knowledge_base(
         provider = _provider_for(request, value)
         await provider.delete_dataset(value.provider_id)
         await repository.delete(value)
+        await emit_audit_event(
+            session,
+            tenant_id=access.tenant.id,
+            actor_user_id=user.id,
+            action="knowledge_base.deleted",
+            resource_type="knowledge_base",
+            resource_id=value.id,
+            metadata={"provider": value.provider},
+        )
         await session.commit()
 
 
@@ -180,20 +252,140 @@ async def upload_document(
         )
     value = await _get_base(request, access.tenant.id, knowledge_base_id)
     provider = _provider_for(request, value)
-    content = await file.read(MAX_DOCUMENT_BYTES + 1)
-    if len(content) > MAX_DOCUMENT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail={"code": "document_too_large", "message": "文档不能超过 50 MB"},
-        )
-    document = await provider.upload_document(
-        dataset_id=value.provider_id,
-        filename=file.filename or "document",
-        content=content,
-        content_type=file.content_type or "application/octet-stream",
-    )
+    document = await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
     await provider.start_parsing(dataset_id=value.provider_id, document_ids=[document.provider_id])
     return document
+
+
+@router.post("/{knowledge_base_id}/documents/batch", response_model=list[KnowledgeDocument])
+async def upload_documents_batch(
+    knowledge_base_id: UUID,
+    request: Request,
+    files: Annotated[list[UploadFile], File()],
+    tenant_id: TenantHeader = None,
+) -> list[KnowledgeDocument]:
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "document_batch_empty", "message": "至少需要上传一个文档"},
+        )
+    if len(files) > MAX_DOCUMENT_BATCH_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "document_batch_too_large",
+                "message": f"单次批量上传不能超过 {MAX_DOCUMENT_BATCH_SIZE} 个文档",
+            },
+        )
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    provider = _provider_for(request, value)
+    documents: list[KnowledgeDocument] = []
+    try:
+        for file in files:
+            documents.append(
+                await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
+            )
+        await provider.start_parsing(
+            dataset_id=value.provider_id,
+            document_ids=[document.provider_id for document in documents],
+        )
+    except Exception:
+        await _delete_documents_best_effort(
+            provider=provider,
+            dataset_id=value.provider_id,
+            documents=documents,
+        )
+        raise
+    return documents
+
+
+@router.post(
+    "/{knowledge_base_id}/documents/{document_id}/retry",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def retry_document_parsing(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> None:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    await _provider_for(request, value).start_parsing(
+        dataset_id=value.provider_id,
+        document_ids=[document_id],
+    )
+
+
+@router.put("/{knowledge_base_id}/documents/{document_id}", response_model=KnowledgeDocument)
+async def replace_document(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    tenant_id: TenantHeader = None,
+) -> KnowledgeDocument:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    provider = _provider_for(request, value)
+    document = await _upload_document(provider=provider, dataset_id=value.provider_id, file=file)
+    try:
+        await provider.start_parsing(
+            dataset_id=value.provider_id, document_ids=[document.provider_id]
+        )
+        await provider.delete_documents(dataset_id=value.provider_id, document_ids=[document_id])
+    except Exception:
+        # 替换失败时补偿删除新文档，保持旧文档原状，避免残留未解析副本
+        await _delete_documents_best_effort(
+            provider=provider,
+            dataset_id=value.provider_id,
+            documents=[document],
+        )
+        raise
+    return document
+
+
+@router.delete(
+    "/{knowledge_base_id}/documents/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_document(
+    knowledge_base_id: UUID,
+    document_id: str,
+    request: Request,
+    tenant_id: TenantHeader = None,
+) -> None:
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.KNOWLEDGE_MANAGE,
+        )
+    value = await _get_base(request, access.tenant.id, knowledge_base_id)
+    await _provider_for(request, value).delete_documents(
+        dataset_id=value.provider_id,
+        document_ids=[document_id],
+    )
 
 
 @router.get("/{knowledge_base_id}/documents", response_model=list[KnowledgeDocument])
@@ -231,6 +423,8 @@ async def retrieve(
     return await _provider_for(request, value).retrieve(
         question=payload.question,
         dataset_ids=[value.provider_id],
-        page_size=payload.limit,
-        metadata_condition=payload.metadata_condition,
+        options=KnowledgeRetrievalConfig(
+            page_size=payload.limit,
+            metadata_condition=payload.metadata_condition,
+        ),
     )

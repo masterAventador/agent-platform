@@ -9,12 +9,15 @@ import docker
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
     RunEventRecord,
 )
 from agent_platform.infrastructure.database.repositories.sandbox import SandboxLeaseRecord
 from agent_platform.sandbox.controller.service import LEASE_LABEL, MANAGED_LABEL
+
+load_database_models()
 
 
 async def verify(run_id: UUID) -> None:

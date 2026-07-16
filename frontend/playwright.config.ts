@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { defineConfig } from '@playwright/test'
 
 import {
@@ -10,6 +13,9 @@ import {
 const webPort = process.env.PLAYWRIGHT_WEB_PORT ?? process.env.PLATFORM_WEB_PORT ?? '15173'
 const apiPort = process.env.PLAYWRIGHT_API_PORT ?? process.env.PLATFORM_API_PORT ?? '18000'
 const ragflowPort = process.env.PLAYWRIGHT_RAGFLOW_PORT ?? process.env.RAGFLOW_PORT ?? '29380'
+const mcpStubPort = process.env.PLAYWRIGHT_MCP_STUB_PORT ?? '18940'
+const credentialsFile = process.env.PLAYWRIGHT_CREDENTIALS_FILE
+  ?? join(tmpdir(), `agent-platform-c09-e2e-credentials-${apiPort}.json`)
 
 export default defineConfig({
   testDir: './e2e',
@@ -19,10 +25,15 @@ export default defineConfig({
     'rbac.demo-seed.spec.ts',
     'runtime.spec.ts',
     'runtime-recovery.spec.ts',
+    'knowledge-runtime.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
   fullyParallel: true,
+  // 多 worker 缩容路径存在 worker 进程退出挂起（300s 后被 force-kill，
+  // 套件状态被标 failed；单 worker 全量 2.6 分钟干净退出）。定位到具体
+  // 句柄泄漏前固定单 worker，保证套件状态位可信。
+  workers: 1,
   retries: 0,
   reporter: 'list',
   use: {
@@ -38,6 +49,12 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
+      command: `uv run uvicorn tests.fixtures.mcp_stub:app --host 127.0.0.1 --port ${mcpStubPort}`,
+      cwd: '../backend',
+      url: `http://127.0.0.1:${mcpStubPort}/health`,
+      reuseExistingServer: false,
+    },
+    {
       command: `uv run uvicorn agent_platform.api.app:app --host 127.0.0.1 --port ${apiPort}`,
       cwd: '../backend',
       env: {
@@ -49,6 +66,8 @@ export default defineConfig({
         AGENT_PLATFORM_MINIO_ENDPOINT: `127.0.0.1:${minioApiPort}`,
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
+        AGENT_PLATFORM_LOCAL_CREDENTIALS_FILE: credentialsFile,
+        AGENT_PLATFORM_MCP_CONNECTION_TIMEOUT_SECONDS: '3',
       },
       url: `http://127.0.0.1:${apiPort}/api/v1/health/live`,
       reuseExistingServer: false,
