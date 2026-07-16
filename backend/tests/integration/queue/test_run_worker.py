@@ -5678,3 +5678,71 @@ async def test_followup_derivation_skipped_when_employee_not_runnable(factory) -
     assert followup_processed is False
     runs = await _conversation_runs(factory, seed)
     assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_followup_uuid5_conflict_is_treated_as_already_derived_not_failure(
+    factory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确定性幂等键冲突发生在仓储 flush 边界：必须按已派生（WARNING）处理，不得误报派生失败。"""
+    import logging
+
+    from agent_platform.platform.conversations.entities import conversation_followup_run_id
+
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    # 模拟并发派生竞态残留：确定性 id 的派生 Run 已存在（终态，不会命中活跃 Run 守卫）
+    conflicting = Run.create(
+        tenant_id=seed["tenant_id"],
+        employee_id=seed["employee"].id,
+        employee_version=seed["version"].version,
+        created_by=seed["owner_id"],
+        input_data={"message": "并发派生已完成的一轮"},
+        conversation_id=seed["conversation"].id,
+        thread_id=seed["conversation"].thread_id,
+    )
+    from dataclasses import replace as dc_replace
+
+    conflicting = dc_replace(
+        conflicting.transition_to(RunStatus.RUNNING).transition_to(RunStatus.COMPLETED),
+        id=conversation_followup_run_id(
+            conversation_id=seed["conversation"].id,
+            trigger_message_id=seed["queued_messages"][0].id,
+        ),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(conflicting)
+        await session.commit()
+
+    queue = OneMessageQueue(_start_delivery(seed))
+    with caplog.at_level(logging.INFO, logger="agent_platform.workers.run_worker"):
+        worked = await RunWorker(
+            session_factory=factory,
+            queue=queue,
+            runtime_resolver=Resolver(ConversationOutputRuntime()),
+            consumer_name="followup-conflict-worker",
+        ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["followup-start"]
+    messages = [record.getMessage() for record in caplog.records]
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert "conversation_followup_already_derived" in warning_messages
+    assert "conversation_followup_dispatch_failed" not in messages
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=seed["tenant_id"], run_id=seed["run"].id
+        )
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(
+            seed["start_command"].id
+        )
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2

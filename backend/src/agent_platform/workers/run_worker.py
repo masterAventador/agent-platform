@@ -986,6 +986,8 @@ class RunWorker:
             if current is None:
                 return
             if self._is_terminal(current.status):
+                # 先提交释放 Run 行锁，再与其余终态分支一致地在事务外补派生
+                await session.commit()
                 await self._dispatch_conversation_followup_safely(run)
                 return
             error_code = "sandbox_lease_renewal_failed"
@@ -1472,35 +1474,38 @@ class RunWorker:
                 tenant_id=tenant_id,
                 messages=[message for _, message in pending],
             )
-            followup_run = await create_conversation_run(
-                database_session=session,
-                conversation=conversation,
-                employee_version=employee_version,
-                created_by=created_by,
-                input_data=await build_conversation_run_input(
-                    messages=messages,
-                    conversation=conversation,
-                    content=pending[-1][1].content,
-                ),
-                attachment_files=attachment_files,
-                run_id=conversation_followup_run_id(
-                    conversation_id=conversation.id,
-                    trigger_message_id=trigger_message.id,
-                ),
-            )
-            for _, message in pending:
-                await messages.bind_run(
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    message_id=message.id,
-                    run_id=followup_run.id,
-                )
-            for command in (*(command for command, _ in pending), *stale_commands):
-                await commands.mark_processed(command.id)
+            # 确定性幂等键兜底覆盖整个创建区段：仓储 add 会立即 flush，
+            # uuid5 主键冲突在 create_conversation_run 内部就会抛出，
+            # 不能只包住最终 commit，否则并发派生会被误报为派生失败。
             try:
+                followup_run = await create_conversation_run(
+                    database_session=session,
+                    conversation=conversation,
+                    employee_version=employee_version,
+                    created_by=created_by,
+                    input_data=await build_conversation_run_input(
+                        messages=messages,
+                        conversation=conversation,
+                        content=pending[-1][1].content,
+                    ),
+                    attachment_files=attachment_files,
+                    run_id=conversation_followup_run_id(
+                        conversation_id=conversation.id,
+                        trigger_message_id=trigger_message.id,
+                    ),
+                )
+                for _, message in pending:
+                    await messages.bind_run(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        message_id=message.id,
+                        run_id=followup_run.id,
+                    )
+                for command in (*(command for command, _ in pending), *stale_commands):
+                    await commands.mark_processed(command.id)
                 await session.commit()
             except IntegrityError:
-                # 确定性幂等键兜底：并发派生同一触发消息时按已派生处理
+                # 并发派生同一触发消息：按已派生处理，不算失败
                 await session.rollback()
                 logger.warning(
                     "conversation_followup_already_derived",
