@@ -78,14 +78,14 @@ profile_volumes() {
 }
 
 assert_profile_volumes_exist() {
-  if ! profile_volumes | rg --quiet '.'; then
+  if ! profile_volumes | grep -q '.'; then
     printf 'MVP test expected retained profile volumes\n' >&2
     return 1
   fi
 }
 
 assert_profile_volumes_absent() {
-  if profile_volumes | rg --quiet '.'; then
+  if profile_volumes | grep -q '.'; then
     printf 'MVP test left profile volumes behind\n' >&2
     return 1
   fi
@@ -94,7 +94,7 @@ assert_profile_volumes_absent() {
 assert_profile_containers_absent() {
   local project
   for project in "${PROFILE_NAME}-core" "${PROFILE_NAME}-litellm" "${PROFILE_NAME}-app"; do
-    if docker ps --all --quiet --filter "label=com.docker.compose.project=${project}" | rg --quiet '.'; then
+    if docker ps --all --quiet --filter "label=com.docker.compose.project=${project}" | grep -q '.'; then
       printf 'MVP test left containers behind for project: %s\n' "${project}" >&2
       return 1
     fi
@@ -159,7 +159,7 @@ cleanup() {
   if [[ "${original_exit}" -ne 0 ]]; then
     print_failure_diagnostics || true
   fi
-  if docker ps --all --quiet --filter "name=^/${PORT_HOLDER_NAME}$" | rg --quiet '.'; then
+  if docker ps --all --quiet --filter "name=^/${PORT_HOLDER_NAME}$" | grep -q '.'; then
     if ! docker rm --force "${PORT_HOLDER_NAME}" >/dev/null; then
       printf 'MVP acceptance cleanup failed to remove port holder: %s\n' "${PORT_HOLDER_NAME}" >&2
       cleanup_exit=1
@@ -449,19 +449,19 @@ docker compose -p "${PROFILE_NAME}-litellm" \
   --env-file "${RUNTIME_DIR}/litellm.env" \
   -f "${ROOT_DIR}/infra/compose/litellm.yml" \
   -f "${ROOT_DIR}/infra/litellm/compose.stub.yml" \
-  ps --status running --services | rg --quiet '^openai-stub$'
+  ps --status running --services | grep -q '^openai-stub$'
 
 docker compose -p "${PROFILE_NAME}-app" \
   --env-file "${RUNTIME_DIR}/platform.env" \
   -f "${ROOT_DIR}/infra/compose/platform.yml" \
-  --profile worker ps --status running --services | rg --quiet '^sandbox-controller$'
+  --profile worker ps --status running --services | grep -q '^sandbox-controller$'
 docker compose -p "${PROFILE_NAME}-app" \
   --env-file "${RUNTIME_DIR}/platform.env" \
   -f "${ROOT_DIR}/infra/compose/platform.yml" \
-  --profile worker ps --status running --services | rg --quiet '^sandbox-janitor$'
+  --profile worker ps --status running --services | grep -q '^sandbox-janitor$'
 
 if docker ps --filter "label=com.docker.compose.project=${PROFILE_NAME}-core" \
-  --filter "label=com.docker.compose.service=ragflow" --quiet | rg --quiet '.'; then
+  --filter "label=com.docker.compose.service=ragflow" --quiet | grep -q '.'; then
   printf 'RAGFlow must not be part of the MVP profile\n' >&2
   exit 1
 fi
@@ -508,7 +508,7 @@ if bash "${MVP_SCRIPT}" start >"${FAILURE_LOG}" 2>&1; then
   exit 1
 fi
 docker rm --force "${PORT_HOLDER_NAME}" >/dev/null
-if ! rg --quiet 'failed-start cleanup completed' "${FAILURE_LOG}"; then
+if ! grep -q 'failed-start cleanup completed' "${FAILURE_LOG}"; then
   printf 'MVP failed restart did not report cleanup completion\n' >&2
   exit 1
 fi
@@ -537,7 +537,7 @@ if bash "${MVP_SCRIPT}" start >"${SECOND_START_LOG}" 2>&1; then
   wait "${FIRST_START_PID}"
   exit 1
 fi
-if ! rg --quiet 'operation already in progress' "${SECOND_START_LOG}"; then
+if ! grep -q 'operation already in progress' "${SECOND_START_LOG}"; then
   printf 'concurrent start rejection did not report the profile lock\n' >&2
   wait "${FIRST_START_PID}"
   exit 1

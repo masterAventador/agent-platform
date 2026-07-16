@@ -32,7 +32,7 @@ start() {
     printf 'platform env file not found: %s\n' "${ENV_FILE}" >&2
     return 2
   fi
-  if rg --quiet '^\s*[A-Z0-9_]+\s*=\s*CHANGE_ME' "${ENV_FILE}"; then
+  if grep -Eq '^[[:space:]]*[A-Z0-9_]+[[:space:]]*=[[:space:]]*CHANGE_ME' "${ENV_FILE}"; then
     printf 'replace every CHANGE_ME value in platform env file: %s\n' "${ENV_FILE}" >&2
     return 2
   fi
@@ -42,7 +42,7 @@ start() {
 
 health() {
   bash "${ROOT_DIR}/infra/platform/health.sh"
-  compose ps --status running --services dispatcher | rg --quiet '^dispatcher$'
+  compose ps --status running --services dispatcher | grep -q '^dispatcher$'
   compose exec --no-TTY dispatcher test -f /tmp/agent-platform-dispatcher-ready
   printf 'dispatcher healthy: ready file present\n'
 }
