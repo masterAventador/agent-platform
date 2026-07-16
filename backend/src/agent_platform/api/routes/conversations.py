@@ -1,17 +1,19 @@
-from collections.abc import Sequence
 from dataclasses import replace
 from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.api.routes.runs import RunResponse
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyFileRepository,
-    SqlAlchemyTaskAttachmentRepository,
+)
+from agent_platform.infrastructure.database.repositories.conversation_dispatch import (
+    build_conversation_run_input,
+    create_conversation_run,
 )
 from agent_platform.infrastructure.database.repositories.conversations import (
     SqlAlchemyConversationMessageRepository,
@@ -23,9 +25,8 @@ from agent_platform.infrastructure.database.repositories.employees import (
 )
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
-    SqlAlchemyRunRepository,
 )
-from agent_platform.platform.artifacts.entities import File, TaskAttachment
+from agent_platform.platform.artifacts.entities import File
 from agent_platform.platform.conversations.entities import (
     MAX_CONVERSATION_MESSAGE_CONTENT_CHARS,
     Conversation,
@@ -45,9 +46,6 @@ from agent_platform.platform.tenants.permissions import TenantPermission, role_h
 
 router = APIRouter(prefix="/api/v1", tags=["conversations"])
 TenantHeader = Annotated[UUID | None, Header(alias="X-Tenant-ID")]
-
-CONTEXT_MAX_MESSAGES = 8
-CONTEXT_MAX_CHARS = MAX_CONVERSATION_MESSAGE_CONTENT_CHARS
 
 
 class CreateConversationRequest(BaseModel):
@@ -214,79 +212,6 @@ async def _validate_attachments(
     return files
 
 
-def _context_payload(messages: Sequence[ConversationMessage]) -> dict[str, JsonValue]:
-    return {
-        "messages": [
-            {
-                "role": message.role.value,
-                "content": message.content,
-                "attachment_ids": [str(value) for value in message.attachment_ids],
-            }
-            for message in messages
-        ],
-        "max_messages": CONTEXT_MAX_MESSAGES,
-        "max_chars": CONTEXT_MAX_CHARS,
-    }
-
-
-async def _build_run_input(
-    *,
-    messages: SqlAlchemyConversationMessageRepository,
-    conversation: Conversation,
-    content: str | None,
-    retry_of_run_id: UUID | None = None,
-) -> dict[str, JsonValue]:
-    context = await messages.list_recent_context(
-        tenant_id=conversation.tenant_id,
-        conversation_id=conversation.id,
-        max_messages=CONTEXT_MAX_MESSAGES,
-        max_chars=CONTEXT_MAX_CHARS,
-    )
-    payload: dict[str, JsonValue] = {
-        "conversation_id": str(conversation.id),
-        "message": content or (context[-1].content if context else ""),
-        "conversation_context": _context_payload(context),
-    }
-    if retry_of_run_id is not None:
-        payload["retry_of_run_id"] = str(retry_of_run_id)
-    return payload
-
-
-async def _create_run_for_conversation(
-    *,
-    database_session: AsyncSession,
-    conversation: Conversation,
-    employee_version: int,
-    created_by: UUID,
-    input_data: dict[str, JsonValue],
-    attachment_files: list[File],
-) -> Run:
-    run = Run.create(
-        tenant_id=conversation.tenant_id,
-        employee_id=conversation.employee_id,
-        employee_version=employee_version,
-        created_by=created_by,
-        input_data=input_data,
-        conversation_id=conversation.id,
-        thread_id=conversation.thread_id,
-    )
-    await SqlAlchemyRunRepository(database_session).add(run)
-    attachments = SqlAlchemyTaskAttachmentRepository(database_session)
-    for file in attachment_files:
-        await attachments.add(
-            TaskAttachment.create(
-                tenant_id=run.tenant_id,
-                run_id=run.id,
-                file_id=file.id,
-                workspace_path=f"inputs/{file.id}/{file.name}",
-            )
-        )
-    await SqlAlchemyRunCommandRepository(database_session).add(
-        RunCommand.create(run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START)
-    )
-    return run
-
-
 @router.post(
     "/conversations",
     response_model=ConversationResponse,
@@ -400,8 +325,10 @@ async def append_message(
         )
         can_manage = _can_manage_runs(access.role)
         conversations = SqlAlchemyConversationRepository(database_session)
+        # 行锁序列化本次追加决策与 Worker 终态结算的自动续跑派生：
+        # 要么本请求先提交（排队消息对派生可见），要么派生先提交（本请求看到新活跃 Run）。
         conversation = _ensure_conversation_access(
-            conversation=await conversations.get(
+            conversation=await conversations.get_for_update(
                 tenant_id=access.tenant.id,
                 conversation_id=conversation_id,
             ),
@@ -464,14 +391,28 @@ async def append_message(
                 run_action = "message_submitted"
             elif active is not None:
                 run = active
+                # 持久化自动续跑意图：不进入执行队列（dispatched_at 立即固定），
+                # 由 Worker 在当前轮次终态结算时消费并派生下一轮 Run。
+                await SqlAlchemyRunCommandRepository(database_session).add(
+                    RunCommand.create(
+                        run_id=active.id,
+                        tenant_id=active.tenant_id,
+                        action=RunCommandAction.FOLLOWUP,
+                        payload={
+                            "message_id": str(message.id),
+                            "requested_by": str(user.id),
+                        },
+                        dispatched_at=message.created_at,
+                    )
+                )
                 run_action = "queued_after_current"
             else:
-                run = await _create_run_for_conversation(
+                run = await create_conversation_run(
                     database_session=database_session,
                     conversation=conversation,
                     employee_version=employee_version,
                     created_by=user.id,
-                    input_data=await _build_run_input(
+                    input_data=await build_conversation_run_input(
                         messages=messages,
                         conversation=conversation,
                         content=message.content,
@@ -539,12 +480,12 @@ async def retry_conversation(
                 detail={"code": "retry_unavailable", "message": "没有可重试的失败任务"},
             )
         messages = SqlAlchemyConversationMessageRepository(database_session)
-        run = await _create_run_for_conversation(
+        run = await create_conversation_run(
             database_session=database_session,
             conversation=conversation,
             employee_version=employee_version,
             created_by=user.id,
-            input_data=await _build_run_input(
+            input_data=await build_conversation_run_input(
                 messages=messages,
                 conversation=conversation,
                 content=None,

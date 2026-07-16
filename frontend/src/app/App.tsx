@@ -384,7 +384,10 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 permission={workspacePermissions.runsExecute}
                 title="无权访问会话中心"
               >
-                <ConversationDetailPage />
+                <ConversationDetailPage
+                  currentUserId={user.id}
+                  canManageRuns={capabilities.canManageRuns}
+                />
               </WorkspaceCapabilityGate>
             )}
           />

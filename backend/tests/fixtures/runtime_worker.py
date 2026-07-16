@@ -91,6 +91,49 @@ class ToolBindingRuntimeE2EChatModel(BaseChatModel):
         return "runtime-e2e-conditional-model"
 
 
+class ToolBindingSlowCompletingChatModel(BaseChatModel):
+    """Test-only model that delays completion so E2E can append during the active run."""
+
+    delay_seconds: float = 8.0
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[Any, AIMessage]:
+        del tools, tool_choice, kwargs
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        raise AssertionError("slow completing runtime E2E model must use async invocation")
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del messages, stop, run_manager, kwargs
+        await asyncio.sleep(self.delay_seconds)
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=RUNTIME_E2E_OUTPUT))]
+        )
+
+    @property
+    def _llm_type(self) -> str:
+        return "runtime-e2e-slow-completing-model"
+
+
 class ToolBindingCancellableSlowChatModel(BaseChatModel):
     """A test-only model whose public async invocation blocks until cancelled."""
 
@@ -199,6 +242,7 @@ async def _main() -> None:
             "general-purpose": model,
             "structured-output": structured_model,
             "slow-cancel": slow_model,
+            "slow-complete": ToolBindingSlowCompletingChatModel(),
         },
     )
     await run_worker_service(

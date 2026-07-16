@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useWorkspaceStore } from '../../workspaces/store'
 import {
   useAppendConversationMessage,
+  useCancelConversationRun,
   useConversation,
   useRetryConversation,
 } from '../api/queries'
@@ -15,6 +16,7 @@ import { ConversationDetailPage } from './ConversationDetailPage'
 
 vi.mock('../api/queries', () => ({
   useAppendConversationMessage: vi.fn(),
+  useCancelConversationRun: vi.fn(),
   useConversation: vi.fn(),
   useRetryConversation: vi.fn(),
 }))
@@ -54,6 +56,7 @@ const conversation = {
       tenant_id: 'tenant-1',
       employee_id: 'employee-1',
       employee_version: 1,
+      created_by: 'user-1',
       thread_id: 'conversation:conversation-1',
       conversation_id: 'conversation-1',
       input: { message: '请分析竞品' },
@@ -64,13 +67,38 @@ const conversation = {
   ],
 }
 
-function renderPage() {
+const activeRun = {
+  id: 'run-2',
+  tenant_id: 'tenant-1',
+  employee_id: 'employee-1',
+  employee_version: 1,
+  created_by: 'user-1',
+  thread_id: 'conversation:conversation-1',
+  conversation_id: 'conversation-1',
+  input: { message: '继续补充' },
+  status: 'running',
+  error_code: null,
+  error_message: null,
+}
+
+function renderPage({
+  currentUserId = 'user-1',
+  canManageRuns = false,
+}: { currentUserId?: string; canManageRuns?: boolean } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={['/conversations/conversation-1']}>
         <Routes>
-          <Route path="/conversations/:conversationId" element={<ConversationDetailPage />} />
+          <Route
+            path="/conversations/:conversationId"
+            element={(
+              <ConversationDetailPage
+                currentUserId={currentUserId}
+                canManageRuns={canManageRuns}
+              />
+            )}
+          />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -89,6 +117,11 @@ describe('ConversationDetailPage', () => {
     vi.mocked(useRetryConversation).mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
+    } as never)
+    vi.mocked(useCancelConversationRun).mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+      isSuccess: false,
     } as never)
   })
 
@@ -127,5 +160,59 @@ describe('ConversationDetailPage', () => {
       attachmentIds: [],
       dispatch: true,
     })
+  })
+
+  it('links every related run to its run detail page', () => {
+    renderPage()
+
+    const link = screen.getByRole('link', { name: '任务详情' })
+    expect(link).toHaveAttribute('href', '/runs/run-1')
+  })
+
+  it('lets the run creator cancel an active related run from the conversation', async () => {
+    const cancel = vi.fn()
+    vi.mocked(useCancelConversationRun).mockReturnValue({
+      mutate: cancel,
+      isPending: false,
+      isSuccess: false,
+    } as never)
+    vi.mocked(useConversation).mockReturnValue({
+      data: { ...conversation, runs: [activeRun] },
+      isPending: false,
+    } as never)
+    const user = userEvent.setup()
+
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: '取消任务' }))
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides the cancel action from users who are not the run creator', () => {
+    vi.mocked(useConversation).mockReturnValue({
+      data: { ...conversation, runs: [{ ...activeRun, created_by: 'someone-else' }] },
+      isPending: false,
+    } as never)
+
+    renderPage()
+
+    expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
+  })
+
+  it('shows the cancel action to run managers even for runs created by others', () => {
+    vi.mocked(useConversation).mockReturnValue({
+      data: { ...conversation, runs: [{ ...activeRun, created_by: 'someone-else' }] },
+      isPending: false,
+    } as never)
+
+    renderPage({ canManageRuns: true })
+
+    expect(screen.getByRole('button', { name: '取消任务' })).toBeInTheDocument()
+  })
+
+  it('does not offer cancel for terminal runs', () => {
+    renderPage()
+
+    expect(screen.queryByRole('button', { name: '取消任务' })).not.toBeInTheDocument()
   })
 })

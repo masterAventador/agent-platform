@@ -37,13 +37,16 @@ return stream_id
 """
 
 
+RunQueueAction = Literal["start", "resume", "cancel", "message", "approve", "reject"]
+
+
 class RunQueueMessage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     command_id: UUID
     run_id: UUID
     tenant_id: UUID
-    action: Literal["start", "resume", "cancel", "message", "approve", "reject"]
+    action: RunQueueAction
     payload: dict[str, JsonValue] = Field(default_factory=dict)
 
 

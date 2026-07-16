@@ -17,6 +17,7 @@ export interface Run {
   tenant_id: string
   employee_id: string
   employee_version: number
+  created_by: string
   thread_id: string
   input: Record<string, unknown>
   output_schema?: Record<string, unknown> | null

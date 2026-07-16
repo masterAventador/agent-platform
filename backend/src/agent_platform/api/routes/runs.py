@@ -64,6 +64,7 @@ class RunResponse(BaseModel):
     tenant_id: UUID
     employee_id: UUID
     employee_version: int
+    created_by: UUID
     thread_id: str
     input: dict[str, JsonValue]
     status: str
@@ -84,6 +85,7 @@ class RunResponse(BaseModel):
             tenant_id=run.tenant_id,
             employee_id=run.employee_id,
             employee_version=run.employee_version,
+            created_by=run.created_by,
             thread_id=run.thread_id,
             input=run.input_data,
             status=run.status.value,
