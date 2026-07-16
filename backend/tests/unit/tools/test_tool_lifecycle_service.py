@@ -606,3 +606,44 @@ async def test_required_available_tool_rejects_upstream_missing() -> None:
 
     with pytest.raises(ToolNotFound):
         await service.required_available_tool(tenant_id=TENANT, tool_id=tool.id)
+
+
+@pytest.mark.asyncio
+async def test_sync_never_overwrites_manual_tools_with_upstream_definition() -> None:
+    """同名 MANUAL 工具是管理员手写资产，上游目录不得覆盖其定义。"""
+    repository = InMemoryToolRepository()
+    probe = StaticProbe(
+        tools=[
+            DiscoveredTool(
+                name="search",
+                description="upstream description",
+                input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            )
+        ]
+    )
+    service = _service(repository, probe=probe)
+    server = await _server(service)
+    manual = await _tool(
+        service,
+        server,
+        name="search",
+        description="管理员手写说明",
+        input_schema={"type": "object"},
+        risk_level=ToolRiskLevel.WRITE,
+    )
+
+    report = await service.sync_server(tenant_id=TENANT, server_id=server.id)
+
+    assert report.added == []
+    assert report.updated == []
+    assert report.removed == []
+    assert report.unchanged == 1
+
+    stored = await service.get_tool(tenant_id=TENANT, tool_id=manual.id)
+    assert stored.origin is ToolOrigin.MANUAL
+    assert stored.description == "管理员手写说明"
+    assert stored.input_schema == {"type": "object"}
+    assert stored.risk_level is ToolRiskLevel.WRITE
+    assert stored.version == 1
+    versions = await service.list_tool_versions(tenant_id=TENANT, tool_id=manual.id)
+    assert [item.version for item in versions] == [1]

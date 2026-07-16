@@ -290,8 +290,13 @@
 - **运行语义修正**：员工绑定的工具被禁用/上游移除时不再让整个任务在准备阶段失败，改为组装后在调用点由 Gateway 拒绝并写 `tool.rejected` 审计（已删除引用仍 fail-closed）；
 - **验收**：`tests/fixtures/mcp_stub.py`（官方 FastMCP 协议栈 + 故障注入控制端点）支撑三层真实边界验收——API 级恶意/超慢/畸形 Server 与凭据脱敏（`tests/integration/mcp/test_lifecycle_api_with_real_stub.py`）、Playwright 真实用户路径（`e2e/tools.spec.ts`：注册→连接测试→同步→差异→凭据配置→脱敏断言）、真实 Worker 端到端（`e2e/runtime.spec.ts`：员工任务经 Tool Gateway 调用 stub 工具成功，禁用后调用被拒且审计与界面记录可见）；
 - **待集成**：审批策略与独立审批中心的协议对接（C13）；生产级凭据服务 Vault/KMS 与轮换（C18，当前本地凭据服务仅限开发/演示）；stdio 真实拉起进程的端到端验收依赖部署侧允许清单配置，当前以单元/契约层验证 allowlist 语义。
+- **已知取舍 / follow-up**（2026-07-16 质量复审后记录）：
+  - 员工编辑器的可绑定校验（`are_bindable`）尚未把 `upstream_missing` 计入不可绑定条件——上游已移除的工具仍出现在绑定候选（运行时调用点会拒绝，安全不受影响），属于 UX 不一致，待后续对齐；
+  - `tool_versions` 随显式更新/回滚/同步变更增长且无裁剪策略；增长由人工操作驱动、速率可控，暂不设上限，量级出现问题时再补保留策略；
+  - 凭据配置为“先写本地凭据文件、后提交 DB `secret_reference`”两步操作：DB 提交失败会留下孤立的凭据文件条目（不泄露、不影响正确性，重新配置即覆盖），生产凭据服务（C18）引入事务性/对账机制时一并解决；
+  - 同步遇到与 MANUAL 工具同名的上游工具时静默跳过（不覆盖管理员定义、计入未变化），暂未在同步报告中单列“冲突”类别，需要更强可观测性时再扩展报告结构。
 
-验证命令（本任务实际执行）：`uv run pytest tests/unit tests/contract tests/integration/tools tests/integration/mcp tests/integration/database -q`、`uv run ruff check . && uv run mypy`、`pnpm exec vitest run`、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 `pnpm exec playwright test e2e/tools.spec.ts`（PLAYWRIGHT_COMPOSE_PROJECT_NAME + 随机端口）、`pnpm e2e:runtime`。
+验证命令（本任务实际执行）：`uv run pytest tests/unit tests/contract tests/integration/tools tests/integration/mcp tests/integration/database -q`、`TEST_DATABASE_URL=<真实PG> uv run pytest tests/integration/database/test_migrations.py -q`（含既有 tool 行回填的真实 PostgreSQL 迁移回归）、`uv run ruff check . && uv run mypy`、`pnpm exec vitest run`、`pnpm lint && pnpm typecheck && pnpm build`、隔离栈 `pnpm exec playwright test e2e/tools.spec.ts`（PLAYWRIGHT_COMPOSE_PROJECT_NAME + 随机端口）、`pnpm e2e:runtime`。
 
 ### C10 平台级长期记忆
 

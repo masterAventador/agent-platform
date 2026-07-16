@@ -343,6 +343,11 @@ class ToolRegistryService:
                 await self._repository.add_tool_version(tool.snapshot(change_source="sync"))
                 added.append(name)
                 continue
+            if current.origin is ToolOrigin.MANUAL:
+                # 同名 MANUAL 工具是管理员手写资产：上游目录不覆盖其定义，
+                # 也不参与 upstream_missing 标记，冲突静默跳过并计入未变化。
+                unchanged += 1
+                continue
             definition_changed = (
                 current.description != upstream.description
                 or current.input_schema != upstream.input_schema
