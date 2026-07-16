@@ -255,7 +255,7 @@ def _demo_records(
         "input_schema": {"type": "object"},
         "output_schema": {"type": "object"},
         "capabilities": {
-            "conversation": False,
+            "conversation": True,
             "scheduled_tasks": False,
             "file_upload": True,
         },
@@ -350,7 +350,7 @@ def _demo_records(
                 input_schema={"type": "object"},
                 output_schema={"type": "object"},
                 capabilities={
-                    "conversation": False,
+                    "conversation": True,
                     "scheduled_tasks": False,
                     "file_upload": True,
                 },

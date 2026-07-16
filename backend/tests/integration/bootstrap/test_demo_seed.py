@@ -201,6 +201,8 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert tenant is not None and tenant.name == DEMO_WORKSPACE_NAME
         assert employee is not None and employee.published_version == 1
         assert employee.capabilities["file_upload"] is True
+        # C05 多轮会话交付后，演示员工必须开箱支持会话，用户验收无需手工开能力
+        assert employee.capabilities["conversation"] is True
         assert "Seed 本身不调用模型" in employee.role_description
         assert "手动发起任务" in employee.role_description
         assert "可能产生上游费用" in employee.role_description
