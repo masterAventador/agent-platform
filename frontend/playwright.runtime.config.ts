@@ -16,9 +16,11 @@ const sandboxImage = process.env.SANDBOX_CONTROLLER_IMAGE
 const runtimeFrontendPort = process.env.PLAYWRIGHT_RUNTIME_FRONTEND_PORT ?? '15174'
 const runtimeApiPort = process.env.PLAYWRIGHT_RUNTIME_API_PORT ?? '18001'
 const runtimeSandboxPort = process.env.PLAYWRIGHT_RUNTIME_SANDBOX_PORT ?? '18090'
+const runtimeRagflowPort = process.env.PLAYWRIGHT_RUNTIME_RAGFLOW_PORT ?? '29381'
 const runtimeBaseUrl = process.env.PLAYWRIGHT_RUNTIME_BASE_URL ?? `http://127.0.0.1:${runtimeFrontendPort}`
 const runtimeApiUrl = `http://127.0.0.1:${runtimeApiPort}`
 const runtimeSandboxUrl = `http://127.0.0.1:${runtimeSandboxPort}`
+const runtimeRagflowUrl = `http://127.0.0.1:${runtimeRagflowPort}`
 const runtimeMinioEndpoint = `127.0.0.1:${process.env.PLAYWRIGHT_MINIO_API_PORT ?? process.env.MINIO_API_PORT ?? '9000'}`
 const backendEnvironment = {
   AGENT_PLATFORM_DATABASE_URL: runtimeDatabaseUrl,
@@ -26,11 +28,13 @@ const backendEnvironment = {
   AGENT_PLATFORM_RUN_QUEUE_STREAM_NAME: runtimeQueueStream,
   AGENT_PLATFORM_RUN_QUEUE_GROUP_NAME: runtimeQueueGroup,
   AGENT_PLATFORM_LLM_GATEWAY_ALLOWED_ALIASES: '["general-purpose","slow-cancel","structured-output"]',
+  AGENT_PLATFORM_RAGFLOW_URL: runtimeRagflowUrl,
+  AGENT_PLATFORM_RAGFLOW_API_KEY: 'ragflow-runtime-e2e-key',
 }
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'runtime.spec.ts',
+  testMatch: ['runtime.spec.ts', 'knowledge-runtime.spec.ts'],
   globalSetup: './e2e/runtime-global-setup.ts',
   globalTeardown: './e2e/runtime-global-teardown.ts',
   fullyParallel: false,
@@ -45,6 +49,13 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: [
+    {
+      command: `uv run uvicorn tests.fixtures.ragflow_stub:app --host 127.0.0.1 --port ${runtimeRagflowPort}`,
+      cwd: `${repositoryRoot}/backend`,
+      url: `${runtimeRagflowUrl}/health`,
+      reuseExistingServer: false,
+      timeout: 120_000,
+    },
     {
       command: `uv run uvicorn agent_platform.sandbox.controller.main:app --host 127.0.0.1 --port ${runtimeSandboxPort}`,
       cwd: `${repositoryRoot}/backend`,

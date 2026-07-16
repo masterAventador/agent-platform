@@ -27,25 +27,30 @@ prepare() {
 
 compose() {
   prepare
-  ES_PORT=19200 \
-  EXPOSE_MYSQL_PORT=13306 \
-  MINIO_PORT=19000 \
-  MINIO_CONSOLE_PORT=19001 \
-  REDIS_PORT=16379 \
-  SVR_WEB_HTTP_PORT=18080 \
-  SVR_WEB_HTTPS_PORT=18443 \
-  SVR_HTTP_PORT=19380 \
-  ADMIN_SVR_HTTP_PORT=19381 \
-  SVR_MCP_PORT=19382 \
-  GO_ADMIN_PORT=19383 \
-  GO_HTTP_PORT=19384 \
+  # 默认端口与 README 基线一致；宿主机端口被占用（如常驻开发栈、SSH 隧道）时
+  # 可通过 RAGFLOW_*_PORT 环境变量覆盖，不修改官方 Compose。
+  # tei-cpu 提供默认本地 embedding（TEI 镜像预置模型）；官方默认的
+  # Qwen3-Embedding-0.6B 与 bge-m3 在本机 CPU warmup 均可能超出可用内存被 OOM，
+  # 默认用最小的 bge-small-en-v1.5，可用 RAGFLOW_TEI_MODEL 覆盖。
+  ES_PORT="${RAGFLOW_ES_PORT:-19200}" \
+  EXPOSE_MYSQL_PORT="${RAGFLOW_MYSQL_PORT:-13306}" \
+  MINIO_PORT="${RAGFLOW_MINIO_PORT:-19000}" \
+  MINIO_CONSOLE_PORT="${RAGFLOW_MINIO_CONSOLE_PORT:-19001}" \
+  REDIS_PORT="${RAGFLOW_REDIS_PORT:-16379}" \
+  SVR_WEB_HTTP_PORT="${RAGFLOW_WEB_HTTP_PORT:-18080}" \
+  SVR_WEB_HTTPS_PORT="${RAGFLOW_WEB_HTTPS_PORT:-18443}" \
+  SVR_HTTP_PORT="${RAGFLOW_API_PORT:-19380}" \
+  ADMIN_SVR_HTTP_PORT="${RAGFLOW_ADMIN_PORT:-19381}" \
+  SVR_MCP_PORT="${RAGFLOW_MCP_PORT:-19382}" \
+  GO_ADMIN_PORT="${RAGFLOW_GO_ADMIN_PORT:-19383}" \
+  GO_HTTP_PORT="${RAGFLOW_GO_HTTP_PORT:-19384}" \
+  COMPOSE_PROFILES="${RAGFLOW_COMPOSE_PROFILES:-elasticsearch,cpu,tei-cpu}" \
+  TEI_MODEL="${RAGFLOW_TEI_MODEL:-BAAI/bge-small-en-v1.5}" \
     docker compose \
     --project-name agent-platform-ragflow \
     --project-directory "${RUNTIME_ROOT}/docker" \
     -f "${RUNTIME_ROOT}/docker/docker-compose.yml" \
-    -f "${SCRIPT_DIR}/compose.override.yml" \
-    --profile cpu \
-    --profile elasticsearch "$@"
+    -f "${SCRIPT_DIR}/compose.override.yml" "$@"
 }
 
 pull_image() {

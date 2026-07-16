@@ -640,7 +640,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0024"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0027"
 
 
 def test_model_gateway_alias_migration_rewrites_drafts_and_published_versions(

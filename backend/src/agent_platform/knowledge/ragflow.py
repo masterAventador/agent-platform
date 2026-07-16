@@ -25,6 +25,7 @@ from agent_platform.platform.knowledge.models import (
     KnowledgeDocument,
     KnowledgeSearchResult,
 )
+from agent_platform.platform.knowledge.retrieval import KnowledgeRetrievalConfig
 
 
 class _RagFlowEnvelope(BaseModel):
@@ -60,11 +61,14 @@ class _RagFlowDocumentListPayload(BaseModel):
 
 
 class _RagFlowCitationPayload(BaseModel):
+    """真实 v0.25.6 检索响应经官方 key_mapping 后的 chunk 形态：
+    文档名在 document_keyword，document_metadata 仅在请求 include_metadata 时注入。"""
+
     model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
 
     id: str = Field(min_length=1)
     document_id: str = Field(min_length=1)
-    document_name: str = Field(min_length=1)
+    document_keyword: str = Field(min_length=1)
     dataset_id: str = Field(min_length=1)
     content: str
     similarity: FiniteFloat
@@ -200,17 +204,24 @@ class RagFlowClient:
         *,
         question: str,
         dataset_ids: list[str],
-        page_size: int = 10,
-        metadata_condition: dict[str, JsonValue] | None = None,
+        options: KnowledgeRetrievalConfig | None = None,
     ) -> KnowledgeSearchResult:
+        resolved = options or KnowledgeRetrievalConfig()
         payload: dict[str, Any] = {
             "question": question,
             "dataset_ids": dataset_ids,
             "page": 1,
-            "page_size": page_size,
+            "page_size": resolved.page_size,
+            "similarity_threshold": resolved.similarity_threshold,
+            "vector_similarity_weight": resolved.vector_similarity_weight,
+            "top_k": resolved.top_k,
+            "keyword": resolved.keyword,
+            "include_metadata": True,
         }
-        if metadata_condition is not None:
-            payload["metadata_condition"] = metadata_condition
+        if resolved.rerank_id is not None:
+            payload["rerank_id"] = resolved.rerank_id
+        if resolved.metadata_condition is not None:
+            payload["metadata_condition"] = resolved.metadata_condition.model_dump(mode="json")
         data = await self._request(
             "POST",
             "/api/v1/retrieval",
@@ -310,7 +321,7 @@ class RagFlowClient:
         return KnowledgeCitation(
             chunk_id=data.id,
             document_id=data.document_id,
-            document_name=data.document_name,
+            document_name=data.document_keyword,
             dataset_id=data.dataset_id,
             content=data.content,
             score=data.similarity,

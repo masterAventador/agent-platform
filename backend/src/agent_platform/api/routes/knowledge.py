@@ -4,7 +4,7 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile, status
-from pydantic import BaseModel, Field, JsonValue, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
@@ -19,6 +19,10 @@ from agent_platform.platform.knowledge.models import (
 )
 from agent_platform.platform.knowledge.ports import KnowledgeProvider
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.knowledge.retrieval import (
+    KnowledgeMetadataCondition,
+    KnowledgeRetrievalConfig,
+)
 from agent_platform.platform.tenants.permissions import TenantPermission
 
 logger = logging.getLogger(__name__)
@@ -56,7 +60,7 @@ class RetrieveRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
     ]
     limit: int = Field(default=10, ge=1, le=30)
-    metadata_condition: dict[str, JsonValue] | None = None
+    metadata_condition: KnowledgeMetadataCondition | None = None
 
 
 def _not_found() -> HTTPException:
@@ -419,6 +423,8 @@ async def retrieve(
     return await _provider_for(request, value).retrieve(
         question=payload.question,
         dataset_ids=[value.provider_id],
-        page_size=payload.limit,
-        metadata_condition=payload.metadata_condition,
+        options=KnowledgeRetrievalConfig(
+            page_size=payload.limit,
+            metadata_condition=payload.metadata_condition,
+        ),
     )

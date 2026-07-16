@@ -54,10 +54,27 @@ const employee: Employee = {
     skill_ids: [],
     tool_ids: [],
     knowledge_base_ids: [],
+    knowledge_retrieval: {
+      page_size: 5,
+      similarity_threshold: 0.2,
+      vector_similarity_weight: 0.3,
+      top_k: 1024,
+      keyword: false,
+      rerank_id: null,
+      metadata_condition: null,
+    },
     approval_policy: {},
     release_strategy: { mode: 'all' },
   },
 }
+
+const knowledgeBaseOptions = [{
+  id: 'knowledge-1',
+  tenant_id: 'tenant-1',
+  name: '员工制度',
+  description: 'HR policy',
+  provider: 'ragflow',
+}]
 
 function renderEditor(path = '/employees/new') {
   return render(
@@ -207,6 +224,129 @@ describe('EmployeeEditorPage configuration availability', () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
     expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
       knowledge_base_ids: ['knowledge-1'],
+    }))
+  })
+
+  it('submits the default knowledge retrieval config alongside selected knowledge bases', async () => {
+    const user = userEvent.setup()
+    vi.mocked(useKnowledgeBases).mockReturnValue({
+      data: knowledgeBaseOptions,
+      isPending: false,
+    } as never)
+    renderEditor()
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '制度问答专员')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '回答制度问题')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '引用知识库回答')
+    await user.click(screen.getByRole('combobox', { name: '知识库' }))
+    await user.click(screen.getByRole('option', { name: '员工制度' }))
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      knowledge_base_ids: ['knowledge-1'],
+      knowledge_retrieval: {
+        page_size: 5,
+        similarity_threshold: 0.2,
+        vector_similarity_weight: 0.3,
+        top_k: 1024,
+        keyword: false,
+        rerank_id: null,
+        metadata_condition: null,
+      },
+    }))
+  })
+
+  it('submits configured retrieval options, rerank and metadata filters', async () => {
+    const user = userEvent.setup()
+    vi.mocked(useKnowledgeBases).mockReturnValue({
+      data: knowledgeBaseOptions,
+      isPending: false,
+    } as never)
+    renderEditor()
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '精调检索专员')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '回答制度问题')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '引用知识库回答')
+    await user.click(screen.getByRole('combobox', { name: '知识库' }))
+    await user.click(screen.getByRole('option', { name: '员工制度' }))
+
+    const pageSize = screen.getByRole('spinbutton', { name: '召回条数' })
+    await user.clear(pageSize)
+    await user.type(pageSize, '8')
+    const topK = screen.getByRole('spinbutton', { name: 'Top K' })
+    await user.clear(topK)
+    await user.type(topK, '256')
+    await user.click(screen.getByRole('checkbox', { name: '关键词增强' }))
+    await user.type(
+      screen.getByRole('textbox', { name: '重排模型 ID' }),
+      'BAAI/bge-reranker-v2-m3',
+    )
+    await user.click(screen.getByRole('button', { name: '添加过滤条件' }))
+    await user.type(screen.getByRole('textbox', { name: '字段名' }), 'department')
+    await user.type(screen.getByRole('textbox', { name: '比较值' }), 'HR')
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      knowledge_retrieval: {
+        page_size: 8,
+        similarity_threshold: 0.2,
+        vector_similarity_weight: 0.3,
+        top_k: 256,
+        keyword: true,
+        rerank_id: 'BAAI/bge-reranker-v2-m3',
+        metadata_condition: {
+          logic: 'and',
+          conditions: [
+            { name: 'department', comparison_operator: '=', value: 'HR' },
+          ],
+        },
+      },
+    }))
+  })
+
+  it('loads the persisted retrieval config when editing an employee', async () => {
+    const user = userEvent.setup()
+    const configured: Employee = {
+      ...employee,
+      definition: {
+        ...employee.definition,
+        knowledge_base_ids: ['knowledge-1'],
+        knowledge_retrieval: {
+          page_size: 9,
+          similarity_threshold: 0.5,
+          vector_similarity_weight: 0.6,
+          top_k: 128,
+          keyword: true,
+          rerank_id: 'BAAI/bge-reranker-v2-m3',
+          metadata_condition: {
+            logic: 'or',
+            conditions: [
+              { name: 'department', comparison_operator: '=', value: 'HR' },
+            ],
+          },
+        },
+      },
+    }
+    vi.mocked(useEmployee).mockReturnValue({ data: configured, isPending: false } as never)
+    vi.mocked(useKnowledgeBases).mockReturnValue({
+      data: knowledgeBaseOptions,
+      isPending: false,
+    } as never)
+    renderEditor('/employees/employee-1/edit')
+
+    expect(await screen.findByRole('spinbutton', { name: '召回条数' })).toHaveValue('9')
+    expect(screen.getByRole('checkbox', { name: '关键词增强' })).toBeChecked()
+    expect(screen.getByRole('textbox', { name: '重排模型 ID' })).toHaveValue(
+      'BAAI/bge-reranker-v2-m3',
+    )
+    expect(screen.getByRole('textbox', { name: '字段名' })).toHaveValue('department')
+
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1))
+    expect(updateMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      knowledge_retrieval: configured.definition.knowledge_retrieval,
     }))
   })
 

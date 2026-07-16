@@ -1,12 +1,11 @@
 from typing import Protocol
 
-from pydantic import JsonValue
-
 from agent_platform.platform.knowledge.models import (
     KnowledgeDataset,
     KnowledgeDocument,
     KnowledgeSearchResult,
 )
+from agent_platform.platform.knowledge.retrieval import KnowledgeRetrievalConfig
 
 
 class KnowledgeProvider(Protocol):
@@ -39,6 +38,5 @@ class KnowledgeProvider(Protocol):
         *,
         question: str,
         dataset_ids: list[str],
-        page_size: int = 10,
-        metadata_condition: dict[str, JsonValue] | None = None,
+        options: KnowledgeRetrievalConfig | None = None,
     ) -> KnowledgeSearchResult: ...

@@ -3,3 +3,8 @@ services:
     environment:
       ES_JAVA_OPTS: -Xms512m -Xmx512m
     mem_limit: 1536m
+  ragflow-cpu:
+    environment:
+      # 官方 .env 的 COMPOSE_PROFILES 行不透传 manage.sh 实际选择的 profiles；
+      # RAGFlow 依赖该值判断是否启用 TEI 默认 embedding（common/settings.py）。
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES}

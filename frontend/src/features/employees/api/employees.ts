@@ -23,6 +23,51 @@ export interface GatewayModelReference {
   alias: string
 }
 
+export type KnowledgeMetadataComparisonOperator =
+  | 'contains'
+  | 'not contains'
+  | 'start with'
+  | 'empty'
+  | 'not empty'
+  | '='
+  | '≠'
+  | '>'
+  | '<'
+  | '≥'
+  | '≤'
+
+export interface KnowledgeMetadataFilterCondition {
+  name: string
+  comparison_operator: KnowledgeMetadataComparisonOperator
+  value: string
+}
+
+export interface KnowledgeMetadataCondition {
+  logic: 'and' | 'or'
+  conditions: KnowledgeMetadataFilterCondition[]
+}
+
+/** 字段名对齐 RAGFlow v0.25.6 官方检索 API；后端返回时总是包含全部字段。 */
+export interface KnowledgeRetrievalConfig {
+  page_size: number
+  similarity_threshold: number
+  vector_similarity_weight: number
+  top_k: number
+  keyword: boolean
+  rerank_id: string | null
+  metadata_condition: KnowledgeMetadataCondition | null
+}
+
+export const defaultKnowledgeRetrievalConfig: KnowledgeRetrievalConfig = {
+  page_size: 5,
+  similarity_threshold: 0.2,
+  vector_similarity_weight: 0.3,
+  top_k: 1024,
+  keyword: false,
+  rerank_id: null,
+  metadata_condition: null,
+}
+
 export interface EmployeeDefinition {
   name: string
   avatar_url?: string | null
@@ -37,6 +82,7 @@ export interface EmployeeDefinition {
   skill_ids: string[]
   tool_ids: string[]
   knowledge_base_ids: string[]
+  knowledge_retrieval: KnowledgeRetrievalConfig
   approval_policy: Record<string, unknown>
   release_strategy: Record<string, unknown>
 }

@@ -95,10 +95,9 @@ class FakeKnowledgeProvider:
         *,
         question: str,
         dataset_ids: list[str],
-        page_size: int = 10,
-        metadata_condition=None,
+        options=None,
     ):
-        del question, page_size, metadata_condition
+        del question, options
         self.calls.append(("retrieve", dataset_ids[0]))
         return KnowledgeSearchResult(
             total=1,
@@ -540,6 +539,6 @@ async def test_existing_base_never_routes_provider_a_id_to_provider_b(knowledge_
     assert provider_b.calls == []
     assert all(response.status_code == 503 for response in requests)
     assert all(
-        response.json()["detail"]["code"] == "knowledge_provider_unavailable"
+        response.json()["detail"]["code"] == "knowledge_provider_not_configured"
         for response in requests
     )

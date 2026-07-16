@@ -9,6 +9,105 @@ from agent_platform.platform.knowledge.errors import (
     KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
+from agent_platform.platform.knowledge.retrieval import validate_knowledge_retrieval_config
+
+
+@pytest.mark.asyncio
+async def test_ragflow_retrieve_parses_the_real_v0_25_6_chunk_shape() -> None:
+    """真实 v0.25.6 检索响应经 key_mapping 后的字段是 document_keyword，
+    没有 document_name；document_metadata 仅在请求携带 include_metadata 时注入。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/retrieval"
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "total": 1,
+                    "chunks": [
+                        {
+                            "id": "chunk-real",
+                            "content": "年假为十天",
+                            "content_ltks": "年假 为 十天",
+                            "document_id": "doc-1",
+                            "document_keyword": "handbook.pdf",
+                            "dataset_id": "ds-1",
+                            "important_keywords": [""],
+                            "positions": [""],
+                            "similarity": 0.91,
+                            "term_similarity": 1.0,
+                            "vector_similarity": 0.88,
+                        }
+                    ],
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
+        client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
+        result = await client.retrieve(question="年假有几天", dataset_ids=["ds-1"])
+
+    citation = result.citations[0]
+    assert citation.chunk_id == "chunk-real"
+    assert citation.document_name == "handbook.pdf"
+    assert citation.dataset_id == "ds-1"
+    assert citation.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_ragflow_retrieve_sends_all_v0_25_6_retrieval_options() -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"total": 0, "chunks": []}})
+
+    options = validate_knowledge_retrieval_config(
+        {
+            "page_size": 7,
+            "similarity_threshold": 0.4,
+            "vector_similarity_weight": 0.6,
+            "top_k": 128,
+            "keyword": True,
+            "rerank_id": "BAAI/bge-reranker-v2-m3",
+            "metadata_condition": {
+                "logic": "and",
+                "conditions": [
+                    {"name": "department", "comparison_operator": "=", "value": "HR"},
+                ],
+            },
+        }
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ragflow") as http:
+        client = RagFlowClient(base_url="http://ragflow", api_key="secret", client=http)
+        await client.retrieve(question="年假有几天", dataset_ids=["ds-1"], options=options)
+        await client.retrieve(question="年假有几天", dataset_ids=["ds-1"])
+
+    configured, defaulted = bodies
+    assert configured["page"] == 1
+    assert configured["page_size"] == 7
+    assert configured["similarity_threshold"] == 0.4
+    assert configured["vector_similarity_weight"] == 0.6
+    assert configured["top_k"] == 128
+    assert configured["keyword"] is True
+    assert configured["rerank_id"] == "BAAI/bge-reranker-v2-m3"
+    assert configured["include_metadata"] is True
+    assert configured["metadata_condition"] == {
+        "logic": "and",
+        "conditions": [
+            {"name": "department", "comparison_operator": "=", "value": "HR"},
+        ],
+    }
+    assert defaulted["page_size"] == 5
+    assert defaulted["similarity_threshold"] == 0.2
+    assert defaulted["vector_similarity_weight"] == 0.3
+    assert defaulted["top_k"] == 1024
+    assert defaulted["keyword"] is False
+    assert "rerank_id" not in defaulted
+    assert "metadata_condition" not in defaulted
 
 
 @pytest.mark.asyncio
@@ -49,7 +148,7 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
                             {
                                 "id": "chunk-1",
                                 "document_id": "doc-1",
-                                "document_name": "handbook.pdf",
+                                "document_keyword": "handbook.pdf",
                                 "dataset_id": "ds-1",
                                 "content": "年假为十天",
                                 "similarity": 0.91,
@@ -82,7 +181,16 @@ async def test_ragflow_client_uses_public_dataset_document_and_retrieval_apis() 
         result = await client.retrieve(
             question="年假有几天",
             dataset_ids=[dataset.provider_id],
-            metadata_condition={"logic": "and", "conditions": []},
+            options=validate_knowledge_retrieval_config(
+                {
+                    "metadata_condition": {
+                        "logic": "and",
+                        "conditions": [
+                            {"name": "department", "comparison_operator": "=", "value": "HR"},
+                        ],
+                    },
+                }
+            ),
         )
 
     assert client.provider_name == "ragflow"
@@ -240,7 +348,7 @@ async def test_ragflow_invalid_citation_fields_map_to_invalid_provider_response(
                             {
                                 "id": "chunk-1",
                                 "document_id": "doc-1",
-                                "document_name": "policy.txt",
+                                "document_keyword": "policy.txt",
                                 "dataset_id": "ds-1",
                                 "content": content,
                                 "similarity": similarity,

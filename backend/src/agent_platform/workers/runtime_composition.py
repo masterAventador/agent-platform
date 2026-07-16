@@ -47,11 +47,17 @@ from agent_platform.platform.artifacts.services import (
 )
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderNotConfigured,
     KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import KnowledgeCitation
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.knowledge.retrieval import (
+    InvalidKnowledgeRetrievalConfig,
+    KnowledgeRetrievalConfig,
+    validate_knowledge_retrieval_config,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -169,6 +175,12 @@ class KnowledgeRuntimeRequestRejected(PermanentRuntimePreparationError):
     code = "knowledge_provider_rejected"
 
 
+class KnowledgeRuntimeNotConfigured(PermanentRuntimePreparationError):
+    """知识库引用的供应商未在当前部署注册；部署配置缺陷，重投递无法恢复。"""
+
+    code = "knowledge_provider_not_configured"
+
+
 class TransientRuntimePreparationError(RuntimeError):
     """运行时准备依赖暂时不可用；由队列重投递重试，消息不携带底层连接细节。"""
 
@@ -192,7 +204,13 @@ class RuntimeKnowledgeContext:
         return TypeAdapter(dict[str, JsonValue]).validate_python(payload)
 
 
-DEFAULT_KNOWLEDGE_RETRIEVAL_LIMIT = 5
+def _parse_knowledge_retrieval(value: object) -> KnowledgeRetrievalConfig:
+    if value is None:
+        return KnowledgeRetrievalConfig()
+    try:
+        return validate_knowledge_retrieval_config(value)
+    except InvalidKnowledgeRetrievalConfig:
+        raise UntrustedRuntimeDefinition("invalid knowledge retrieval configuration") from None
 
 
 def _parse_skill_versions(
@@ -236,6 +254,7 @@ class PublishedRuntimeCapabilities:
     skill_versions: tuple[PublishedSkillVersion, ...]
     tool_ids: tuple[UUID, ...]
     knowledge_base_ids: tuple[UUID, ...]
+    knowledge_retrieval: KnowledgeRetrievalConfig
     workflow_id: UUID | None
     workflow_version: int | None
 
@@ -279,6 +298,9 @@ class PublishedRuntimeCapabilities:
                     TypeAdapter(list[UUID]).validate_python(
                         definition.get("knowledge_base_ids", [])
                     )
+                ),
+                knowledge_retrieval=_parse_knowledge_retrieval(
+                    definition.get("knowledge_retrieval")
                 ),
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
@@ -581,8 +603,12 @@ class ComposedRuntimeResolver:
                 result = await provider.retrieve(
                     question=question,
                     dataset_ids=dataset_ids,
-                    page_size=DEFAULT_KNOWLEDGE_RETRIEVAL_LIMIT,
+                    options=capabilities.knowledge_retrieval,
                 )
+            except KnowledgeProviderNotConfigured:
+                raise KnowledgeRuntimeNotConfigured(
+                    "knowledge provider is not configured for this deployment"
+                ) from None
             except KnowledgeProviderUnavailable:
                 raise TransientRuntimePreparationError(
                     "knowledge provider is temporarily unavailable"

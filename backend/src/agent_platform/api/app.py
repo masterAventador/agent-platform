@@ -63,6 +63,7 @@ from agent_platform.platform.artifacts.services import ArtifactService
 from agent_platform.platform.auth.ports import AuthRateLimiter
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderNotConfigured,
     KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
@@ -314,6 +315,21 @@ def create_app(
                 "detail": {
                     "code": "knowledge_provider_unavailable",
                     "message": "知识服务暂时不可用，请稍后重试",
+                }
+            },
+        )
+
+    @app.exception_handler(KnowledgeProviderNotConfigured)
+    async def handle_knowledge_provider_not_configured(
+        _: Request,
+        __: KnowledgeProviderNotConfigured,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": {
+                    "code": "knowledge_provider_not_configured",
+                    "message": "知识服务供应商未在当前部署配置，请联系平台管理员",
                 }
             },
         )

@@ -1,3 +1,7 @@
+class KnowledgeProviderNotConfigured(Exception):
+    """知识库引用的供应商未在当前部署注册；属于部署配置缺陷，重试无法恢复。"""
+
+
 class KnowledgeProviderUnavailable(Exception):
     """知识供应商暂时无法完成请求（网络故障、超时或服务端错误），可重试。"""
 
