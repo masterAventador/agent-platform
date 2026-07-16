@@ -13,6 +13,7 @@ from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import KnowledgeCitation, KnowledgeSearchResult
@@ -25,6 +26,7 @@ from agent_platform.workers import runtime_composition as runtime_composition_mo
 from agent_platform.workers.runtime_composition import (
     ComposedRuntimeResolver,
     InvalidKnowledgeRuntimeResponse,
+    KnowledgeRuntimeRequestRejected,
     ModelGatewayUnavailable,
     PermanentRuntimePreparationError,
     PlatformModelResolver,
@@ -601,6 +603,57 @@ async def test_malformed_knowledge_provider_response_fails_with_a_stable_control
     assert isinstance(captured.value, PermanentRuntimePreparationError)
     assert captured.value.code == "invalid_knowledge_provider_response"
     assert "<html>" not in str(captured.value)
+    assert manager.scope is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_knowledge_provider_request_is_permanent_with_stable_code(
+    session_factory,
+) -> None:
+    knowledge_base_id = uuid4()
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    await seed_knowledge_base(
+        session_factory,
+        run=run,
+        knowledge_base_id=knowledge_base_id,
+        provider_id="dataset-allowed",
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=RecordingSelector(),
+        model_resolver=model_resolver,
+        knowledge_provider_registry=KnowledgeProviderRegistry(
+            [
+                FailingKnowledgeProvider(
+                    KnowledgeProviderRequestRejected(
+                        "知识供应商拒绝了请求（HTTP 401）api-key=sk-secret"
+                    )
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(KnowledgeRuntimeRequestRejected) as captured:
+        await resolver.resolve(
+            run,
+            autonomous_definition(knowledge_base_ids=[str(knowledge_base_id)]),
+        )
+
+    assert isinstance(captured.value, PermanentRuntimePreparationError)
+    assert not isinstance(captured.value, TransientRuntimePreparationError)
+    assert captured.value.code == "knowledge_provider_rejected"
+    assert "sk-secret" not in str(captured.value)
     assert manager.scope is None
 
 

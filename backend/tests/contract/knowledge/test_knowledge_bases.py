@@ -15,6 +15,7 @@ from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.tenants import TenantMembershipRecord
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import (
@@ -448,6 +449,41 @@ async def test_knowledge_provider_failures_return_stable_api_error(
         "detail": {
             "code": "knowledge_provider_unavailable",
             "message": "知识服务暂时不可用，请稍后重试",
+        }
+    }
+    assert (
+        await client.get(
+            "/api/v1/knowledge-bases",
+            headers={"X-Tenant-ID": tenant_id},
+        )
+    ).json() == []
+
+
+@pytest.mark.asyncio
+async def test_knowledge_provider_rejection_returns_permanent_bad_gateway_error(
+    knowledge_client,
+) -> None:
+    client, provider, _ = knowledge_client
+    credentials = {
+        "email": "provider-rejected@example.com",
+        "password": "correct horse battery staple",
+    }
+    await client.post("/api/v1/auth/register", json=credentials)
+    await client.post("/api/v1/auth/login", json=credentials)
+    tenant_id = (await client.get("/api/v1/auth/me")).json()["workspaces"][0]["id"]
+    provider.create_error = KnowledgeProviderRequestRejected("知识供应商拒绝了请求（HTTP 401）")
+
+    response = await client.post(
+        "/api/v1/knowledge-bases",
+        headers={"X-Tenant-ID": tenant_id},
+        json={"name": "被拒绝知识库"},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": {
+            "code": "knowledge_provider_rejected",
+            "message": "知识服务拒绝了请求，请检查知识服务配置或知识库状态",
         }
     }
     assert (

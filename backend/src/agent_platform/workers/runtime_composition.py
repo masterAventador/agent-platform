@@ -47,6 +47,7 @@ from agent_platform.platform.artifacts.services import (
 )
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import KnowledgeCitation
@@ -160,6 +161,12 @@ class InvalidKnowledgeRuntimeResponse(PermanentRuntimePreparationError):
     """知识供应商返回了平台无法安全解释的响应；消息不携带原始响应内容。"""
 
     code = "invalid_knowledge_provider_response"
+
+
+class KnowledgeRuntimeRequestRejected(PermanentRuntimePreparationError):
+    """知识供应商明确拒绝了检索请求（认证、权限、资源或业务错误）；消息不携带原始响应内容。"""
+
+    code = "knowledge_provider_rejected"
 
 
 class TransientRuntimePreparationError(RuntimeError):
@@ -579,6 +586,10 @@ class ComposedRuntimeResolver:
             except KnowledgeProviderUnavailable:
                 raise TransientRuntimePreparationError(
                     "knowledge provider is temporarily unavailable"
+                ) from None
+            except KnowledgeProviderRequestRejected:
+                raise KnowledgeRuntimeRequestRejected(
+                    "knowledge provider rejected the retrieval request"
                 ) from None
             except InvalidKnowledgeProviderResponse:
                 raise InvalidKnowledgeRuntimeResponse(

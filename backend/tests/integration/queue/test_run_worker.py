@@ -72,6 +72,7 @@ from agent_platform.workers.run_worker import (
     WorkerFenced,
 )
 from agent_platform.workers.runtime_composition import (
+    KnowledgeRuntimeRequestRejected,
     RuntimeKnowledgeContext,
     UntrustedRuntimeDefinition,
 )
@@ -458,6 +459,12 @@ class PermanentFailingResolver:
     async def resolve(self, run: Run, definition: dict[str, object]) -> Prepared:
         del run, definition
         raise UntrustedRuntimeDefinition("secret definition detail")
+
+
+class KnowledgeRejectedFailingResolver:
+    async def resolve(self, run: Run, definition: dict[str, object]) -> Prepared:
+        del run, definition
+        raise KnowledgeRuntimeRequestRejected("provider rejected with secret upstream detail")
 
 
 class TransientFailingResolver:
@@ -2342,6 +2349,66 @@ async def test_permanent_preparation_failure_is_persisted_and_acknowledged(facto
     assert [(message.role, message.content, message.run_id) for message in messages] == [
         (ConversationMessageRole.ERROR, "invalid_runtime_definition", run.id)
     ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_knowledge_provider_fails_permanently_without_redelivery(factory) -> None:
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"question": "年假有几天"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={"work_mode": "workflow"},
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+    delivery = RunQueueDelivery(
+        delivery_id="knowledge-rejected-1",
+        message=RunQueueMessage(
+            command_id=command.id,
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            action="start",
+        ),
+    )
+    queue = OneMessageQueue(delivery)
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=KnowledgeRejectedFailingResolver(),
+        consumer_name="test-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["knowledge-rejected-1"]
+    assert queue.dead_lettered == []
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        assert persisted is not None
+        assert persisted.status is RunStatus.FAILED
+        assert persisted.error_code == "knowledge_provider_rejected"
+        assert persisted.error_message is None
+        events = await SqlAlchemyRunEventRepository(session).list(run_id=run.id, after_sequence=0)
+        assert events[-1].payload == {"code": "knowledge_provider_rejected"}
+        assert "secret upstream detail" not in repr(events)
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from pydantic import (
 
 from agent_platform.platform.knowledge.errors import (
     InvalidKnowledgeProviderResponse,
+    KnowledgeProviderRequestRejected,
     KnowledgeProviderUnavailable,
 )
 from agent_platform.platform.knowledge.models import (
@@ -211,6 +212,13 @@ class RagFlowClient:
         try:
             response = await self._client.request(method, path, headers=self._headers, **kwargs)
             response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            status_code = error.response.status_code
+            if 400 <= status_code < 500:
+                raise KnowledgeProviderRequestRejected(
+                    f"知识供应商拒绝了请求（HTTP {status_code}）"
+                ) from error
+            raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
         except httpx.HTTPError as error:
             raise KnowledgeProviderUnavailable("知识供应商暂时不可用") from error
         try:
@@ -223,7 +231,9 @@ class RagFlowClient:
             "知识供应商响应信封格式错误",
         )
         if validated.code != 0:
-            raise KnowledgeProviderUnavailable("知识供应商拒绝了请求")
+            raise KnowledgeProviderRequestRejected(
+                f"知识供应商拒绝了请求（业务错误码 {validated.code}）"
+            )
         return validated.data
 
     @staticmethod
