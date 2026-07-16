@@ -22,15 +22,15 @@ from agent_platform.capabilities.video_studio.media_library import (
     MediaLibraryService,
     UploadCredentialExpiredError,
 )
+from agent_platform.capabilities.video_studio.persistence import (
+    SqlAlchemyMediaLibraryRepository,
+)
 from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
     MaterialObjectVerifier,
     MaterialPreviewUrlIssuer,
     MaterialUploadCredentialIssuer,
-)
-from agent_platform.infrastructure.database.repositories.video_studio import (
-    SqlAlchemyMediaLibraryRepository,
 )
 from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 

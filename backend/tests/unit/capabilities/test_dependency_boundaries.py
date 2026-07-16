@@ -39,16 +39,28 @@ def test_core_business_modules_do_not_import_concrete_capabilities() -> None:
         "agent_platform.capabilities.social_operations",
     )
 
-    for core_directory in ("platform", "runtimes", "knowledge", "tools", "memory"):
+    violations: list[str] = []
+    for core_directory in (
+        "platform",
+        "runtimes",
+        "knowledge",
+        "tools",
+        "memory",
+        "infrastructure",
+        "api",
+    ):
         for source_file in (_SOURCE_ROOT / core_directory).rglob("*.py"):
             assert not uses_dynamic_import_primitive(source_file)
-            assert all(
-                not any(
+            violations.extend(
+                f"{source_file.relative_to(_SOURCE_ROOT)} imports {imported_module}"
+                for imported_module in imported_modules(source_file, source_root=_SOURCE_ROOT)
+                if any(
                     module_matches(imported_module, concrete_package)
                     for concrete_package in concrete_packages
                 )
-                for imported_module in imported_modules(source_file, source_root=_SOURCE_ROOT)
             )
+
+    assert violations == [], "Core imports concrete capability packages:\n" + "\n".join(violations)
 
 
 def test_relative_capability_import_is_resolved_absolutely(tmp_path: Path) -> None:

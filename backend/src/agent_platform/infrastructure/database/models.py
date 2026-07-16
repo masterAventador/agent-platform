@@ -42,12 +42,6 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantRecord,
 )
 from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
-from agent_platform.infrastructure.database.repositories.video_studio import (
-    VideoDownloadTaskRecord,
-    VideoMaterialFolderRecord,
-    VideoMaterialRecord,
-    VideoMaterialReferenceRecord,
-)
 
 ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     UserRecord,
@@ -76,10 +70,6 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     TaskAttachmentRecord,
     ArtifactRecord,
     ArtifactStorageOperationRecord,
-    VideoMaterialFolderRecord,
-    VideoMaterialRecord,
-    VideoMaterialReferenceRecord,
-    VideoDownloadTaskRecord,
 )
 
 
