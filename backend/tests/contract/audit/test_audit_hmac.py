@@ -87,6 +87,7 @@ def _canonical_payload(
     }
     if hash_algorithm is not None:
         payload["hash_algorithm"] = hash_algorithm
+        payload["purpose"] = "audit-event-hash"
     return json.dumps(
         payload,
         ensure_ascii=False,

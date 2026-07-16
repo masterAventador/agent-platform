@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -39,6 +40,7 @@ from agent_platform.observability.metrics import (
     active_operational_metrics,
 )
 from agent_platform.platform.audit.hashing import (
+    AUDIT_EVENT_HASH_PURPOSE,
     LEGACY_SHA256_ALGORITHM,
     AuditHasher,
     require_audit_hasher,
@@ -538,7 +540,7 @@ class SqlAlchemyAuditEventRepository:
                         first_invalid_sequence=record.sequence,
                     )
                 expected_hash = _expected_event_hash(record, hasher)
-                if expected_hash != record.event_hash:
+                if not hmac.compare_digest(expected_hash, record.event_hash):
                     return AuditIntegrityVerification(
                         valid=False,
                         checked_events=checked_events,
@@ -774,9 +776,10 @@ def _canonical_event_payload(
         "metadata": dict(metadata),
     }
     if hash_algorithm is not None:
-        # legacy sha256 载荷不含算法标识（保持与存量哈希字节一致）；
-        # 密钥化算法把标识纳入被签名载荷，做算法域隔离。
+        # legacy sha256 载荷不含算法标识与用途域（保持与存量哈希字节一致）；
+        # 密钥化算法把两者纳入被签名载荷，做算法域与用途域双重隔离。
         payload["hash_algorithm"] = hash_algorithm
+        payload["purpose"] = AUDIT_EVENT_HASH_PURPOSE
     return json.dumps(
         payload,
         ensure_ascii=False,

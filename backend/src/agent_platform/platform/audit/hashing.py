@@ -16,6 +16,8 @@ LEGACY_SHA256_ALGORITHM = "sha256"
 HMAC_SHA256_V1_ALGORITHM = "hmac-sha256.v1"
 # 开发/测试专用的公开弱密钥，仅用于本机开箱可用；staging/production 显式拒绝。
 INSECURE_DEV_AUDIT_HMAC_KEY = "agent-platform-insecure-dev-audit-hmac-key"
+
+AUDIT_EVENT_HASH_PURPOSE = "audit-event-hash"
 _DEV_ENVIRONMENTS = frozenset({"local", "development", "test"})
 _CHAIN_HEAD_SEAL_PURPOSE = "audit-chain-head-seal"
 
