@@ -8,7 +8,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.workers.dispatcher_main import DispatcherHealth, run_dispatcher_service
+
+load_database_models()
+
 
 RUNTIME_E2E_DISPATCHER_READY_FILE = Path(
     os.getenv(
