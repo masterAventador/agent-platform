@@ -111,6 +111,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: '数字员工' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '会话中心' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '记忆中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
@@ -558,6 +559,20 @@ describe('App', () => {
       expect(screen.queryByRole('link', { name: '任务中心' })).not.toBeInTheDocument()
     },
   )
+
+  it('缺少 runs.execute 时隐藏记忆入口且直达 /memories 显示统一 403', async () => {
+    authState.workspaces = [noRunWorkspace]
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/memories']}><App /></MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(await screen.findByText('无权访问记忆中心')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '记忆中心' })).not.toBeInTheDocument()
+  })
 
   it.each(['/conversations', '/conversations/conversation-1'])(
     '缺少 runs.execute 时隐藏会话入口且直达 %s 显示统一 403',

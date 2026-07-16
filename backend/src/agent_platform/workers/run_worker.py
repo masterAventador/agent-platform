@@ -30,6 +30,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
+from agent_platform.infrastructure.database.repositories.memory_extraction import (
+    extract_run_memories,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
@@ -632,6 +635,10 @@ class RunWorker:
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
+            await self._extract_run_memories_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
         return state.status
 
     async def _start_cancellable_runtime(
@@ -1149,6 +1156,10 @@ class RunWorker:
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
+            await self._extract_run_memories_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
         return state.status
 
     async def _apply_output_schema_guard(
@@ -1260,6 +1271,30 @@ class RunWorker:
                 continue
             await events.append(event.model_copy(update={"sequence": sequence}))
             sequence += 1
+
+    async def _extract_run_memories_safely(
+        self,
+        *,
+        run: Run,
+        history: list[PlatformEvent],
+    ) -> None:
+        """任务完成后的长期记忆受控提取：独立安全事务，失败只记录日志，
+        不阻断已完成的 Run 结算（与会话投影相同的隔离模式）。"""
+
+        try:
+            await extract_run_memories(
+                session_factory=self._session_factory,
+                run=run,
+                history=history,
+            )
+        except Exception as error:
+            logger.error(
+                "memory_extraction_failed",
+                extra={
+                    "run_id": str(run.id),
+                    "error_type": type(error).__name__,
+                },
+            )
 
     async def _append_conversation_messages_for_history_safely(
         self,
@@ -1698,6 +1733,11 @@ class RunWorker:
         knowledge_context = getattr(prepared, "knowledge_context", None)
         if knowledge_context is not None:
             input_data["knowledge_context"] = knowledge_context.as_input_payload()
+        # 记忆是数据不是指令：只进入 input_data，不改写员工定义或系统指令，
+        # 避免记忆内容中的提示注入文本被放大为系统指令级文本。
+        memory_context = getattr(prepared, "memory_context", None)
+        if memory_context is not None:
+            input_data["memory_context"] = memory_context.as_input_payload()
         return RuntimeStartRequest(
             run_id=run.id,
             tenant_id=run.tenant_id,

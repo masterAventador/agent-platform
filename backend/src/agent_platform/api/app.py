@@ -29,6 +29,7 @@ from agent_platform.api.routes.conversations import router as conversations_rout
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
+from agent_platform.api.routes.memories import router as memories_router
 from agent_platform.api.routes.model_gateway import router as model_gateway_router
 from agent_platform.api.routes.observability import router as observability_router
 from agent_platform.api.routes.runs import router as runs_router
@@ -338,6 +339,7 @@ def create_app(
     app.include_router(artifacts_router)
     app.include_router(dead_letters_router)
     app.include_router(knowledge_router)
+    app.include_router(memories_router)
     app.include_router(skills_router)
     app.include_router(mcp_router)
     app.include_router(tool_router)

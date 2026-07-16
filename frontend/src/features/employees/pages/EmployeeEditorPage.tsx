@@ -31,6 +31,7 @@ interface EmployeeFormValues {
   modelAlias: 'general-purpose'
   conversation: boolean
   fileUpload: boolean
+  memory?: boolean
   scheduledTasks: boolean
   inputSchemaText: string
   outputSchemaText: string
@@ -160,6 +161,7 @@ export function EmployeeEditorPage() {
       modelAlias: 'general-purpose',
       conversation: employee.definition.capabilities.conversation,
       fileUpload: employee.definition.capabilities.file_upload,
+      memory: employee.definition.capabilities.memory ?? false,
       scheduledTasks: false,
       inputSchemaText: formatJson(employee.definition.input_schema),
       outputSchemaText: formatJson(employee.definition.output_schema),
@@ -205,6 +207,7 @@ export function EmployeeEditorPage() {
         conversation: values.conversation,
         scheduled_tasks: false,
         file_upload: values.fileUpload,
+        memory: values.memory ?? false,
       },
       skill_ids: values.skillIds,
       tool_ids: values.toolIds,
@@ -335,6 +338,9 @@ export function EmployeeEditorPage() {
               </Form.Item>
               <Form.Item name="fileUpload" valuePropName="checked" noStyle>
                 <Checkbox>支持文件上传</Checkbox>
+              </Form.Item>
+              <Form.Item name="memory" valuePropName="checked" noStyle>
+                <Checkbox>启用长期记忆</Checkbox>
               </Form.Item>
               <Form.Item name="scheduledTasks" valuePropName="checked" noStyle>
                 <Checkbox disabled>支持定时任务（尚未接通）</Checkbox>
