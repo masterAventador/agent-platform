@@ -15,7 +15,9 @@ if database_url := os.getenv("AGENT_PLATFORM_DATABASE_URL"):
     config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 不禁用已存在的 logger：同进程内（如测试套件）先创建的业务 logger
+    # 不应因执行迁移而被静默禁用。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 load_database_models()
 target_metadata = Base.metadata
