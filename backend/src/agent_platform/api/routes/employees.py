@@ -12,6 +12,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
 )
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
 from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
+from agent_platform.platform.dynamic_io import InvalidDynamicSchema, validate_employee_io_schemas
 from agent_platform.platform.employees.entities import (
     Employee,
     EmployeeDraft,
@@ -181,6 +182,17 @@ def _raise_employee_error(error: Exception) -> None:
                 "message": "数字员工配置当前不可运行",
             },
         ) from error
+    if isinstance(error, InvalidDynamicSchema):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "invalid_employee_schema",
+                "message": "员工输入或输出 Schema 无效",
+                "schema": error.issue.schema_name,
+                "path": list(error.issue.path),
+                "reason": error.issue.message,
+            },
+        ) from error
     raise error
 
 
@@ -220,6 +232,11 @@ async def create_employee(
         )
         _ensure_model_alias_allowed(request=request, alias=payload.model.alias)
         try:
+            validate_employee_io_schemas(
+                input_schema=payload.input_schema,
+                output_schema=payload.output_schema,
+                file_upload_enabled=payload.capabilities.file_upload,
+            )
             employee = await _service(database_session).create(
                 tenant_id=access.tenant.id,
                 created_by=user.id,
@@ -230,6 +247,7 @@ async def create_employee(
             EmployeeNameAlreadyExists,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            InvalidDynamicSchema,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
@@ -300,6 +318,11 @@ async def update_employee(
         )
         _ensure_model_alias_allowed(request=request, alias=payload.model.alias)
         try:
+            validate_employee_io_schemas(
+                input_schema=payload.input_schema,
+                output_schema=payload.output_schema,
+                file_upload_enabled=payload.capabilities.file_upload,
+            )
             employee = await _service(database_session).update(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,
@@ -311,6 +334,7 @@ async def update_employee(
             EmployeeNameAlreadyExists,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            InvalidDynamicSchema,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error
@@ -337,6 +361,11 @@ async def publish_employee(
             )
             model_alias = ModelSettings.model_validate(draft.draft.model_settings).alias
             _ensure_model_alias_allowed(request=request, alias=model_alias)
+            validate_employee_io_schemas(
+                input_schema=draft.draft.input_schema,
+                output_schema=draft.draft.output_schema,
+                file_upload_enabled=draft.draft.capabilities.get("file_upload"),
+            )
             employee = await _service(database_session).publish(
                 tenant_id=access.tenant.id,
                 employee_id=employee_id,
@@ -348,6 +377,7 @@ async def publish_employee(
             EmployeeConfigurationUnavailable,
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
+            InvalidDynamicSchema,
         ) as error:
             _raise_employee_error(error)
             raise AssertionError("unreachable") from error

@@ -19,6 +19,7 @@ export interface Run {
   employee_version: number
   thread_id: string
   input: Record<string, unknown>
+  output_schema?: Record<string, unknown> | null
   status: RunStatus
   error_code: string | null
   error_message: string | null

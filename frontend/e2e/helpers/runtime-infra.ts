@@ -3,10 +3,13 @@ import { execFileSync } from 'node:child_process'
 import {
   composeArgs,
   composeEnvironment,
+  frontendRoot,
   postgresDatabaseUrl,
   redisDatabaseUrl,
   repositoryRoot,
 } from './compose-core'
+
+export { frontendRoot, repositoryRoot }
 
 export const runtimeDatabaseName = 'agent_platform_runtime_e2e'
 export const runtimeDatabaseUrl = postgresDatabaseUrl(runtimeDatabaseName)

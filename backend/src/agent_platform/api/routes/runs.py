@@ -1,13 +1,14 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, JsonValue
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.artifacts import (
@@ -24,8 +25,14 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunRepository,
 )
 from agent_platform.platform.artifacts.entities import TaskAttachment
+from agent_platform.platform.dynamic_io import (
+    DynamicInputTooLarge,
+    DynamicInputValidationFailed,
+    InvalidDynamicSchema,
+    file_field_names,
+    validate_run_input,
+)
 from agent_platform.platform.employees.entities import (
-    EmployeeStatus,
     EmployeeVisibility,
     is_runnable_employee_definition,
 )
@@ -62,9 +69,15 @@ class RunResponse(BaseModel):
     error_code: str | None
     error_message: str | None
     conversation_id: UUID | None
+    output_schema: dict[str, JsonValue] | None = None
 
     @classmethod
-    def from_entity(cls, run: Run) -> "RunResponse":
+    def from_entity(
+        cls,
+        run: Run,
+        *,
+        output_schema: dict[str, JsonValue] | None = None,
+    ) -> "RunResponse":
         return cls(
             id=run.id,
             tenant_id=run.tenant_id,
@@ -76,6 +89,7 @@ class RunResponse(BaseModel):
             error_code=run.error_code,
             error_message=run.error_message,
             conversation_id=run.conversation_id,
+            output_schema=output_schema,
         )
 
 
@@ -91,6 +105,143 @@ def _permission_denied() -> HTTPException:
         status_code=status.HTTP_403_FORBIDDEN,
         detail={"code": "permission_denied", "message": "没有执行此操作的权限"},
     )
+
+
+def _dynamic_input_error(error: Exception) -> HTTPException:
+    if isinstance(error, DynamicInputTooLarge):
+        return HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "code": "run_input_too_large",
+                "message": "任务输入超过大小限制",
+            },
+        )
+    if isinstance(error, DynamicInputValidationFailed):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "run_input_schema_validation_failed",
+                "message": "任务输入不符合数字员工发布版本的输入 Schema",
+                "errors": list(error.errors),
+            },
+        )
+    if isinstance(error, InvalidDynamicSchema):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "employee_configuration_unavailable",
+                "message": "数字员工发布版本的输入 Schema 无效",
+            },
+        )
+    raise error
+
+
+def _output_schema_from_definition(
+    definition: dict[str, object],
+) -> dict[str, JsonValue] | None:
+    output_schema = definition.get("output_schema")
+    if not isinstance(output_schema, dict):
+        return None
+    return cast(dict[str, JsonValue], output_schema)
+
+
+async def _output_schemas_for_runs(
+    *,
+    database_session: AsyncSession,
+    runs: list[Run],
+) -> dict[tuple[UUID, int], dict[str, JsonValue] | None]:
+    version_repository = SqlAlchemyEmployeeVersionRepository(database_session)
+    schemas: dict[tuple[UUID, int], dict[str, JsonValue] | None] = {}
+    for run in runs:
+        key = (run.employee_id, run.employee_version)
+        if key in schemas:
+            continue
+        version = await version_repository.get(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            version=run.employee_version,
+        )
+        schemas[key] = (
+            _output_schema_from_definition(version.definition) if version is not None else None
+        )
+    return schemas
+
+
+async def _output_schema_for_run(
+    database_session: AsyncSession,
+    *,
+    run: Run,
+) -> dict[str, JsonValue] | None:
+    version = await SqlAlchemyEmployeeVersionRepository(database_session).get(
+        tenant_id=run.tenant_id,
+        employee_id=run.employee_id,
+        version=run.employee_version,
+    )
+    if version is None:
+        return None
+    return _output_schema_from_definition(version.definition)
+
+
+def _deduplicated_attachment_ids(attachment_ids: list[UUID]) -> list[UUID]:
+    return list(dict.fromkeys(attachment_ids))
+
+
+def _ensure_dynamic_file_attachments_match_input(
+    *,
+    input_schema: dict[str, object],
+    input_data: dict[str, JsonValue],
+    attachment_ids: list[UUID],
+) -> None:
+    file_fields = file_field_names(input_schema)
+    if not file_fields:
+        return
+
+    referenced_file_ids: list[UUID] = []
+    for field_name in file_fields:
+        value = input_data.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise DynamicInputValidationFailed(
+                (f"{field_name}: 动态文件字段必须引用本次上传附件",)
+            )
+        try:
+            referenced_file_ids.append(UUID(value))
+        except ValueError as error:
+            raise DynamicInputValidationFailed(
+                (f"{field_name}: 动态文件字段必须引用本次上传附件",)
+            ) from error
+
+    referenced = set(referenced_file_ids)
+    attached = set(_deduplicated_attachment_ids(attachment_ids))
+    if referenced != attached:
+        raise DynamicInputValidationFailed(
+            ("动态文件字段必须与本次上传附件一一绑定",)
+        )
+
+
+async def _ensure_same_idempotent_request(
+    *,
+    run: Run,
+    payload: CreateRunRequest,
+    attachment_repository: SqlAlchemyTaskAttachmentRepository,
+) -> None:
+    existing_attachments = await attachment_repository.list_for_run(
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+    )
+    if (
+        run.input_data != payload.input
+        or [item.file_id for item in existing_attachments]
+        != _deduplicated_attachment_ids(payload.attachment_ids)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "idempotency_key_reused",
+                "message": "幂等键已用于不同的任务请求",
+            },
+        )
 
 
 @router.post(
@@ -118,27 +269,47 @@ async def create_run(
         )
         if employee is None:
             raise _not_found()
-        if not role_has_permission(
+        can_manage_employees = role_has_permission(
             role=access.role,
             permission=TenantPermission.EMPLOYEES_MANAGE,
-        ) and (
-            employee.status is not EmployeeStatus.PUBLISHED
-            or employee.published_version is None
-            or employee.draft.visibility is not EmployeeVisibility.TENANT
-        ):
-            raise _not_found()
-        if employee.status is not EmployeeStatus.PUBLISHED or employee.published_version is None:
+        )
+        if employee.published_version is None:
+            if not can_manage_employees:
+                raise _not_found()
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "employee_not_published", "message": "数字员工尚未发布"},
             )
+
+        runs = SqlAlchemyRunRepository(database_session)
+        attachment_repository = SqlAlchemyTaskAttachmentRepository(database_session)
+        if idempotency_key is not None:
+            existing = await runs.get_by_idempotency_key(
+                tenant_id=access.tenant.id,
+                created_by=user.id,
+                employee_id=employee.id,
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                await _ensure_same_idempotent_request(
+                    run=existing,
+                    payload=payload,
+                    attachment_repository=attachment_repository,
+                )
+                return RunResponse.from_entity(
+                    existing,
+                    output_schema=await _output_schema_for_run(
+                        database_session,
+                        run=existing,
+                    ),
+                )
 
         version = await SqlAlchemyEmployeeVersionRepository(database_session).get(
             tenant_id=access.tenant.id,
             employee_id=employee.id,
             version=employee.published_version,
         )
-        if version is None or not is_runnable_employee_definition(version.definition):
+        if version is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -146,10 +317,48 @@ async def create_run(
                     "message": "数字员工配置当前不可运行",
                 },
             )
-
+        if (
+            not can_manage_employees
+            and version.definition.get("visibility") != EmployeeVisibility.TENANT.value
+        ):
+            raise _not_found()
+        if not is_runnable_employee_definition(version.definition):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "employee_configuration_unavailable",
+                    "message": "数字员工配置当前不可运行",
+                },
+            )
+        input_schema = version.definition.get("input_schema")
+        if not isinstance(input_schema, dict):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "employee_configuration_unavailable",
+                    "message": "数字员工发布版本缺少输入 Schema",
+                },
+            )
         capabilities = version.definition.get("capabilities")
+        file_upload_enabled = (
+            capabilities.get("file_upload") is True if isinstance(capabilities, dict) else False
+        )
+        try:
+            validate_run_input(
+                input_schema=input_schema,
+                value=payload.input,
+                file_upload_enabled=file_upload_enabled,
+            )
+            _ensure_dynamic_file_attachments_match_input(
+                input_schema=input_schema,
+                input_data=payload.input,
+                attachment_ids=payload.attachment_ids,
+            )
+        except (DynamicInputTooLarge, DynamicInputValidationFailed, InvalidDynamicSchema) as error:
+            raise _dynamic_input_error(error) from error
+
         if payload.attachment_ids and (
-            not isinstance(capabilities, dict) or capabilities.get("file_upload") is not True
+            not file_upload_enabled
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -168,31 +377,6 @@ async def create_run(
             ):
                 raise _not_found()
             attachment_files.append(file)
-
-        runs = SqlAlchemyRunRepository(database_session)
-        if idempotency_key is not None:
-            existing = await runs.get_by_idempotency_key(
-                tenant_id=access.tenant.id,
-                created_by=user.id,
-                employee_id=employee.id,
-                idempotency_key=idempotency_key,
-            )
-            if existing is not None:
-                existing_attachments = await attachment_repository.list_for_run(
-                    tenant_id=existing.tenant_id,
-                    run_id=existing.id,
-                )
-                if existing.input_data != payload.input or [
-                    item.file_id for item in existing_attachments
-                ] != [file.id for file in attachment_files]:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail={
-                            "code": "idempotency_key_reused",
-                            "message": "幂等键已用于不同的任务请求",
-                        },
-                    )
-                return RunResponse.from_entity(existing)
 
         run = Run.create(
             tenant_id=access.tenant.id,
@@ -233,22 +417,17 @@ async def create_run(
             )
             if existing is None:
                 raise
-            existing_attachments = await attachment_repository.list_for_run(
-                tenant_id=existing.tenant_id,
-                run_id=existing.id,
+            await _ensure_same_idempotent_request(
+                run=existing,
+                payload=payload,
+                attachment_repository=attachment_repository,
             )
-            if existing.input_data != payload.input or [
-                item.file_id for item in existing_attachments
-            ] != [file.id for file in attachment_files]:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "idempotency_key_reused",
-                        "message": "幂等键已用于不同的任务请求",
-                    },
-                ) from None
             run = existing
-    return RunResponse.from_entity(run)
+        output_schema = await _output_schema_for_run(database_session, run=run)
+    return RunResponse.from_entity(
+        run,
+        output_schema=output_schema,
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunResponse)
@@ -275,7 +454,17 @@ async def get_run(
             and run.created_by != user.id
         ):
             raise _not_found()
-    return RunResponse.from_entity(run)
+        version = await SqlAlchemyEmployeeVersionRepository(database_session).get(
+            tenant_id=run.tenant_id,
+            employee_id=run.employee_id,
+            version=run.employee_version,
+        )
+    return RunResponse.from_entity(
+        run,
+        output_schema=(
+            _output_schema_from_definition(version.definition) if version is not None else None
+        ),
+    )
 
 
 @router.get("/runs", response_model=list[RunResponse])
@@ -300,7 +489,17 @@ async def list_runs(
                 else user.id
             ),
         )
-    return [RunResponse.from_entity(run) for run in runs]
+        output_schemas = await _output_schemas_for_runs(
+            database_session=database_session,
+            runs=runs,
+        )
+    return [
+        RunResponse.from_entity(
+            run,
+            output_schema=output_schemas.get((run.employee_id, run.employee_version)),
+        )
+        for run in runs
+    ]
 
 
 @router.get("/runs/{run_id}/events", response_model=list[PlatformEvent])
