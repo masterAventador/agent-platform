@@ -18,7 +18,7 @@ const installedSocialCapability = {
   frontend_entries: ['social.routes.v1'],
   permissions: [...socialPermissions],
 }
-let capabilityRegistryResponse = {
+let capabilityRegistryResponse: { schema_version: string, capabilities: unknown[] } = {
   schema_version: '1.0',
   capabilities: [installedSocialCapability],
 }
@@ -160,7 +160,11 @@ describe('App', () => {
   it('模块已安装但租户未授权时隐藏入口且直达路由受控拒绝', async () => {
     capabilityRegistryResponse = {
       schema_version: '1.0',
-      capabilities: [{ ...installedSocialCapability, tenant_entitled: false }],
+      capabilities: [{
+        capability_id: 'social-operations',
+        deployment_installed: true,
+        tenant_entitled: false,
+      }],
     }
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 

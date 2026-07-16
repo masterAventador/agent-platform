@@ -13,6 +13,9 @@ class RunCommandAction(StrEnum):
     MESSAGE = "message"
     APPROVE = "approve"
     REJECT = "reject"
+    # 会话自动续跑意图：挂在当前活跃 Run 上，创建时即标记已分发、不进入执行队列，
+    # 由 Worker 在该会话轮次终态结算时消费并派生下一轮 Run。
+    FOLLOWUP = "followup"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,7 @@ class RunCommand:
         tenant_id: UUID,
         action: RunCommandAction,
         payload: dict[str, JsonValue] | None = None,
+        dispatched_at: datetime | None = None,
     ) -> "RunCommand":
         return cls(
             id=uuid4(),
@@ -44,4 +48,5 @@ class RunCommand:
             action=action,
             payload=payload or {},
             created_at=datetime.now(UTC),
+            dispatched_at=dispatched_at,
         )

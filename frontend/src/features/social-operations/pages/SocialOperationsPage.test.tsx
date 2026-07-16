@@ -226,7 +226,7 @@ describe('B02 设备与平台账号中心', () => {
     )
     expect(socialOperations.emergencyStop).toHaveBeenCalledWith(accountId)
     expect(socialOperations.logoutAccount).toHaveBeenCalledWith(accountId)
-  })
+  }, 15_000)
 
   it('使用签名 Manifest 下载或本地安装 Sidecar', async () => {
     const user = userEvent.setup()

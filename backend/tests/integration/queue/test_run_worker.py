@@ -26,6 +26,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeVersionRepository,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
+    RunCommandRecord,
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
@@ -5514,3 +5515,525 @@ async def test_duplicate_start_does_not_overwrite_live_environment(factory) -> N
     assert resolver.prepared.close_calls == 0
     assert resolver.prepared.detach_calls == 1
     assert queue.acknowledged == ["first-start"]
+
+
+# ---------------------------------------------------------------------------
+# C05 主线收口：会话自动续跑派生
+# ---------------------------------------------------------------------------
+
+
+def _published_conversation_employee_entities(*, tenant_id, created_by):
+    from agent_platform.platform.employees.entities import (
+        Employee,
+        EmployeeDraft,
+        EmployeeVisibility,
+        RuntimeType,
+    )
+
+    draft = EmployeeDraft(
+        name="会话续跑员工",
+        avatar_url=None,
+        role_description="验证自动续跑派生",
+        visibility=EmployeeVisibility.TENANT,
+        runtime_type=RuntimeType.AUTONOMOUS,
+        system_prompt="围绕多轮输入持续作答。",
+        model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
+        input_schema={"type": "object"},
+        output_schema={"type": "object"},
+        capabilities={"conversation": True, "scheduled_tasks": False, "file_upload": True},
+        skill_ids=[],
+        tool_ids=[],
+        knowledge_base_ids=[],
+        approval_policy={},
+        release_strategy={},
+    )
+    employee = Employee.create(tenant_id=tenant_id, created_by=created_by, draft=draft)
+    return employee.publish(published_by=created_by)
+
+
+async def _seed_conversation_round_with_queued_messages(
+    factory,
+    *,
+    queued_contents: list[str],
+    attachment_for_first_queued: bool = False,
+    publish_employee: bool = True,
+):
+    """构造：已发布员工 + 会话 + 活跃轮次 Run A（含 START 命令）+ 排队消息与 followup 意图。"""
+    from agent_platform.infrastructure.database.repositories.artifacts import (
+        SqlAlchemyFileRepository,
+    )
+    from agent_platform.infrastructure.database.repositories.employees import (
+        SqlAlchemyEmployeeRepository,
+    )
+    from agent_platform.platform.artifacts.entities import File
+    from agent_platform.platform.conversations.entities import ConversationMessage
+
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    employee, version = _published_conversation_employee_entities(
+        tenant_id=tenant_id, created_by=owner_id
+    )
+    conversation = Conversation.create(
+        tenant_id=tenant_id,
+        employee_id=employee.id,
+        created_by=owner_id,
+        title="自动续跑",
+    )
+    run = Run.create(
+        tenant_id=tenant_id,
+        employee_id=employee.id,
+        employee_version=version.version,
+        created_by=owner_id,
+        input_data={"message": "第一轮输入"},
+        conversation_id=conversation.id,
+        thread_id=conversation.thread_id,
+    )
+    start_command = RunCommand.create(
+        run_id=run.id, tenant_id=tenant_id, action=RunCommandAction.START
+    )
+    attachment_file = (
+        File.create(
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            name="notes.txt",
+            media_type="text/plain",
+            content=b"queued attachment",
+        )
+        if attachment_for_first_queued
+        else None
+    )
+    queued_messages = []
+    followup_commands = []
+    async with factory() as session:
+        if publish_employee:
+            await SqlAlchemyEmployeeRepository(session).add(employee)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyConversationRepository(session).add(conversation)
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyRunCommandRepository(session).add(start_command)
+        if attachment_file is not None:
+            await SqlAlchemyFileRepository(session).add(attachment_file)
+        messages = SqlAlchemyConversationMessageRepository(session)
+        commands = SqlAlchemyRunCommandRepository(session)
+        bound_first = ConversationMessage.create(
+            tenant_id=tenant_id,
+            conversation_id=conversation.id,
+            sequence=1,
+            role=ConversationMessageRole.USER,
+            content="第一轮输入",
+            run_id=run.id,
+        )
+        await messages.add(bound_first)
+        for index, content in enumerate(queued_contents):
+            message = ConversationMessage.create(
+                tenant_id=tenant_id,
+                conversation_id=conversation.id,
+                sequence=2 + index,
+                role=ConversationMessageRole.USER,
+                content=content,
+                attachment_ids=(
+                    (attachment_file.id,)
+                    if attachment_file is not None and index == 0
+                    else ()
+                ),
+            )
+            await messages.add(message)
+            queued_messages.append(message)
+            followup = RunCommand.create(
+                run_id=run.id,
+                tenant_id=tenant_id,
+                action=RunCommandAction.FOLLOWUP,
+                payload={
+                    "message_id": str(message.id),
+                    "requested_by": str(owner_id),
+                },
+                dispatched_at=message.created_at,
+            )
+            await commands.add(followup)
+            followup_commands.append(followup)
+        await session.commit()
+    return {
+        "tenant_id": tenant_id,
+        "owner_id": owner_id,
+        "employee": employee,
+        "version": version,
+        "conversation": conversation,
+        "run": run,
+        "start_command": start_command,
+        "queued_messages": queued_messages,
+        "followup_commands": followup_commands,
+        "attachment_file": attachment_file,
+    }
+
+
+def _start_delivery(seed, *, delivery_id: str = "followup-start") -> RunQueueDelivery:
+    return RunQueueDelivery(
+        delivery_id=delivery_id,
+        message=RunQueueMessage(
+            command_id=seed["start_command"].id,
+            run_id=seed["run"].id,
+            tenant_id=seed["tenant_id"],
+            action="start",
+        ),
+    )
+
+
+async def _conversation_runs(factory, seed) -> list[Run]:
+    async with factory() as session:
+        return list(
+            await SqlAlchemyConversationRepository(session).list_runs(
+                tenant_id=seed["tenant_id"],
+                conversation_id=seed["conversation"].id,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_completed_run_derives_followup_run_from_queued_messages(factory) -> None:
+    from agent_platform.infrastructure.database.repositories.artifacts import (
+        SqlAlchemyTaskAttachmentRepository,
+    )
+    from agent_platform.platform.conversations.entities import conversation_followup_run_id
+
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory,
+        queued_contents=["第二轮排队输入", "第三轮排队输入"],
+        attachment_for_first_queued=True,
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(_start_delivery(seed)),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2
+    followup_run = next(run for run in runs if run.id != seed["run"].id)
+    # 幂等键：由 (conversation_id, 触发消息) 确定
+    assert followup_run.id == conversation_followup_run_id(
+        conversation_id=seed["conversation"].id,
+        trigger_message_id=seed["queued_messages"][0].id,
+    )
+    assert followup_run.status is RunStatus.QUEUED
+    assert followup_run.created_by == seed["owner_id"]
+    assert followup_run.employee_version == seed["version"].version
+    assert followup_run.thread_id == seed["conversation"].thread_id
+    assert followup_run.conversation_id == seed["conversation"].id
+    # 多条排队消息合并为一轮：message 取最后一条，上下文包含全部
+    assert followup_run.input_data["message"] == "第三轮排队输入"
+    context_contents = [
+        item["content"]
+        for item in followup_run.input_data["conversation_context"]["messages"]
+    ]
+    assert "第二轮排队输入" in context_contents
+    assert "第三轮排队输入" in context_contents
+    async with factory() as session:
+        commands = SqlAlchemyRunCommandRepository(session)
+        for followup in seed["followup_commands"]:
+            assert await commands.is_processed(followup.id) is True
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=seed["tenant_id"],
+            conversation_id=seed["conversation"].id,
+        )
+        start_commands = (
+            (
+                await session.execute(
+                    select(RunCommandRecord).where(
+                        RunCommandRecord.run_id == followup_run.id,
+                        RunCommandRecord.action == "start",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        attachments = await SqlAlchemyTaskAttachmentRepository(session).list_for_run(
+            tenant_id=seed["tenant_id"], run_id=followup_run.id
+        )
+    queued_bindings = {
+        message.id: message.run_id
+        for message in messages
+        if message.id in {item.id for item in seed["queued_messages"]}
+    }
+    assert set(queued_bindings.values()) == {followup_run.id}
+    # 复用正常创建路径：START 命令等待 dispatcher 正常派发
+    assert len(start_commands) == 1
+    assert start_commands[0].dispatched_at is None
+    assert start_commands[0].processed_at is None
+    assert [attachment.file_id for attachment in attachments] == [
+        seed["attachment_file"].id
+    ]
+
+
+@pytest.mark.asyncio
+async def test_followup_derivation_is_idempotent_on_start_redelivery(factory) -> None:
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue(
+            [
+                _start_delivery(seed, delivery_id="followup-1"),
+                _start_delivery(seed, delivery_id="followup-1-redelivery"),
+            ]
+        ),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-redelivery-worker",
+    )
+
+    assert await worker.run_once(block_ms=1) is True
+    assert await worker.run_once(block_ms=1) is True
+
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2
+
+
+@pytest.mark.asyncio
+async def test_followup_derivation_recovers_after_settlement_committed_without_derivation(
+    factory,
+) -> None:
+    """崩溃窗口：核心结算已提交（命令已处理、Run 已终态）但派生未落库，重投递后必须恢复且不重复。"""
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    async with factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        run = await runs.get(tenant_id=seed["tenant_id"], run_id=seed["run"].id)
+        assert run is not None
+        await runs.update(run.transition_to(RunStatus.RUNNING).transition_to(RunStatus.COMPLETED))
+        await SqlAlchemyRunCommandRepository(session).mark_processed(seed["start_command"].id)
+        await session.commit()
+
+    worker = RunWorker(
+        session_factory=factory,
+        queue=MessageQueue(
+            [
+                _start_delivery(seed, delivery_id="followup-recovery"),
+                _start_delivery(seed, delivery_id="followup-recovery-redelivery"),
+            ]
+        ),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-recovery-worker",
+    )
+    assert await worker.run_once(block_ms=1) is True
+    assert await worker.run_once(block_ms=1) is True
+
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2
+    followup_run = next(run for run in runs if run.id != seed["run"].id)
+    async with factory() as session:
+        messages = await SqlAlchemyConversationMessageRepository(session).list(
+            tenant_id=seed["tenant_id"],
+            conversation_id=seed["conversation"].id,
+        )
+    assert [
+        message.run_id
+        for message in messages
+        if message.id == seed["queued_messages"][0].id
+    ] == [followup_run.id]
+
+
+@pytest.mark.asyncio
+async def test_followup_derivation_failure_does_not_block_run_settlement(
+    factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(self, **_: object) -> None:
+        raise RuntimeError("followup derivation failure")
+
+    monkeypatch.setattr(RunWorker, "_dispatch_conversation_followup", fail)
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    queue = OneMessageQueue(_start_delivery(seed))
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-failure-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["followup-start"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=seed["tenant_id"], run_id=seed["run"].id
+        )
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(
+            seed["start_command"].id
+        )
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_round_still_derives_followup_run(factory) -> None:
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["取消后继续的排队输入"]
+    )
+    async with factory() as session:
+        await SqlAlchemyRunCommandRepository(session).add(
+            RunCommand.create(
+                run_id=seed["run"].id,
+                tenant_id=seed["tenant_id"],
+                action=RunCommandAction.CANCEL,
+            )
+        )
+        await session.commit()
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(_start_delivery(seed)),
+        runtime_resolver=Resolver(PreStartCountingRuntime()),
+        consumer_name="followup-cancel-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=seed["tenant_id"], run_id=seed["run"].id
+        )
+    assert persisted is not None and persisted.status is RunStatus.CANCELLED
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2
+    followup_run = next(run for run in runs if run.id != seed["run"].id)
+    assert followup_run.status is RunStatus.QUEUED
+    assert followup_run.input_data["message"] == "取消后继续的排队输入"
+
+
+@pytest.mark.asyncio
+async def test_followup_derivation_waits_while_another_run_is_active(factory) -> None:
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    other_active = Run.create(
+        tenant_id=seed["tenant_id"],
+        employee_id=seed["employee"].id,
+        employee_version=seed["version"].version,
+        created_by=seed["owner_id"],
+        input_data={"message": "另一活跃轮次"},
+        conversation_id=seed["conversation"].id,
+        thread_id=seed["conversation"].thread_id,
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(other_active)
+        await session.commit()
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(_start_delivery(seed)),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-active-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    runs = await _conversation_runs(factory, seed)
+    assert {run.id for run in runs} == {seed["run"].id, other_active.id}
+    async with factory() as session:
+        commands = SqlAlchemyRunCommandRepository(session)
+        for followup in seed["followup_commands"]:
+            assert await commands.is_processed(followup.id) is False
+
+
+@pytest.mark.asyncio
+async def test_followup_derivation_skipped_when_employee_not_runnable(factory) -> None:
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory,
+        queued_contents=["第二轮排队输入"],
+        publish_employee=False,
+    )
+
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=OneMessageQueue(_start_delivery(seed)),
+        runtime_resolver=Resolver(ConversationOutputRuntime()),
+        consumer_name="followup-unpublished-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=seed["tenant_id"], run_id=seed["run"].id
+        )
+        commands = SqlAlchemyRunCommandRepository(session)
+        followup_processed = await commands.is_processed(seed["followup_commands"][0].id)
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    # 员工不可运行时受控跳过：意图保留，待员工恢复后由后续结算继续消费
+    assert followup_processed is False
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_followup_uuid5_conflict_is_treated_as_already_derived_not_failure(
+    factory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """确定性幂等键冲突发生在仓储 flush 边界：必须按已派生（WARNING）处理，不得误报派生失败。"""
+    import logging
+
+    from agent_platform.platform.conversations.entities import conversation_followup_run_id
+
+    seed = await _seed_conversation_round_with_queued_messages(
+        factory, queued_contents=["第二轮排队输入"]
+    )
+    # 模拟并发派生竞态残留：确定性 id 的派生 Run 已存在（终态，不会命中活跃 Run 守卫）
+    conflicting = Run.create(
+        tenant_id=seed["tenant_id"],
+        employee_id=seed["employee"].id,
+        employee_version=seed["version"].version,
+        created_by=seed["owner_id"],
+        input_data={"message": "并发派生已完成的一轮"},
+        conversation_id=seed["conversation"].id,
+        thread_id=seed["conversation"].thread_id,
+    )
+    from dataclasses import replace as dc_replace
+
+    conflicting = dc_replace(
+        conflicting.transition_to(RunStatus.RUNNING).transition_to(RunStatus.COMPLETED),
+        id=conversation_followup_run_id(
+            conversation_id=seed["conversation"].id,
+            trigger_message_id=seed["queued_messages"][0].id,
+        ),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(conflicting)
+        await session.commit()
+
+    queue = OneMessageQueue(_start_delivery(seed))
+    with caplog.at_level(logging.INFO, logger="agent_platform.workers.run_worker"):
+        worked = await RunWorker(
+            session_factory=factory,
+            queue=queue,
+            runtime_resolver=Resolver(ConversationOutputRuntime()),
+            consumer_name="followup-conflict-worker",
+        ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["followup-start"]
+    messages = [record.getMessage() for record in caplog.records]
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert "conversation_followup_already_derived" in warning_messages
+    assert "conversation_followup_dispatch_failed" not in messages
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=seed["tenant_id"], run_id=seed["run"].id
+        )
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(
+            seed["start_command"].id
+        )
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    runs = await _conversation_runs(factory, seed)
+    assert len(runs) == 2
