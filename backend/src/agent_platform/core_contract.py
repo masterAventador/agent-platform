@@ -6,6 +6,7 @@ from agent_platform.platform.tenants.permissions import TenantPermission
 CORE_API_ROUTE_ROOTS = frozenset(
     {
         "artifacts",
+        "audit",
         "auth",
         "conversations",
         "employees",
@@ -14,6 +15,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
         "knowledge-bases",
         "mcp-servers",
         "model-gateway",
+        "observability",
         "run-dead-letters",
         "runs",
         "skills",
