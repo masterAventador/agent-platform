@@ -29,6 +29,9 @@ export default defineConfig({
     'knowledge-runtime.spec.ts',
     'memory-runtime.spec.ts',
     'workflow-runtime.spec.ts',
+    // 需要 AGENT_PLATFORM_INSTALLED_CAPABILITIES 含 video-studio，只能由
+    // playwright.video-studio.config.ts 拉起；默认套件缺这项环境必然失败。
+    'video-studio-media-library.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
@@ -71,6 +74,10 @@ export default defineConfig({
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_LOCAL_CREDENTIALS_FILE: credentialsFile,
         AGENT_PLATFORM_MCP_CONNECTION_TIMEOUT_SECONDS: '3',
+        // C12：调度循环由 scheduled-tasks.spec.ts 用独立进程承载，才能真实
+        // SIGKILL/重启验证恢复、并起两个副本验证不重复触发。这个 API 只服务
+        // 界面；若它也跑调度器，会与测试进程竞争同一批任务，断言不再确定。
+        AGENT_PLATFORM_SCHEDULER_ENABLED: 'false',
       },
       url: `http://127.0.0.1:${apiPort}/api/v1/health/live`,
       reuseExistingServer: false,

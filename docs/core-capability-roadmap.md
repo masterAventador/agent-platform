@@ -74,7 +74,7 @@
 | Tool/MCP 生命周期 | 待集成 | C09 已合入主线；C13 审批中心已提供统一审批协议（Tool 风险审批已接入）；剩余生产凭据待 C18、stdio 传输 E2E 缺口待补 | C09 |
 | 长期记忆 | 已完成 | 四级命名空间 Memory 领域/API/运行时注入与工具写入/受控提取/治理与记忆中心页面已合入并通过双复审与真实运行时 E2E | C10 |
 | 工作流/混合员工 | 已完成 | Workflow 注册/版本/发布/回滚、LangGraph 编排内核（流程型/混合型）、人工节点接 C13 审批、编辑器开放 workflow/hybrid 已合入并通过双复审与真实栈 workflow E2E | C11 |
-| 定时任务 | 进行中 | 后端调度主链已落地（Cron/预约/时区/DST、复用 Run 创建共享路径、多副本行锁+触发点唯一索引、misfire/并发/重试策略、每次调度重校验权限与员工发布状态、审计与历史保留）；前端页面、Playwright E2E 与 C16 配额接入待补 | C12 |
+| 定时任务 | 进行中 | 后端调度主链 + 前端定时任务中心（创建/编辑/暂停/执行记录、按任务时区渲染）与时区/DST/重复触发/重启恢复/权限 Playwright E2E 均已落地；仅剩 C16 配额接入（由 C16 阶段三承接） | C12 |
 | 审批中心 | 已完成 | 独立审批记录/状态机/待办/批准/拒绝/转交/超时/幂等、Tool 风险审批接入统一协议、审批中心页面 + 工作台卡片已合入并通过双复审与真实 PG 并发门禁及审批 E2E | C13 |
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 已完成 | 成员邀请/角色/移除/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理已合入并通过三轮双复审与真实 PG + Playwright 完成门；OIDC/MFA 保留扩展边界 | C15 |
@@ -404,7 +404,24 @@
 - **【G1】已派发执行无超时 → 定时任务可能永久静默停摆**：查证结论——孤儿恢复扫描 `recover_incomplete_runs` **兜不住**：它对 `waiting_for_input`/`waiting_for_approval` 是「恢复运行时」而非「终结」，只有 `running` 会被判孤儿失败。其中 `waiting_for_approval` 另有 C13 审批超时（默认 24h）驱动 run reject 兜底；**`waiting_for_input` 无任何机制终结**——调度产生的 Run 没有交互用户会回应，执行永久停在 DISPATCHED，`list_active_for_task` 恒返回它，SKIP/QUEUE 策略下该任务永久静默停摆，且 `purge_terminal_before` 只清终态、永不回收。已实现配置驱动的执行超时（`scheduled_task_execution_timeout_seconds`，默认 24h）：超时把**调度侧执行**结算为 failed，发告警日志与审计（`scheduled_task.execution_timed_out`），不去动 Run 本身（那是 C05/C13 的语义边界），也不触发重试。**超时严格限定在「无人终结」的状态**（`waiting_for_input`）——见下一轮对该范围的收窄。
 - **【L5】日志张冠李戴**：`_wait_for_database_ready` 硬编码 `artifact_storage_reconciliation_*`，调度器等待 schema 时打的是 artifact 协调器的日志名。已参数化 `log_scope`，四个调用方各报自己的名字。
 
-剩余未完成（不得据此标记完成）：客户端创建/编辑/暂停/执行记录页面、时区/重启恢复/重复触发/权限的 Playwright E2E、C16 配额接入。
+剩余未完成（不得据此标记完成）：C16 配额接入（本条目完成前置，由 C16 阶段三承接）。
+
+2026-07-17 阶段二（前端页面 + Playwright E2E，本任务提交，先 RED 后 GREEN）：
+
+- **解除前端对 `scheduled_tasks` 的硬关闭**：阶段一后端已不再把发布版 `capabilities.scheduled_tasks` 钉死为 `false`，但**前端仍留着 C12 前的硬关闭**——`isEmployeeConfigurationAvailable` 把该能力为真直接判成「配置不可用」、编辑器复选框 `disabled` 且保存时恒写 `false`。后果：用户无法通过界面给任何员工开启该能力，自建员工建定时任务必被后端以 409 `scheduled_tasks_disabled` 拒绝，完成定义第 5 条根本走不通。已按 RED→GREEN 解除（写入边界、编辑器回显与提交、以及「历史配置将被复位」提示一并清理）。
+- **定时任务中心**：列表（调度、下次执行时间、启用/暂停 + 自动暂停原因）、创建/编辑弹窗（员工、Cron/单次预约、IANA 时区、输入 JSON、错过/并发策略、重试）、暂停/恢复、删除确认；详情页展示概览与执行记录（触发时间、状态、尝试次数、关联 Run、跳过原因/错误、下次重试）。导航与路由按 `runs.execute` 裁剪，路由由 `WorkspaceCapabilityGate` 兜底。
+- **时区渲染**：`next_run_at`/`last_run_at`/`scheduled_for` 一律按**任务自己的 IANA 时区**渲染（`zoned-time.ts`），不用浏览器本地时区——否则用户会看到与自己填的 Cron 自相矛盾的「下次执行时间」。单次预约的当地时间↔UTC 换算按两趟偏移校正，跨 DST 边界正确。**变异验证**：把渲染改成浏览器本地时区后，两条时区 E2E 立刻转红（实测显示 21:00/22:00 而非 09:00），证明用例承重。
+- **Cron 校验不自建解析器**：前端只做与后端一致的必填/长度校验，表达式合法性交给后端 `cronsim` 判定并把 `invalid_cron_expression` 转为字段错误——自建解析器要么放宽要么误伤合法表达式。时区只从运行时 `Intl.supportedValuesOf('timeZone')` 选，与后端 `ZoneInfo` 判定一致（固定偏移两侧都不接受）。
+- **高频 + ALLOW 提示（非门禁）**：按主代理拍板，频率下限治理归 C16 阶段三，前端不设阈值拦截；仅当分钟字段明确高频（`*` 或 `*/n`，n≤5）且并发策略为 `allow` 时给出可见提示，如实告知平台当前不限制调度频率。
+- **Playwright E2E**（`frontend/e2e/scheduled-tasks.spec.ts`，4 用例全绿）：① 时区——页面选 `America/New_York` 建 Cron，回显当地 09:00 且库中 UTC 为 13:00/14:00；② DST——同一当地 09:00 在冬/夏令时分别落到 14:00Z/13:00Z，回显都是 09:00；③ 重复触发 + 重启恢复——两个调度副本竞争同一触发点只产生一条执行记录、无孤儿 Run，整组 SIGKILL 后历史冻结、重启后继续推进且无任何触发点重复；④ 权限——同企业 member（有 `runs.execute`、无 `runs.manage`）看不到他人任务，直达详情与带 owner 租户头的 GET/executions/pause/resume/DELETE 一律 404，列表返回空且任务未被越权删除。
+- **调度进程承载方式**：调度循环随 API lifespan 运行、无独立入口，故 E2E 用独立 API 进程承载它（`AGENT_PLATFORM_SCHEDULER_TICK_INTERVAL_SECONDS=1`），Playwright 管理的 API 关闭调度器（`playwright.config.ts`）避免竞争。**自查发现并修正的假通过**：`uv run` 会再 fork 出真正的 uvicorn 子进程，最初只 SIGKILL `uv` 包装进程会把调度器留成孤儿（实测 ppid 变 1 且端口仍返回 200），「重启恢复」用例因此**没真正杀掉调度器**、属于因错误原因通过。已改为 `detached` 进程组整组杀 + 以「端口不再服务」为退出判据 + 增加「停机窗口内历史必须冻结」对照断言；**变异验证**：改回只杀包装进程后用例立即转红（`调度进程 … 没有真正停止服务`）。
+
+阶段二验证命令：`cd frontend && pnpm test`（61 文件 / 330 用例全绿）；`pnpm lint`；`pnpm typecheck`；`pnpm build`；`pnpm exec playwright test scheduled-tasks.spec.ts`（4/4，随机项目名 + 随机端口隔离栈，验后销毁）；`pnpm exec playwright test`（默认全量 37 passed / 1 failed，唯一失败为下方登记的既有失效用例）。
+
+阶段二已知缺口（如实声明）：
+
+- **「无 `runs.execute` 的成员看不到入口」无法用真实角色做 E2E**：`_ROLE_PERMISSIONS` 中 owner/admin/member **三个角色都含 `runs.execute`**，产品当前不存在缺该权限的真实角色，E2E 无法构造这样的用户而不伪造角色。该分支由 `App.test.tsx` 的组件级门禁用例覆盖（隐藏入口 + 直达 `/scheduled-tasks`、`/scheduled-tasks/:taskId` 显示统一 403）。真正可达且已 E2E 覆盖的是「有 `runs.execute`、无 `runs.manage` 的成员访问他人任务得 404」。若将来引入只读角色，须补该分支的真实 E2E。
+- **执行历史保留与 Demo 数据的张力未决**：阶段一登记的 `_DEMO_STARTED_AT` + 90 天保留将在约 2026-09-29 后清掉演示执行历史；本阶段未改动该策略（属独立产品取舍，且不影响页面正确性），仍待决定延长保留或改用相对时间。
 
 2026-07-17 第四轮（代码质量复审 FAIL 后整改，先 RED 后 GREEN，新增/修改门禁均经变异验证）：
 
@@ -764,6 +781,12 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 **该路径属 C11（工作流/混合员工，LangGraph 编排内核）与 C13（审批中心）的交界，两者均已标 `✅ 已完成`。** 收口时必须先查明：是 `30e64ac` 的安全边界加固引入的回归，还是 C11/C13 合入时该用例本就未在真实 PG 下跑过（参照 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」先例）。**若确认为回归，C11 和/或 C13 的 `✅` 标记必须重新审视**——完成定义里的「人工审批、拒绝、继续和取消」若在真实 PG 的 checkpoint 恢复路径上不成立，那个 ✅ 就不成立。
 
 **范围收窄（2026-07-17 主代理在常驻开发栈上实测定位）**：**普通的「审批 → 继续」活路径是通的**——在 `agent-platform-dev` 上以真实用户路径发起 Demo 员工任务，Run 走到 `waiting_for_approval`（事件序列 `run.started → run.progress → approval.required`），经 `POST /api/v1/approvals/{id}/approve`（C13 审批中心 → 驱动 C11 运行时）批准后 Run 正常推进到 `completed`。因此该红线**不是「审批全线不可用」**，问题范围收窄到该用例特有的 **closes → rebuilds → approves** 序列，即**运行时关闭重建后再审批的 checkpoint 恢复路径**。这个定位缩小了排查面：优先看 `langgraph.py` 的 `_required_pending`/`_require_approval` 在运行时从 checkpoint 重建后，待处理中断的 kind/approval_id 是否被正确恢复。
+
+**红线 3（前端默认 Playwright 套件）**：`frontend/e2e/workspaces.spec.ts:49 › owner 创建员工时只能选择已接通的真实配置`
+
+该用例第 61 行断言 `option '固定流程（尚未开放）'` 的 `aria-disabled` 为 `true`，但员工编辑器早已把工作模式开放为 `{ value: 'workflow', label: '固定流程' }`（无「尚未开放」后缀），选项也不再禁用——**用例与产品行为脱节，属旧改动未同步 E2E 的遗留**。经 C12 阶段二实现代理**在基线提交 `cc25cd3` 的独立 worktree 上实测复现**（同一行、同一报错），确认**早于 C12 阶段二开工即已存在**，与本条目无关；按「单个任务提交只能包含该任务改动」未夹带修复。
+
+收口要求：先确认工作模式开放后该用例的预期语义（是删除这两条断言，还是改断言为「三种模式都可选」——`EmployeeEditorPage.test.tsx` 已有组件级用例覆盖后者），再改测试；**不得为了变绿而删掉整个用例**，它同时覆盖「owner 创建员工时只能选择已接通的真实配置」这一真实约束。注：C12 阶段二已同步更新该文件中因定时任务能力接通而失效的另两条断言（`支持定时任务（尚未接通）` → `支持定时任务` 且可用），但第 61 行的既有失效不在本条目范围内。
 
 ## 7. 完成记录
 

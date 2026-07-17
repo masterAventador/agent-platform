@@ -130,7 +130,7 @@ describe('EmployeeEditorPage configuration availability', () => {
     updateMutateAsync.mockResolvedValue(employee)
   })
 
-  it('opens workflow and hybrid modes, enables file uploads and keeps scheduling disabled', async () => {
+  it('opens workflow and hybrid modes, enables file uploads and scheduling', async () => {
     const user = userEvent.setup()
     renderEditor()
 
@@ -138,7 +138,8 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(screen.getByRole('checkbox', { name: '支持对话' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeEnabled()
     expect(screen.getByRole('checkbox', { name: /文件上传/ })).not.toBeChecked()
-    expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeDisabled()
+    // C12 阶段二：定时任务已接通，复选框必须可用且默认关闭。
+    expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeEnabled()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).not.toBeChecked()
     expect(screen.getByText(/文件上传已接通/)).toBeInTheDocument()
 
@@ -424,7 +425,7 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(screen.queryByRole('textbox', { name: /模型/ })).not.toBeInTheDocument()
   })
 
-  it('edits a published workflow employee and keeps scheduling reset while preserving the reference', async () => {
+  it('edits a published workflow employee and preserves both scheduling and the reference', async () => {
     const user = userEvent.setup()
     const workflowEmployee: Employee = {
       ...employee,
@@ -443,10 +444,10 @@ describe('EmployeeEditorPage configuration availability', () => {
     vi.mocked(useEmployee).mockReturnValue({ data: workflowEmployee, isPending: false } as never)
     renderEditor('/employees/employee-1/edit')
 
-    // 定时任务仍未接通：提示并在保存时复位；工作流引用被保留。
-    expect(await screen.findByText(/历史配置使用了尚未接通的定时任务/)).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeDisabled()
-    expect(screen.getByRole('checkbox', { name: /定时任务/ })).not.toBeChecked()
+    // C12 阶段二：定时任务已接通，既有开启状态必须回显并原样保存，不再提示或复位。
+    expect(await screen.findByRole('checkbox', { name: /定时任务/ })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeEnabled()
+    expect(screen.queryByText(/尚未接通的定时任务/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeEnabled()
 
     await user.click(screen.getByRole('button', { name: '保存草稿' }))
@@ -456,10 +457,26 @@ describe('EmployeeEditorPage configuration availability', () => {
       workflow_id: 'wf-1',
       capabilities: {
         conversation: true,
-        scheduled_tasks: false,
+        scheduled_tasks: true,
         file_upload: true,
         memory: false,
       },
+    }))
+  })
+
+  it('sends the scheduled tasks capability when the user enables it', async () => {
+    const user = userEvent.setup()
+    renderEditor()
+
+    await user.type(screen.getByLabelText('员工名称'), '巡检员工')
+    await user.type(screen.getByLabelText('岗位说明'), '按时巡检')
+    await user.type(screen.getByLabelText('系统指令'), '执行巡检')
+    await user.click(screen.getByRole('checkbox', { name: /定时任务/ }))
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+      capabilities: expect.objectContaining({ scheduled_tasks: true }),
     }))
   })
 

@@ -148,12 +148,8 @@ export function EmployeeEditorPage() {
   const mutation = employeeId ? updateEmployee : createEmployee
   const selectedWorkMode = Form.useWatch('workMode', form) ?? 'autonomous'
   const selectedKnowledgeBaseIds = Form.useWatch('knowledgeBaseIds', form) ?? []
-  const legacyDefinition = editingEmployee.data?.definition
   const workflowOptions = publishedWorkflowOptions(workflows.data ?? [])
   const requiresWorkflow = selectedWorkMode !== 'autonomous'
-  const hasLegacyUnavailableCapability = Boolean(
-    legacyDefinition?.capabilities.scheduled_tasks,
-  )
 
   useEffect(() => {
     const employee = editingEmployee.data
@@ -168,7 +164,7 @@ export function EmployeeEditorPage() {
       conversation: employee.definition.capabilities.conversation,
       fileUpload: employee.definition.capabilities.file_upload,
       memory: employee.definition.capabilities.memory ?? false,
-      scheduledTasks: false,
+      scheduledTasks: employee.definition.capabilities.scheduled_tasks,
       inputSchemaText: formatJson(employee.definition.input_schema),
       outputSchemaText: formatJson(employee.definition.output_schema),
       skillIds: employee.definition.skill_ids,
@@ -210,7 +206,7 @@ export function EmployeeEditorPage() {
       output_schema: outputSchema.value,
       capabilities: {
         conversation: values.conversation,
-        scheduled_tasks: false as const,
+        scheduled_tasks: values.scheduledTasks,
         file_upload: values.fileUpload,
         memory: values.memory ?? false,
       },
@@ -247,15 +243,6 @@ export function EmployeeEditorPage() {
             type="error"
             showIcon
             title={getEmployeeApiErrorMessage(mutation.error, '保存失败，请稍后重试')}
-          />
-        )}
-        {hasLegacyUnavailableCapability && (
-          <Alert
-            className="employee-form-error"
-            type="warning"
-            showIcon
-            title="历史配置使用了尚未接通的定时任务"
-            description="定时任务当前并未真实接通，本次保存会将该声明修正为关闭。"
           />
         )}
         <Form<EmployeeFormValues>
@@ -354,11 +341,11 @@ export function EmployeeEditorPage() {
                 <Checkbox>启用长期记忆</Checkbox>
               </Form.Item>
               <Form.Item name="scheduledTasks" valuePropName="checked" noStyle>
-                <Checkbox disabled>支持定时任务（尚未接通）</Checkbox>
+                <Checkbox>支持定时任务</Checkbox>
               </Form.Item>
             </Space>
             <Typography.Paragraph type="secondary">
-              文件上传已接通，可在任务发起时选择附件；定时任务尚未接通，保存时始终保持关闭。
+              文件上传已接通，可在任务发起时选择附件；开启定时任务后，可在定时任务中心为该员工的已发布版本创建 Cron 或单次预约调度。
             </Typography.Paragraph>
           </Form.Item>
           <Form.Item label="Skills" name="skillIds">

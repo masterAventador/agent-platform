@@ -31,8 +31,9 @@ test('用户可以创建并发布数字员工', async ({ page }) => {
   await expect(page.getByRole('checkbox', { name: '支持对话' })).toBeEnabled()
   await expect(page.getByRole('checkbox', { name: '支持文件上传' })).toBeEnabled()
   await expect(page.getByRole('checkbox', { name: '支持文件上传' })).not.toBeChecked()
-  await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).toBeDisabled()
-  await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).not.toBeChecked()
+  // C12 阶段二：定时任务能力已接通，复选框可用且默认关闭（不再是「尚未接通」的禁用项）。
+  await expect(page.getByRole('checkbox', { name: '支持定时任务' })).toBeEnabled()
+  await expect(page.getByRole('checkbox', { name: '支持定时任务' })).not.toBeChecked()
   await page.getByLabel('系统指令').fill('核实信息来源后，输出结构化市场研究报告。')
   await page.getByRole('button', { name: '保存草稿' }).click()
 

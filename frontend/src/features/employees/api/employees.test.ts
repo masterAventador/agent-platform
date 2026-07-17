@@ -68,13 +68,29 @@ describe('employee write boundary', () => {
     expect(configuredModel.alias).toBe('future-configured-model')
   })
 
+  // C12 阶段二：定时任务能力已由后端接通（发布版 capabilities.scheduled_tasks 不再被钉死为
+  // false），前端不得再把它当作「尚未接通的能力」在写入边界拦截。
+  it('lets the scheduled tasks capability reach the API now that C12 wired it up', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ data: { id: 'employee-1' } })
+    const scheduled = {
+      ...definition,
+      capabilities: { ...definition.capabilities, scheduled_tasks: true },
+    } as EmployeeWriteDefinition
+
+    await createEmployee('tenant-1', scheduled)
+
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/employees',
+      expect.objectContaining({
+        capabilities: expect.objectContaining({ scheduled_tasks: true }),
+      }),
+      expect.anything(),
+    )
+  })
+
   it.each([
     ['workflow mode', { ...definition, work_mode: 'workflow' as const } as EmployeeDefinition],
     ['hybrid mode', { ...definition, work_mode: 'hybrid' as const } as EmployeeDefinition],
-    [
-      'scheduled tasks',
-      { ...definition, capabilities: { ...definition.capabilities, scheduled_tasks: true } },
-    ],
   ])('rejects unavailable %s before create reaches the API', async (_, unavailable) => {
     await expect(createEmployee(
       'tenant-1',
@@ -88,10 +104,6 @@ describe('employee write boundary', () => {
   it.each([
     ['workflow mode', { ...definition, work_mode: 'workflow' as const } as EmployeeDefinition],
     ['hybrid mode', { ...definition, work_mode: 'hybrid' as const } as EmployeeDefinition],
-    [
-      'scheduled tasks',
-      { ...definition, capabilities: { ...definition.capabilities, scheduled_tasks: true } },
-    ],
   ])('rejects unavailable %s before update reaches the API', async (_, unavailable) => {
     await expect(updateEmployee(
       'tenant-1',
