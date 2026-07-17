@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request, status
@@ -153,6 +153,9 @@ def create_app(
             owned_redis,
             register_limit=app_settings.auth_register_limit_per_minute,
             login_limit=app_settings.auth_login_limit_per_minute,
+            extra_limits={
+                "video_sts_issue": app_settings.video_sts_issue_limit_per_minute,
+            },
         )
 
     owned_knowledge_provider: RagFlowClient | None = None
@@ -178,6 +181,8 @@ def create_app(
         )
     configured_session_factory = session_factory
     configured_artifact_storage = artifact_storage
+    # 能力包生产后台任务（如素材回收清扫），在下方能力装配阶段填充、lifespan 启动。
+    capability_background_workers: list[tuple[str, Callable[[], Any]]] = []
 
     async def reconcile_artifact_storage() -> None:
         await _wait_for_database_ready(configured_session_factory)
@@ -280,16 +285,26 @@ def create_app(
             await asyncio.sleep(app_settings.audit_retention_sweep_interval_seconds)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
         audit_retention_task = asyncio.create_task(sweep_audit_retention())
         approval_expiry_task = asyncio.create_task(sweep_approval_expiry())
+        capability_tasks = [
+            asyncio.create_task(worker_factory(), name=worker_name)
+            for worker_name, worker_factory in capability_background_workers
+        ]
+        app_instance.state.capability_background_tasks = tuple(capability_tasks)
         try:
             yield
         finally:
             approval_expiry_task.cancel()
             audit_retention_task.cancel()
             reconciliation_task.cancel()
+            for capability_task in capability_tasks:
+                capability_task.cancel()
+            for capability_task in capability_tasks:
+                with suppress(asyncio.CancelledError):
+                    await capability_task
             with suppress(asyncio.CancelledError):
                 await approval_expiry_task
             with suppress(asyncio.CancelledError):
@@ -391,6 +406,19 @@ def create_app(
             wrap_capability_router(registration.create_router(registration.settings)),
             dependencies=[Depends(create_capability_gate(registration.manifest))],
         )
+        capability_state = registration.create_state(registration.settings)
+        for state_key, state_value in capability_state.items():
+            setattr(app.state, state_key, state_value)
+        capability_background_workers.extend(
+            registration.create_background_workers(
+                registration.settings,
+                configured_session_factory,
+                capability_state,
+            )
+        )
+    app.state.capability_background_worker_names = tuple(
+        worker_name for worker_name, _ in capability_background_workers
+    )
 
     @app.exception_handler(KnowledgeProviderUnavailable)
     @app.exception_handler(InvalidKnowledgeProviderResponse)

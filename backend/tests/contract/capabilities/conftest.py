@@ -26,3 +26,15 @@ async def core_only_harness() -> AsyncIterator[CapabilityHarness]:
     async with client:
         yield harness
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def video_harness() -> AsyncIterator[CapabilityHarness]:
+    """Core+视频 交付 Profile 组合。"""
+
+    harness, engine, client = await build_capability_harness(
+        AppSettings(auth_cookie_secure=False, installed_capabilities=("video-studio",))
+    )
+    async with client:
+        yield harness
+    await engine.dispose()

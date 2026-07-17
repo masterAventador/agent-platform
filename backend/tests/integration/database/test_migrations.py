@@ -161,6 +161,34 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
                 "PRAGMA table_info(artifact_storage_operations)"
             ).fetchall()
         }
+        video_folder_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(video_material_folders)").fetchall()
+        }
+        video_material_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(video_materials)").fetchall()
+        }
+        video_reference_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(video_material_references)"
+            ).fetchall()
+        }
+        video_download_task_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(video_download_tasks)").fetchall()
+        }
+        video_material_foreign_keys = {
+            (row[2], row[3], row[4])
+            for row in connection.execute("PRAGMA foreign_key_list(video_materials)").fetchall()
+        }
+        video_reference_foreign_keys = {
+            (row[2], row[3], row[4])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(video_material_references)"
+            ).fetchall()
+        }
         attachment_foreign_keys = {
             (row[2], row[3], row[4])
             for row in connection.execute("PRAGMA foreign_key_list(task_attachments)").fetchall()
@@ -396,12 +424,71 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "created_at",
         "updated_at",
     } == storage_operation_columns
+    assert {
+        "id",
+        "tenant_id",
+        "parent_id",
+        "name",
+        "created_by",
+        "created_at",
+    } == video_folder_columns
+    assert {
+        "id",
+        "tenant_id",
+        "owner_id",
+        "folder_id",
+        "name",
+        "kind",
+        "media_type",
+        "size_bytes",
+        "sha256",
+        "crc64ecma",
+        "storage_key",
+        "status",
+        "tag_names",
+        "upload_expires_at",
+        "cleanup_required",
+        "artifact_id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    } == video_material_columns
+    assert {
+        "id",
+        "tenant_id",
+        "material_id",
+        "reference_type",
+        "reference_id",
+        "created_at",
+    } == video_reference_columns
+    assert {
+        "id",
+        "tenant_id",
+        "requested_by",
+        "source_type",
+        "source_id",
+        "status",
+        "progress",
+        "downloaded_bytes",
+        "total_bytes",
+        "resume_token",
+        "error_code",
+        "retryable",
+        "retry_count",
+        "revision",
+        "created_at",
+        "updated_at",
+        "completed_at",
+    } == video_download_task_columns
     assert ("runs", "tenant_id", "tenant_id") in attachment_foreign_keys
     assert ("runs", "run_id", "id") in attachment_foreign_keys
     assert ("files", "tenant_id", "tenant_id") in attachment_foreign_keys
     assert ("files", "file_id", "id") in attachment_foreign_keys
     assert ("runs", "tenant_id", "tenant_id") in artifact_foreign_keys
     assert ("runs", "run_id", "id") in artifact_foreign_keys
+    assert ("video_material_folders", "folder_id", "id") in video_material_foreign_keys
+    assert ("artifacts", "artifact_id", "id") in video_material_foreign_keys
+    assert ("video_materials", "material_id", "id") in video_reference_foreign_keys
 
     command.downgrade(config, "base")
 
@@ -416,7 +503,9 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
             "'skills', 'skill_versions', 'mcp_servers', 'tools', 'sandbox_leases', "
             "'tool_audit_events', 'tenant_model_gateway_policies', "
             "'model_gateway_provisioning_commands', 'files', 'task_attachments', 'artifacts', "
-            "'artifact_storage_operations', 'audit_events', 'audit_chain_states'"
+            "'artifact_storage_operations', 'audit_events', 'audit_chain_states', "
+            "'video_material_folders', 'video_materials', "
+            "'video_material_references', 'video_download_tasks'"
             ")"
         ).fetchall()
     assert platform_tables == []
@@ -653,7 +742,51 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 def test_migration_head_is_current_forward_only_revision() -> None:
     # C13 迁移 20260716_0030；合入时已重链 down_revision 至 0029（C10 记忆迁移），保持单头。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0030"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0032"
+
+
+def test_autogenerate_detects_no_drift_between_head_and_runtime_metadata(
+    tmp_path: Path,
+) -> None:
+    """迁移到 head 后，数据库结构必须与迁移 env 使用的 metadata 完全一致。
+
+    该守卫防止能力包模型（如 video_studio 四张表）脱离迁移 metadata：
+    一旦漂移，后续 `alembic revision --autogenerate` 会生成 DROP 能力包表的迁移。
+    """
+
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from agent_platform.bootstrap.capabilities import load_all_database_models
+    from agent_platform.infrastructure.database.base import Base
+    from agent_platform.infrastructure.database.models import include_name_for_autogenerate
+
+    database_path = tmp_path / "autogenerate-drift.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+    command.upgrade(config, "head")
+
+    # 与 migrations/env.py 保持同一 metadata 来源与 include_name 过滤。
+    load_all_database_models()
+    target_metadata = Base.metadata
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection,
+                opts={
+                    "compare_type": False,
+                    "include_name": include_name_for_autogenerate,
+                },
+            )
+            diffs = compare_metadata(context, target_metadata)
+    finally:
+        engine.dispose()
+
+    assert diffs == [], "迁移 metadata 与 head 数据库存在漂移:\n" + "\n".join(
+        repr(diff) for diff in diffs
+    )
 
 
 def test_approval_migration_creates_and_removes_table(tmp_path: Path) -> None:
