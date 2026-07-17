@@ -29,6 +29,9 @@ export default defineConfig({
     'knowledge-runtime.spec.ts',
     'memory-runtime.spec.ts',
     'workflow-runtime.spec.ts',
+    // 需要 AGENT_PLATFORM_INSTALLED_CAPABILITIES 含 video-studio，只能由
+    // playwright.video-studio.config.ts 拉起；默认套件缺这项环境必然失败。
+    'video-studio-media-library.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',
   globalTeardown: './e2e/global-teardown.ts',
