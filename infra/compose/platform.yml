@@ -15,6 +15,9 @@ x-backend-environment: &backend-environment
   AGENT_PLATFORM_RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
   # 审计哈希链 HMAC 密钥：本地默认公开弱密钥仅限开发；生产必须显式覆盖。
   AGENT_PLATFORM_AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-agent-platform-insecure-dev-audit-hmac-key}
+  # C16 租户网关 Key 派生密钥：本地默认公开弱密钥仅限开发；生产必须显式覆盖。
+  # Controller 用它签发/轮换租户虚拟 Key，Worker 用它派生同一个 Key。
+  AGENT_PLATFORM_MODEL_GATEWAY_KEY_SECRET: ${MODEL_GATEWAY_KEY_SECRET:-agent-platform-insecure-dev-model-gateway-key-secret}
   AGENT_PLATFORM_AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
   AGENT_PLATFORM_AUTH_COOKIE_SAME_SITE: ${AUTH_COOKIE_SAME_SITE:-lax}
   AGENT_PLATFORM_OTEL_ENABLED: ${OTEL_ENABLED:-false}
@@ -119,6 +122,34 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/agent-platform-worker-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  # C16 模型网关 Provisioning Controller：独立于 API 请求路径的常驻对账进程。
+  # 它是唯一持有 LiteLLM master key 的平台进程（API/Worker 都不持有）。
+  model-gateway-controller:
+    profiles: ["worker"]
+    build: *backend-build
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
+    command: ["python", "-m", "agent_platform.workers.model_gateway_controller"]
+    environment:
+      <<: *backend-environment
+      AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-model-gateway-controller
+      AGENT_PLATFORM_MODEL_GATEWAY_CONTROLLER_REPLICAS: "1"
+      AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_URL: ${AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_URL:-http://litellm:4000}
+      AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      AGENT_PLATFORM_MODEL_GATEWAY_CONTROLLER_INTERVAL_SECONDS: ${MODEL_GATEWAY_CONTROLLER_INTERVAL_SECONDS:-2}
+      AGENT_PLATFORM_MODEL_GATEWAY_COMMAND_RETENTION_DAYS: ${MODEL_GATEWAY_COMMAND_RETENTION_DAYS:-7}
+    extra_hosts: *host-gateway
+    networks: [core, llm]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/agent-platform-model-gateway-controller-ready"]
       interval: 5s
       timeout: 2s
       retries: 10

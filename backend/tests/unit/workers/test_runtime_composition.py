@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
@@ -22,6 +23,9 @@ from agent_platform.platform.knowledge.retrieval import (
     KnowledgeMetadataCondition,
     KnowledgeMetadataFilterCondition,
     KnowledgeRetrievalConfig,
+)
+from agent_platform.platform.model_gateway.errors import (
+    ModelGatewayCredentialUnavailable,
 )
 from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
@@ -415,32 +419,44 @@ def test_all_invalid_published_fields_are_permanent_preparation_errors(
         PublishedRuntimeCapabilities.from_definition(definition)
 
 
-def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
     fake_model = GenericFakeChatModel(messages=iter(["ok"]))
     resolver = PlatformModelResolver(injected_models={"general-purpose": fake_model})
 
     assert (
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
         is fake_model
     )
 
 
-def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
     resolver = PlatformModelResolver()
 
     with pytest.raises(ModelGatewayUnavailable, match="gateway"):
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
 
 
-def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
     factory_calls: list[str] = []
     model = GenericFakeChatModel(messages=iter(["ok"]))
     resolver = PlatformModelResolver(
-        model_factory=lambda alias: factory_calls.append(alias) or model
+        model_factory=lambda alias, api_key: factory_calls.append(alias) or model
     )
 
     with pytest.raises(ModelGatewayUnavailable, match="allowlist"):
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="unconfigured-alias"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="unconfigured-alias"),
+            tenant_id=uuid4(),
+        )
 
     assert factory_calls == []
 
@@ -1386,4 +1402,69 @@ async def test_deleted_tool_reference_still_fails_closed(session_factory) -> Non
         await resolver.resolve(
             run,
             autonomous_definition(tool_ids=[str(uuid4())]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_uses_the_tenant_attributable_key_not_a_shared_one() -> None:
+    """C16：Worker 必须按租户解析凭据，网关调用因此可归因到企业。"""
+    issued: list[tuple[str, str]] = []
+    model = GenericFakeChatModel(messages=iter(["ok"]))
+
+    class FakeCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            return SecretStr(f"sk-tenant-{tenant_id}")
+
+    def factory(alias: str, api_key: SecretStr) -> GenericFakeChatModel:
+        issued.append((alias, api_key.get_secret_value()))
+        return model
+
+    resolver = PlatformModelResolver(
+        model_factory=factory,
+        tenant_credentials=FakeCredentials(),
+    )
+    tenant_id = uuid4()
+
+    resolved = await resolver.resolve(
+        PublishedModel(kind="gateway_alias", alias="general-purpose"),
+        tenant_id=tenant_id,
+    )
+
+    assert resolved is model
+    assert issued == [("general-purpose", f"sk-tenant-{tenant_id}")]
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_fails_closed_when_the_tenant_has_no_credential() -> None:
+    """撤销/未对账的租户：绝不回退共享 Key，必须是永久性的受控准备失败。"""
+    factory_calls: list[str] = []
+
+    class RevokedCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayCredentialUnavailable("model_gateway_disabled")
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: factory_calls.append(alias),
+        tenant_credentials=RevokedCredentials(),
+    )
+
+    with pytest.raises(ModelGatewayUnavailable) as captured:
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+    assert isinstance(captured.value, PermanentRuntimePreparationError)
+    assert factory_calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_requires_tenant_credentials_in_production_assembly() -> None:
+    """没有装配租户凭据解析器时必须失败关闭，不得静默退回无归因调用。"""
+    resolver = PlatformModelResolver(model_factory=lambda alias, api_key: None)
+
+    with pytest.raises(ModelGatewayUnavailable):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
         )

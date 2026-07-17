@@ -78,7 +78,7 @@
 | 审批中心 | 已完成 | 独立审批记录/状态机/待办/批准/拒绝/转交/超时/幂等、Tool 风险审批接入统一协议、审批中心页面 + 工作台卡片已合入并通过双复审与真实 PG 并发门禁及审批 E2E | C13 |
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 已完成 | 成员邀请/角色/移除/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理已合入并通过三轮双复审与真实 PG + Playwright 完成门；OIDC/MFA 保留扩展边界 | C15 |
-| 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
+| 模型治理、评测、成本与配额 | 进行中 | 阶段一（Controller 对账 + 租户可归因/可撤销凭据）已实现待复审；用量、预算、配额、评测与用量中心留阶段二/三/四 | C16 |
 | Capability/Entitlement | 🧪 待集成（已合入主线，待 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已合入主线；Core+视频组合与 Worker 侧接线待 B04 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
 | 协议契约自动化 | 部分完成 | 缺 OpenAPI 快照、TS 生成、事件全量导出和漂移检查 | C19 |
@@ -459,7 +459,33 @@
 
 ### C16 模型治理、质量评测、成本与配额
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**（阶段一实现完成，待双复审与最终验收；未满足全部完成定义前不得标 ✅）
+
+**开始日期：2026-07-17**
+
+开工说明：前置 C14 已合入主线。实现分支 `task/c16-model-governance`。迁移编号协调：本条目使用 `20260716_0036`（`down_revision=20260716_0034`），`20260716_0035` 由并行的 C12 占用。
+
+**阶段划分**（完成定义共 8 条，分四阶段交付）：
+
+- 阶段一（本轮）：Controller 对账 LiteLLM + 租户可归因/可撤销凭据 —— 对应完成定义第 1 条（Controller 侧）与第 2 条；
+- 阶段二：用量/成本记录（模型、Token、延迟、错误、费用、任务归属）—— 第 3 条；
+- 阶段三：预算/配额执行、限流与用量告警 —— 第 4 条；含 C12 调度入口的配额门禁接入；
+- 阶段四：固定数据集回归评测、人工反馈、版本对比与客户端模型/用量/成本/预算/评测页面 —— 第 5、6 条。
+
+实现记录（阶段一，2026-07-17，本任务提交，分支 `task/c16-model-governance`）：
+
+- **复用既有基线**：`LiteLLMAdminClient`（9074a67，843 行、826 项单测）此前只被自己的单测引用、无任何生产接线；本轮把它接入生产而非另写客户端，未修改其任何行为。新增 `infrastructure/llm/provisioner.py` 作为唯一适配层，把上游错误一次性映射为平台端口语义；
+- **独立 Controller**：新增 `workers/model_gateway_controller.py` 进程（与 `sandbox_janitor` 同构，独立 compose 服务 `model-gateway-controller`），消费既有 outbox 对账真实 LiteLLM 公开管理 API 并推进策略状态；API 进程内不做任何对账。它是唯一持有 LiteLLM master key 的平台进程；
+- **多副本安全**：认领用 `FOR UPDATE SKIP LOCKED` + 按租户串行（NOT EXISTS 排除本租户更早的 pending 命令），认领事务横跨网关调用，崩溃即释放锁、命令仍 pending 自然重入，无需 processing 租约。**真实 PG 并发门禁**：5 项用例（并发不重复执行/跨租户并行/同租户严格有序/CAS 丢弃被取代的 revision/崩溃释放重入）通过；反向验证——移除 `skip_locked` 后其中 3 项立即 RED，证明门禁非假绿；
+- **凭据「派生而非存储」**：Key 明文与其 SHA256 摘要都由服务端密钥 + `tenant_id` + `key_version` 现场派生，`tenant_model_gateway_keys` 只存两个整数（`key_version`/`retired_key_version`），数据库中不存在任何由凭据派生的材料，API 也因此无需持有派生密钥。派生密钥在 staging/production fail-closed（≥32 字符、拒绝开发弱密钥），与 C14 `audit_hmac_key` 同模式；
+- **错误分类与不确定语义**：瞬态（传输/超时/5xx/429）按 `next_attempt_at` 指数退避（2s→300s 上限）、次数有界（8 次）后受控转 `error`；永久（4xx/校验/配置）立即 `error`；`LiteLLMAdminOutcomeUnknown` 一律停在 `error` 且绝不自动重放（同 6.2 节 `tool_execution_uncertain` 哲学）。已结算命令按保留期（默认 7 天）有界清扫；
+- **Worker 升级为租户 Key**：`PlatformModelResolver.resolve` 改为 async + 按 `tenant_id` 解析；`LiteLLMChatModelFactory` 不再持有共享 Key，凭据按租户传入。无策略/已撤销/未对账/Key 未签发/alias 越权一律 fail-closed，绝不回退共享 Key；解析只读平台数据库不调管理接口，LiteLLM 管理面故障不波及存量 active 租户。**生产装配由 `tests/unit/workers/test_main.py::test_production_worker_assembly_wires_tenant_attributable_gateway_credentials` 直接背书**（对齐 C07/C13 的生产装配缺口教训）；
+- **审计**：`PUT /policy` 与新增 `POST /api/v1/model-gateway/key/rotate`（仅 Owner `models.manage`）全部经 `emit_audit_event` 接入 C14；metadata 只含 provider-neutral 策略字段与版本号，契约测试断言 Key 明文不在响应与审计中；
+- **Demo Seed**：幂等补齐演示租户 active 策略 + Key v1，保证常驻开发栈的 Demo 员工在 fail-closed 下开箱可跑（`_upsert_record` 顺带从逐表特判主键改为统一从 mapper 取，移除既有 `RunEventRecord` 特判）；
+- **真实 LiteLLM 对账门禁**：新增 `infra/litellm/test.sh tenant-key-reconcile` + `tenant_key_probe.py`，对**真实 LiteLLM v1.86.2 容器**（随机项目名/端口、验后自动销毁）验证租户聚合、Key 签发可归因、幂等重放收敛、轮换后旧版本在网关侧被删除、撤销后立即阻断——首跑即通过，Stub 与真实实现无契约背离；
+- 验证命令：`uv run pytest tests/unit tests/contract -q`（1474 passed）、`tests/integration/database tests/integration/model_gateway tests/integration/bootstrap`（含 autogenerate 漂移守卫）、`uv run ruff check .`、`uv run mypy`（0 错误）、真实 PG 并发门禁 5 passed、真实 LiteLLM 对账门禁 passed；
+- **本阶段明确不含**（留给阶段二/三/四，不得据此宣称 C16 完成）：用量/Token/延迟/费用记录、预算与配额执行、限流与用量告警、评测、前端页面；
+- **已知缺口 / 遗留项**：① 派生密钥本身仍是环境变量注入的单一密钥，泄漏等于可签发任意租户 Key，纳入 KMS/Vault 托管与轮换属 C18；② 轮换/撤销立即生效，不为在途 Run 保留旧凭据（其后续模型调用会失败而非静默降级），这是有意的安全取舍；③ `DEFAULT_MODEL_ALIASES` 当前只有 `general-purpose`，存量 Key 的 models 范围漂移不可达，故未实现 `update_key`——**新增 alias 时必须同步实现存量 Key 的范围对齐**，否则存量租户会命中 `provisioning_key_scope_conflict` 永久错误；④ Demo Seed 直接写 `status=active` 以保证开发栈开箱可用，与"状态只由 Controller 推进"略有出入（Controller 后续对账幂等收敛到同一 desired）。
 
 完成定义：
 

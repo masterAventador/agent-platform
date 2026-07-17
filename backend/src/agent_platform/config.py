@@ -6,12 +6,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from agent_platform.platform.audit.hashing import (
     INSECURE_DEV_AUDIT_HMAC_KEY,
 )
+from agent_platform.platform.model_gateway.credentials import (
+    INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     validate_gateway_alias,
 )
 
 _AUDIT_HMAC_KEY_MIN_LENGTH = 32
+_MODEL_GATEWAY_KEY_SECRET_MIN_LENGTH = 32
 
 
 class AppSettings(BaseSettings):
@@ -43,6 +47,19 @@ class AppSettings(BaseSettings):
     llm_gateway_readiness_timeout_seconds: float = Field(default=5, gt=0, le=30)
     llm_gateway_max_retries: int = Field(default=2, ge=0, le=10)
     llm_gateway_allowed_aliases: frozenset[str] = DEFAULT_MODEL_ALIASES
+    # 租户网关 Key 派生密钥：只经环境变量注入，绝不落数据库、绝不进日志。
+    # Controller 用它签发/轮换/撤销租户虚拟 Key，Worker 用它派生同一个 Key 访问网关。
+    model_gateway_key_secret: SecretStr = SecretStr("")
+    # LiteLLM 公开管理接口（仅 Controller 使用；API 与 Worker 不持有 master key）。
+    model_gateway_admin_url: SecretStr = SecretStr("http://127.0.0.1:4000")
+    model_gateway_admin_master_key: SecretStr = SecretStr("")
+    model_gateway_admin_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    model_gateway_controller_interval_seconds: float = Field(default=2.0, ge=0.1, le=3_600)
+    model_gateway_command_retention_days: int = Field(default=7, ge=1, le=365)
+    model_gateway_command_prune_interval_seconds: float = Field(
+        default=3_600.0, ge=60, le=86_400
+    )
+    model_gateway_command_prune_batch_limit: int = Field(default=500, ge=1, le=10_000)
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"
@@ -182,6 +199,20 @@ class AppSettings(BaseSettings):
             # 开发/测试环境允许回退到公开弱密钥，保证本机开箱可用；仍然是 HMAC，
             # 不存在无密钥哈希路径。
             self.audit_hmac_key = SecretStr(INSECURE_DEV_AUDIT_HMAC_KEY)
+        gateway_key_secret = self.model_gateway_key_secret.get_secret_value()
+        if self.app_environment in ("staging", "production"):
+            # 该密钥可派生任意租户的网关 Key：弱密钥等同于凭据泄漏，必须 fail-closed。
+            if (
+                len(gateway_key_secret) < _MODEL_GATEWAY_KEY_SECRET_MIN_LENGTH
+                or gateway_key_secret == INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET
+            ):
+                raise ValueError(
+                    "staging/production requires an explicit model gateway key secret of at "
+                    f"least {_MODEL_GATEWAY_KEY_SECRET_MIN_LENGTH} characters "
+                    "(dev secret is rejected)"
+                )
+        elif not gateway_key_secret:
+            self.model_gateway_key_secret = SecretStr(INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET)
         if self.artifact_storage_provider == "tencent-cos" and (
             not self.cos_region
             or not self.cos_secret_id.get_secret_value()

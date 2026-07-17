@@ -20,7 +20,7 @@ export LITELLM_NETWORK_NAME
 MIN_DOCKER_COMPOSE_VERSION="2.20.0"
 
 usage() {
-  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix|real-provider}" >&2
+  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix|tenant-key-reconcile|real-provider}" >&2
 }
 
 if [[ $# -ne 1 ]]; then
@@ -309,6 +309,18 @@ print(
     f"({usage['total_tokens']} tokens)"
 )
 PY
+    ;;
+  tenant-key-reconcile)
+    # C16：Controller 的对账必须对真实 LiteLLM 管理 API 验证一次真实往返，
+    # 不能只对 Stub 通过（Mock 与真实实现的契约背离是本项目反复踩过的坑）。
+    install_cleanup_trap
+    prepare_runtime
+    compose up -d --wait --wait-timeout 180 litellm
+    MODEL_GATEWAY_KEY_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+      LITELLM_ADMIN_URL="http://127.0.0.1:${LITELLM_PORT}" \
+      LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
+      uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
+        python "${ROOT_DIR}/infra/litellm/tenant_key_probe.py"
     ;;
   worker-readiness|worker-chat|stub-matrix)
     install_cleanup_trap

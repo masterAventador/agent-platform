@@ -3,6 +3,9 @@ from pydantic import ValidationError
 
 from agent_platform.config import AppSettings
 from agent_platform.platform.audit.hashing import INSECURE_DEV_AUDIT_HMAC_KEY
+from agent_platform.platform.model_gateway.credentials import (
+    INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET,
+)
 
 
 def test_tauri_cors_defaults_use_exact_origins() -> None:
@@ -45,6 +48,7 @@ def test_production_auth_transport_accepts_secure_cross_site_cookie() -> None:
         auth_cookie_secure=True,
         auth_cookie_same_site="none",
         audit_hmac_key="an-explicit-production-audit-hmac-key-0001",
+        model_gateway_key_secret="an-explicit-production-gateway-secret-01",
     )
 
     assert settings.auth_cookie_secure is True
@@ -59,6 +63,7 @@ def test_dev_account_token_channel_defaults_open_but_forced_closed_in_production
         auth_cookie_secure=True,
         auth_cookie_same_site="none",
         audit_hmac_key="an-explicit-production-audit-hmac-key-0001",
+        model_gateway_key_secret="an-explicit-production-gateway-secret-01",
         expose_dev_account_tokens=True,
     )
     assert forced.expose_dev_account_tokens is False
@@ -66,6 +71,7 @@ def test_dev_account_token_channel_defaults_open_but_forced_closed_in_production
     staging = AppSettings(
         app_environment="staging",
         audit_hmac_key="an-explicit-staging-audit-hmac-key-000001",
+        model_gateway_key_secret="an-explicit-staging-gateway-secret-0001",
         expose_dev_account_tokens=True,
     )
     assert staging.expose_dev_account_tokens is False
@@ -136,3 +142,48 @@ def test_unbound_file_cleanup_uses_a_bounded_default_interval() -> None:
 
     with pytest.raises(ValidationError):
         AppSettings(artifact_unbound_file_cleanup_interval_seconds=4)
+
+
+def test_dev_environments_fall_back_to_the_published_weak_gateway_key_secret() -> None:
+    assert (
+        AppSettings().model_gateway_key_secret.get_secret_value()
+        == INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET
+    )
+
+
+@pytest.mark.parametrize(
+    "model_gateway_key_secret",
+    [
+        "",
+        "too-short-secret",
+        INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET,
+    ],
+)
+def test_production_requires_an_explicit_strong_gateway_key_secret(
+    model_gateway_key_secret: str,
+) -> None:
+    """派生密钥泄漏等于所有租户 Key 可被签发：staging/production 必须显式强密钥。"""
+    with pytest.raises(ValidationError):
+        AppSettings(
+            app_environment="production",
+            auth_cookie_secure=True,
+            auth_cookie_same_site="none",
+            audit_hmac_key="an-explicit-production-audit-hmac-key-0001",
+            model_gateway_key_secret=model_gateway_key_secret,
+        )
+
+
+def test_staging_requires_an_explicit_strong_gateway_key_secret() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(
+            app_environment="staging",
+            audit_hmac_key="an-explicit-staging-audit-hmac-key-000001",
+            model_gateway_key_secret=INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET,
+        )
+
+
+def test_gateway_key_secret_never_appears_in_settings_repr() -> None:
+    settings = AppSettings(model_gateway_key_secret="a-strong-model-gateway-key-secret-000001")
+
+    assert "a-strong-model-gateway-key-secret-000001" not in repr(settings)
+    assert "a-strong-model-gateway-key-secret-000001" not in str(settings)

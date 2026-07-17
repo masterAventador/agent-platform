@@ -9,10 +9,12 @@ from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid5
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Mapper
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
@@ -35,6 +37,10 @@ from agent_platform.infrastructure.database.repositories.invitations import (
     TenantInvitationRecord,
 )
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    TenantModelGatewayKeyRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
@@ -98,6 +104,11 @@ DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 DEMO_VIDEO_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "video-studio-entitlement")
+# C16 模型网关：Demo 租户的 desired 策略与已签发 Key 版本（Key 明文不落库，由派生得到）。
+DEMO_GATEWAY_BUDGET_MICROUSD = 50_000_000
+DEMO_GATEWAY_RPM_LIMIT = 60
+DEMO_GATEWAY_TPM_LIMIT = 200_000
+DEMO_GATEWAY_MAX_PARALLEL_REQUESTS = 4
 DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
 DEMO_APPROVED_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "approved-approval")
 DEMO_APPROVED_APPROVAL_INVOCATION_ID = uuid5(_DEMO_NAMESPACE, "approved-approval-invocation")
@@ -195,6 +206,8 @@ type DemoRecord = (
     | MemoryRecord
     | WorkflowRecord
     | WorkflowVersionRecord
+    | TenantModelGatewayPolicyRecord
+    | TenantModelGatewayKeyRecord
 )
 
 
@@ -293,8 +306,13 @@ async def _upsert_record(
     desired: DemoRecord,
     mutable_fields: tuple[str, ...],
 ) -> tuple[bool, bool]:
-    identity = desired.event_id if isinstance(desired, RunEventRecord) else desired.id
-    existing = cast(DemoRecord | None, await session.get(type(desired), identity))
+    # 主键名逐表不同（id / event_id / tenant_id），统一从 mapper 取，避免逐个特判。
+    mapper = cast(Mapper[DemoRecord], sa_inspect(type(desired)))
+    identity = mapper.primary_key_from_instance(desired)
+    existing = cast(
+        DemoRecord | None,
+        await session.get(type(desired), identity[0] if len(identity) == 1 else tuple(identity)),
+    )
     if existing is None and isinstance(desired, ToolVersionRecord):
         # 迁移回填可能已用随机 id 建立了同 (tool_id, version) 的行；
         # Seed 必须按业务唯一键收编该行，避免撞 uq_tool_versions_number。
@@ -417,6 +435,46 @@ def _demo_records(
                 created_at=_DEMO_CREATED_AT,
             ),
             ("name", "slug"),
+        ),
+        (
+            TenantModelGatewayPolicyRecord(
+                tenant_id=DEMO_TENANT_ID,
+                enabled=True,
+                allowed_aliases=["general-purpose"],
+                budget_microusd=DEMO_GATEWAY_BUDGET_MICROUSD,
+                budget_period="monthly",
+                rpm_limit=DEMO_GATEWAY_RPM_LIMIT,
+                tpm_limit=DEMO_GATEWAY_TPM_LIMIT,
+                max_parallel_requests=DEMO_GATEWAY_MAX_PARALLEL_REQUESTS,
+                revision=1,
+                # 直接标 active + 预置 Key 版本：Worker 在 C16 后对无策略/未对账租户失败关闭，
+                # 常驻开发栈的 Demo 员工不应等 Controller 首轮对账才能跑。Controller 之后
+                # 对同一 revision 的对账是幂等的，会把网关状态收敛到这里声明的 desired。
+                status="active",
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+                updated_by=DEMO_USER_ID,
+            ),
+            (
+                "enabled",
+                "allowed_aliases",
+                "budget_microusd",
+                "budget_period",
+                "rpm_limit",
+                "tpm_limit",
+                "max_parallel_requests",
+                "status",
+            ),
+        ),
+        (
+            TenantModelGatewayKeyRecord(
+                tenant_id=DEMO_TENANT_ID,
+                key_version=1,
+                retired_key_version=None,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            ("key_version", "retired_key_version"),
         ),
         (
             CapabilityEntitlementRecord(

@@ -32,21 +32,19 @@ class LiteLLMChatModelFactory:
         self,
         *,
         base_url: SecretStr,
-        api_key: SecretStr,
         timeout_seconds: float,
         max_retries: int,
     ) -> None:
         self._base_url = self._validate_base_url(base_url.get_secret_value())
-        _require_gateway_key(api_key)
-        self._api_key = api_key
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
 
-    def __call__(self, alias: str) -> BaseChatModel:
+    def __call__(self, alias: str, api_key: SecretStr) -> BaseChatModel:
+        # C16：凭据按租户传入，工厂不再持有应用级共享 Key，网关调用因此可归因。
         return ChatOpenAI(
             model=alias,
             base_url=self._base_url,
-            api_key=self._api_key,
+            api_key=_require_gateway_key_secret(api_key),
             timeout=self._timeout_seconds,
             max_retries=self._max_retries,
         )
@@ -117,6 +115,12 @@ def _require_gateway_key(api_key: SecretStr) -> str:
     if not value:
         raise ModelGatewayConfigurationError("model gateway key is required")
     return value
+
+
+def _require_gateway_key_secret(api_key: SecretStr) -> SecretStr:
+    if not isinstance(api_key, SecretStr) or not api_key.get_secret_value():
+        raise ModelGatewayConfigurationError("model gateway key is required")
+    return api_key
 
 
 def _validate_gateway_base_url(value: str) -> str:

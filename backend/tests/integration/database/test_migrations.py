@@ -373,6 +373,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "last_error_code",
         "created_at",
         "processed_at",
+        "next_attempt_at",
     } == provisioning_columns
     assert ("tenants", "tenant_id", "id", "CASCADE") in policy_foreign_keys
     assert ("users", "updated_by", "id", "RESTRICT") in policy_foreign_keys
@@ -742,9 +743,60 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
-    # 合入后单头，链：…0030(审批)→0031(video)→0032(crc64)→0033(workflow)→0034(account)。
+    # 合入后单头，链：…0031(video)→0032(crc64)→0033(workflow)→0034(account)→0036(网关 Key)。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0034"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0036"
+
+
+def test_model_gateway_key_migration_creates_and_removes_the_credential_table(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "model-gateway-keys.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(tenant_model_gateway_keys)"
+            ).fetchall()
+        }
+        command_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+    assert columns == {
+        "tenant_id",
+        "key_version",
+        "retired_key_version",
+        "created_at",
+        "updated_at",
+    }
+    # Key 明文与摘要都绝不落库：本表只有版本号，不含任何由凭据派生的列。
+    assert not {"key", "raw_key", "secret", "api_key", "key_digest"} & columns
+    # 有界退避需要持久化下次可尝试时间，否则网关宕机时会变成热轮询。
+    assert "next_attempt_at" in command_columns
+
+    command.downgrade(config, "20260716_0034")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'tenant_model_gateway_keys'"
+        ).fetchall()
+        after_downgrade = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+    assert remaining == []
+    assert "next_attempt_at" not in after_downgrade
 
 
 def test_workflow_migration_creates_and_removes_tables(tmp_path: Path) -> None:

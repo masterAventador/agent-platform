@@ -51,6 +51,10 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeVersionRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    TenantModelGatewayKeyRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.skills import SkillRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
@@ -442,3 +446,57 @@ async def test_demo_seed_provides_representative_memories_idempotently(
     assert all(record.status == "active" for record in memories)
     contents = {record.content for record in memories}
     assert len(contents) == len(memories)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_provisions_an_active_model_gateway_policy_and_key(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """C16 后 Worker 对无策略租户失败关闭：Demo 员工必须开箱即可跑。
+
+    Seed 直接写入 active 策略 + 已签发 Key 版本，让常驻开发栈无需等待 Controller 首轮
+    对账即可运行；Controller 随后的对账是幂等的（同版本收敛到同一网关状态）。
+    """
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=MemoryArtifactStorage(),
+    )
+
+    async with session_factory() as session:
+        policy = await session.get(TenantModelGatewayPolicyRecord, DEMO_TENANT_ID)
+        key = await session.get(TenantModelGatewayKeyRecord, DEMO_TENANT_ID)
+
+    assert policy is not None
+    assert policy.enabled is True
+    assert policy.status == "active"
+    assert policy.allowed_aliases == ["general-purpose"]
+    assert key is not None
+    assert key.key_version == 1
+    assert key.retired_key_version is None
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_gateway_policy_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        policies = (
+            (await session.execute(select(TenantModelGatewayPolicyRecord))).scalars().all()
+        )
+        keys = (
+            (await session.execute(select(TenantModelGatewayKeyRecord))).scalars().all()
+        )
+    assert len(policies) == 1
+    assert len(keys) == 1
+    assert policies[0].revision == 1

@@ -19,6 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.checkpoints.postgres import postgres_checkpointer
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    SqlAlchemyModelGatewayKeyRepository,
+    SqlAlchemyModelGatewayPolicyRepository,
+)
 from agent_platform.infrastructure.database.repositories.runtime_ownership import (
     RuntimeOwnershipBusy,
 )
@@ -54,6 +58,13 @@ from agent_platform.observability.metrics import OperationalComponent, Operation
 from agent_platform.observability.telemetry import configure_telemetry
 from agent_platform.platform.audit.hashing import configure_audit_hashing
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
+from agent_platform.platform.model_gateway.entities import (
+    TenantModelGatewayKey,
+    TenantModelGatewayPolicy,
+)
+from agent_platform.platform.model_gateway.tenant_credentials import (
+    TenantGatewayCredentialResolver,
+)
 from agent_platform.platform.tool_gateway import (
     InMemoryToolCircuitBreaker,
     ToolDefinition,
@@ -375,6 +386,21 @@ class _SessionToolReader:
             )
 
 
+class _SessionGatewayStateReader:
+    """每次调用用独立 session 读租户网关 desired 状态（与 _SessionToolReader 同构）。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def get_policy(self, tenant_id: UUID) -> TenantModelGatewayPolicy | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyModelGatewayPolicyRepository(session).get(tenant_id)
+
+    async def get_key(self, tenant_id: UUID) -> TenantModelGatewayKey | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyModelGatewayKeyRepository(session).get(tenant_id)
+
+
 def _build_runtime_resolver(
     *,
     settings: AppSettings,
@@ -388,9 +414,14 @@ def _build_runtime_resolver(
             model_resolver = PlatformModelResolver(
                 model_factory=LiteLLMChatModelFactory(
                     base_url=settings.llm_gateway_url,
-                    api_key=settings.llm_gateway_api_key,
                     timeout_seconds=settings.llm_gateway_request_timeout_seconds,
                     max_retries=settings.llm_gateway_max_retries,
+                ),
+                # C16：生产 Worker 必须装配租户凭据解析器，否则模型调用退回不可归因的
+                # 共享 Key。缺失时 PlatformModelResolver 会失败关闭而不是静默放行。
+                tenant_credentials=TenantGatewayCredentialResolver(
+                    reader=_SessionGatewayStateReader(session_factory),
+                    key_secret=settings.model_gateway_key_secret,
                 ),
                 allowed_aliases=settings.llm_gateway_allowed_aliases,
             )

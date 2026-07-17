@@ -14,7 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, SecretStr, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.artifacts import (
@@ -68,6 +68,9 @@ from agent_platform.platform.knowledge.retrieval import (
     validate_knowledge_retrieval_config,
 )
 from agent_platform.platform.memory.entities import Memory, MemoryScope, MemorySource
+from agent_platform.platform.model_gateway.errors import (
+    ModelGatewayCredentialUnavailable,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -354,21 +357,31 @@ class PublishedRuntimeCapabilities:
             raise UntrustedRuntimeDefinition("invalid published runtime definition") from None
 
 
+class TenantGatewayCredentials(Protocol):
+    async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr: ...
+
+
 class PlatformModelResolver:
-    """只解析 provider-neutral alias；凭据与路由留在宿主进程。"""
+    """只解析 provider-neutral alias；凭据按租户解析，路由留在宿主进程。
+
+    C16：网关凭据从应用级共享 Key 升级为租户专属虚拟 Key，因此解析需要 tenant_id。
+    宿主侧注入的测试模型（``injected_models``）不经过凭据解析——它们根本不触达网关。
+    """
 
     def __init__(
         self,
         *,
         injected_models: Mapping[str, BaseChatModel] | None = None,
-        model_factory: Callable[[str], BaseChatModel] | None = None,
+        model_factory: Callable[[str, SecretStr], BaseChatModel] | None = None,
+        tenant_credentials: TenantGatewayCredentials | None = None,
         allowed_aliases: frozenset[str] = DEFAULT_MODEL_ALIASES,
     ) -> None:
         self._injected_models = dict(injected_models or {})
         self._model_factory = model_factory
+        self._tenant_credentials = tenant_credentials
         self._allowed_aliases = allowed_aliases | self._injected_models.keys()
 
-    def resolve(self, model: PublishedModel) -> ResolvedModel:
+    async def resolve(self, model: PublishedModel, *, tenant_id: UUID) -> ResolvedModel:
         if model.alias not in self._allowed_aliases:
             raise ModelGatewayUnavailable("model alias is outside the platform allowlist")
         injected = self._injected_models.get(model.alias)
@@ -376,7 +389,16 @@ class PlatformModelResolver:
             return injected
         if self._model_factory is None:
             raise ModelGatewayUnavailable("model gateway factory is unavailable")
-        return self._model_factory(model.alias)
+        if self._tenant_credentials is None:
+            # 缺凭据解析器时宁可失败关闭：静默放行等于恢复不可归因的共享 Key 调用。
+            raise ModelGatewayUnavailable("tenant gateway credentials are unavailable")
+        try:
+            api_key = await self._tenant_credentials.resolve(
+                tenant_id=tenant_id, alias=model.alias
+            )
+        except ModelGatewayCredentialUnavailable as error:
+            raise ModelGatewayUnavailable(error.code) from None
+        return self._model_factory(model.alias, api_key)
 
 
 AutonomousRuntimeFactory = Callable[
@@ -616,7 +638,9 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = self._model_resolver.resolve(capabilities.model)
+        model = await self._model_resolver.resolve(
+            capabilities.model, tenant_id=run.tenant_id
+        )
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,
@@ -658,7 +682,9 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = self._model_resolver.resolve(capabilities.model)
+        model = await self._model_resolver.resolve(
+            capabilities.model, tenant_id=run.tenant_id
+        )
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,
