@@ -572,3 +572,28 @@ async def test_production_worker_assembly_wires_tenant_attributable_gateway_cred
     finally:
         await resolver.aclose()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_production_worker_assembly_wires_model_usage_recorder() -> None:
+    """C16 阶段二：生产 Worker 装配必须注入用量记录器，否则捕获点静默失效
+    （与 C07 knowledge_provider_registry 从未注入同型的装配缺口）。"""
+    from agent_platform.infrastructure.database.repositories.model_usage import (
+        SessionModelUsageRecorder,
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    settings = AppSettings(
+        sandbox_controller_secret="sandbox-secret-16chars",
+        model_gateway_key_secret="a-strong-model-gateway-key-secret-000001",
+    )
+    resolver = _build_runtime_resolver(settings=settings, session_factory=session_factory)
+    try:
+        assert isinstance(resolver._model_usage_recorder, SessionModelUsageRecorder)
+    finally:
+        await resolver.aclose()
+        await engine.dispose()

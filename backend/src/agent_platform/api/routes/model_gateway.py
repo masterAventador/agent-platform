@@ -1,8 +1,10 @@
+import base64
+import binascii
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -18,6 +20,9 @@ from agent_platform.api.dependencies.authentication import resolve_workspace
 from agent_platform.infrastructure.database.repositories.audit import emit_audit_event
 from agent_platform.infrastructure.database.repositories.model_gateway import (
     SqlAlchemyModelGatewayPolicyRepository,
+)
+from agent_platform.infrastructure.database.repositories.model_usage import (
+    SqlAlchemyModelUsageRepository,
 )
 from agent_platform.platform.model_gateway.entities import (
     MAX_BUDGET_MICROUSD,
@@ -37,6 +42,13 @@ from agent_platform.platform.model_gateway.errors import (
     ModelGatewayPolicyRevisionConflict,
 )
 from agent_platform.platform.model_gateway.services import ModelGatewayPolicyService
+from agent_platform.platform.model_gateway.usage import (
+    ModelCallOutcome,
+    ModelUsageCursor,
+    ModelUsagePage,
+    ModelUsageQuery,
+    ModelUsageRecord,
+)
 from agent_platform.platform.models import GatewayAlias
 from agent_platform.platform.tenants.permissions import TenantPermission
 
@@ -244,6 +256,113 @@ async def put_model_gateway_policy(
             _raise_policy_error(error)
             raise AssertionError("unreachable") from error
     return ModelGatewayPolicyResponse.from_entity(policy)
+
+
+class ModelUsageRecordResponse(BaseModel):
+    """平台自有用量模型：绝不携带 LangChain/LiteLLM 原始 response_metadata。"""
+
+    id: UUID
+    run_id: UUID | None
+    employee_id: UUID | None
+    model_alias: str
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+    latency_ms: int
+    outcome: ModelCallOutcome
+    error_type: str | None
+    # 费用以整数 nano-USD 字符串（或 null=未知）返回，绝不浮点、绝不用 0 冒充未知。
+    cost_nanousd: str | None
+    cost_source: str | None
+    recorded_at: datetime
+
+    @classmethod
+    def from_entity(cls, record: ModelUsageRecord) -> "ModelUsageRecordResponse":
+        return cls(
+            id=record.id,
+            run_id=record.run_id,
+            employee_id=record.employee_id,
+            model_alias=record.model_alias,
+            prompt_tokens=record.prompt_tokens,
+            completion_tokens=record.completion_tokens,
+            total_tokens=record.total_tokens,
+            latency_ms=record.latency_ms,
+            outcome=record.outcome,
+            error_type=record.error_type,
+            cost_nanousd=(str(record.cost_nanousd) if record.cost_nanousd is not None else None),
+            cost_source=record.cost_source,
+            recorded_at=record.recorded_at,
+        )
+
+
+class ModelUsagePageResponse(BaseModel):
+    records: list[ModelUsageRecordResponse]
+    next_cursor: str | None
+
+    @classmethod
+    def from_page(cls, page: ModelUsagePage) -> "ModelUsagePageResponse":
+        return cls(
+            records=[ModelUsageRecordResponse.from_entity(r) for r in page.records],
+            next_cursor=_encode_cursor(page.next_cursor),
+        )
+
+
+def _encode_cursor(cursor: ModelUsageCursor | None) -> str | None:
+    if cursor is None:
+        return None
+    raw = f"{cursor.recorded_at.isoformat()}|{cursor.id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(value: str | None) -> ModelUsageCursor | None:
+    if value is None:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
+        recorded_at_raw, id_raw = raw.rsplit("|", 1)
+        return ModelUsageCursor(
+            recorded_at=datetime.fromisoformat(recorded_at_raw),
+            id=UUID(id_raw),
+        )
+    except (ValueError, binascii.Error) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_usage_cursor", "message": "分页游标无效"},
+        ) from error
+
+
+@router.get("/usage", response_model=ModelUsagePageResponse)
+async def get_model_gateway_usage(
+    request: Request,
+    tenant_id: TenantHeader = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: str | None = None,
+) -> ModelUsagePageResponse:
+    """按 tenant 严格隔离读取模型用量记录（观测面）。
+
+    权限 ``models.usage.read``；支持时间范围与 keyset 分页；返回平台自有用量模型。
+    """
+
+    decoded_cursor = _decode_cursor(cursor)
+    async with request.app.state.session_factory() as session:
+        _, access = await resolve_workspace(
+            request=request,
+            database_session=session,
+            tenant_id=tenant_id,
+            required_permission=TenantPermission.MODELS_USAGE_READ,
+        )
+        page = await SqlAlchemyModelUsageRepository(session).query(
+            ModelUsageQuery(
+                tenant_id=access.tenant.id,
+                start=start,
+                end=end,
+                limit=limit,
+                cursor=decoded_cursor,
+            )
+        )
+    return ModelUsagePageResponse.from_page(page)
 
 
 @router.post("/key/rotate", response_model=ModelGatewayPolicyResponse)

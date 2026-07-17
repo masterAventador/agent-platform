@@ -161,3 +161,73 @@ def test_controller_config_errors_never_leak_the_master_key() -> None:
     assert master_key not in text
     assert "pass" not in text
     assert "token" not in text
+
+
+class FakeUsagePruner:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.retentions: list[timedelta] = []
+
+    async def prune(self, *, now: datetime, retention: timedelta, limit: int) -> int:
+        del now, limit
+        self.calls += 1
+        self.retentions.append(retention)
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_controller_prunes_model_usage_records_on_schedule(tmp_path) -> None:
+    """C16 阶段二：用量表随调用无界增长，Controller 循环必须按保留期有界清扫它。"""
+    reconciler = FakeReconciler()
+    usage_pruner = FakeUsagePruner()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        serve_controller(
+            reconciler=reconciler,
+            stop_event=stop_event,
+            interval_seconds=0.01,
+            retention=timedelta(days=7),
+            prune_interval_seconds=0.01,
+            prune_batch_limit=100,
+            ready_file=tmp_path / "ready",
+            usage_pruner=usage_pruner,
+            usage_retention=timedelta(days=90),
+            usage_prune_interval_seconds=0.01,
+            usage_prune_batch_limit=500,
+        )
+    )
+    await asyncio.sleep(0.08)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=2)
+    assert usage_pruner.calls >= 1
+    assert usage_pruner.retentions[0] == timedelta(days=90)
+
+
+@pytest.mark.asyncio
+async def test_usage_prune_failure_never_kills_the_controller_loop(tmp_path) -> None:
+    class _Boom:
+        async def prune(self, *, now, retention, limit):
+            raise RuntimeError("usage prune down")
+
+    reconciler = FakeReconciler()
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        serve_controller(
+            reconciler=reconciler,
+            stop_event=stop_event,
+            interval_seconds=0.01,
+            retention=timedelta(days=7),
+            prune_interval_seconds=0.01,
+            prune_batch_limit=100,
+            ready_file=tmp_path / "ready",
+            usage_pruner=_Boom(),
+            usage_retention=timedelta(days=90),
+            usage_prune_interval_seconds=0.01,
+            usage_prune_batch_limit=500,
+        )
+    )
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=2)
+    # 循环没有因用量清扫失败而停摆：对账仍在进行
+    assert reconciler.reconcile_calls >= 1
