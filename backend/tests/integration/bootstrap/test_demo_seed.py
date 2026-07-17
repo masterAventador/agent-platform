@@ -336,12 +336,12 @@ async def test_demo_seed_grants_social_operations_entitlement_idempotently(
             )
         ).all()
 
-    assert len(records) == 1
-    entitlement = records[0]
-    assert entitlement.capability_id == "social-operations"
-    assert entitlement.status == "active"
-    assert entitlement.source == "demo-seed"
-    assert entitlement.expires_at is None
+    by_capability = {record.capability_id: record for record in records}
+    assert set(by_capability) == {"social-operations", "video-studio"}
+    for entitlement in by_capability.values():
+        assert entitlement.status == "active"
+        assert entitlement.source == "demo-seed"
+        assert entitlement.expires_at is None
 
 @pytest.mark.asyncio
 async def test_demo_seed_adopts_migration_backfilled_tool_version(

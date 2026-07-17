@@ -270,6 +270,15 @@ write_environment() {
     printf 'DOCKER_SOCKET_PATH=/var/run/docker.sock\n'
     printf 'CORE_NETWORK_NAME=%s\n' "${CORE_NETWORK_NAME}"
     printf 'LITELLM_NETWORK_NAME=%s\n' "${LITELLM_NETWORK_NAME}"
+    # video-studio 素材直传（B04）：仅当调用方提供了开发 COS 凭据时写入；
+    # 缺省时对应端点保持 503 失败关闭（dotenv 不允许空值）。
+    if [[ -n "${TEST_COS_REGION:-}" && -n "${TEST_COS_SECRET_ID:-}" \
+      && -n "${TEST_COS_SECRET_KEY:-}" && -n "${VIDEO_MATERIAL_COS_BUCKET:-${TEST_COS_BUCKET:-}}" ]]; then
+      printf 'VIDEO_MATERIAL_COS_BUCKET=%s\n' "${VIDEO_MATERIAL_COS_BUCKET:-${TEST_COS_BUCKET}}"
+      printf 'TEST_COS_REGION=%s\n' "${TEST_COS_REGION}"
+      printf 'TEST_COS_SECRET_ID=%s\n' "${TEST_COS_SECRET_ID}"
+      printf 'TEST_COS_SECRET_KEY=%s\n' "${TEST_COS_SECRET_KEY}"
+    fi
   } >"${PLATFORM_ENV_FILE}"
   chmod 600 "${SECRETS_ENV_FILE}" "${CORE_ENV_FILE}" "${LITELLM_ENV_FILE}" "${PLATFORM_ENV_FILE}"
 }
@@ -293,7 +302,9 @@ dotenv_key_is_allowed() {
       platform:AUDIT_HMAC_KEY|\
       platform:AGENT_PLATFORM_LLM_GATEWAY_URL|platform:AGENT_PLATFORM_LLM_GATEWAY_API_KEY|\
       platform:SANDBOX_CONTROLLER_BEARER_SECRET|platform:SANDBOX_CONTROLLER_IMAGE|\
-      platform:DOCKER_SOCKET_PATH|platform:CORE_NETWORK_NAME|platform:LITELLM_NETWORK_NAME)
+      platform:DOCKER_SOCKET_PATH|platform:CORE_NETWORK_NAME|platform:LITELLM_NETWORK_NAME|\
+      platform:VIDEO_MATERIAL_COS_BUCKET|platform:TEST_COS_REGION|\
+      platform:TEST_COS_SECRET_ID|platform:TEST_COS_SECRET_KEY)
       return 0
       ;;
     *) return 1 ;;

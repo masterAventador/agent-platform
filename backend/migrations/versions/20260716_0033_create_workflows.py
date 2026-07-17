@@ -1,7 +1,7 @@
 """C11 固定/混合工作流：workflows 注册表与 workflow_versions 版本快照表。
 
-down_revision 暂指 20260716_0030（C13 审批）。本条目与 C15（0031）并行开发，
-主代理合并时按「先合入者保留编号」统一重链，保持迁移单头。
+合入 main 时已重链——B04 先合入占 0031(video)/0032(crc64)，
+本 workflows 迁移重编为 0033（接 0032），保持线性单头。
 """
 
 from collections.abc import Sequence
@@ -9,8 +9,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260716_0032"
-down_revision: str | None = "20260716_0030"
+revision: str = "20260716_0033"
+down_revision: str | None = "20260716_0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

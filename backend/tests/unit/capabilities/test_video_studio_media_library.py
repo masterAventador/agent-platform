@@ -1,0 +1,1387 @@
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+
+from agent_platform.capabilities.video_studio.media_library import (
+    MAX_MATERIAL_SIZE_BYTES,
+    DownloadTaskConcurrentUpdateError,
+    DownloadTaskStatus,
+    InMemoryMaterialRepository,
+    InvalidDownloadTaskTransition,
+    InvalidMaterialInput,
+    MaterialFolderNotFoundError,
+    MaterialInUseError,
+    MaterialKind,
+    MaterialNotFoundError,
+    MediaLibraryService,
+    UploadCredentialExpiredError,
+)
+from agent_platform.capabilities.video_studio.storage_credentials import (
+    IssuedMaterialPreview,
+    IssuedUploadCredentials,
+    StoredMaterialObject,
+)
+
+
+class RecordingCredentialIssuer:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    async def issue_upload_credentials(
+        self,
+        *,
+        tenant_id,
+        key_prefix: str,
+        expires_at: datetime,
+        allowed_actions: tuple[str, ...],
+    ) -> IssuedUploadCredentials:
+        self.requests.append(
+            {
+                "tenant_id": tenant_id,
+                "key_prefix": key_prefix,
+                "expires_at": expires_at,
+                "allowed_actions": allowed_actions,
+            }
+        )
+        return IssuedUploadCredentials(
+            provider="tencent-cos",
+            bucket="agent-platform-materials",
+            region="ap-beijing",
+            key_prefix=key_prefix,
+            tmp_secret_id="tmp-secret-id",
+            tmp_secret_key="tmp-secret-key",
+            session_token="session-token",
+            expires_at=expires_at,
+        )
+
+
+class RecordingObjectVerifier:
+    def __init__(self) -> None:
+        self.objects: dict[tuple[object, str], StoredMaterialObject] = {}
+        self.requests: list[tuple[object, str]] = []
+
+    async def inspect_uploaded_object(self, *, tenant_id, object_key: str) -> StoredMaterialObject:
+        self.requests.append((tenant_id, object_key))
+        return self.objects[(tenant_id, object_key)]
+
+
+class FlakyObjectCleaner:
+    def __init__(self) -> None:
+        self.requests: list[tuple[object, str]] = []
+        self.failures_remaining = 1
+
+    async def delete_object(self, *, tenant_id, object_key: str) -> None:
+        self.requests.append((tenant_id, object_key))
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            raise OSError("temporary object storage failure")
+
+
+class RecordingPreviewIssuer:
+    def __init__(self) -> None:
+        self.requests: list[tuple[object, str, datetime]] = []
+
+    async def issue_preview_url(
+        self,
+        *,
+        tenant_id,
+        object_key: str,
+        expires_at: datetime,
+    ) -> IssuedMaterialPreview:
+        self.requests.append((tenant_id, object_key, expires_at))
+        return IssuedMaterialPreview(
+            url=f"https://preview.invalid/{object_key}",
+            expires_at=expires_at,
+        )
+
+
+class ConflictingDownloadRepository(InMemoryMaterialRepository):
+    async def update_download_task(self, task, *, expected_revision: int) -> bool:
+        del task, expected_revision
+        return False
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_are_short_lived_and_scoped_to_tenant_material_prefix() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    now = datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
+    issuer = RecordingCredentialIssuer()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: now,
+    )
+
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="launch.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=256 * 1024 * 1024,
+        sha256="a" * 64,
+        crc64ecma="700",
+        tag_names=("广告", "7月"),
+    )
+
+    assert draft.material.status == "pending_upload"
+    assert draft.material.storage_key == (
+        f"materials/{tenant_id}/{draft.material.id}/launch.mp4"
+    )
+    assert draft.credentials.key_prefix == f"materials/{tenant_id}/{draft.material.id}/"
+    assert draft.credentials.expires_at == now + timedelta(minutes=15)
+    assert issuer.requests == [
+        {
+            "tenant_id": tenant_id,
+            "key_prefix": f"materials/{tenant_id}/{draft.material.id}/",
+            "expires_at": now + timedelta(minutes=15),
+            "allowed_actions": (
+                "name/cos:PutObject",
+                "name/cos:PostObject",
+                "name/cos:InitiateMultipartUpload",
+                "name/cos:UploadPart",
+                "name/cos:CompleteMultipartUpload",
+                "name/cos:AbortMultipartUpload",
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_material_folders_are_tenant_scoped_and_upload_requires_existing_folder() -> None:
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    owner_id = uuid4()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: datetime(2026, 7, 16, 8, 30, tzinfo=UTC),
+    )
+
+    root = await service.create_folder(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="广告素材",
+    )
+    child = await service.create_folder(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="7月",
+        parent_id=root.id,
+    )
+
+    assert [folder.name for folder in await service.list_folders(tenant_id=tenant_id)] == [
+        "广告素材",
+        "7月",
+    ]
+    with pytest.raises(MaterialFolderNotFoundError):
+        await service.list_folders(tenant_id=other_tenant_id, parent_id=root.id)
+
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="launch.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=256 * 1024 * 1024,
+        sha256="a" * 64,
+        crc64ecma="700",
+        folder_id=child.id,
+    )
+    assert draft.material.folder_id == child.id
+
+    with pytest.raises(MaterialFolderNotFoundError):
+        await service.request_upload_credentials(
+            tenant_id=other_tenant_id,
+            actor_id=owner_id,
+            name="leak.mp4",
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=1024,
+            sha256="b" * 64,
+            crc64ecma="700",
+            folder_id=child.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_cross_tenant_and_expired_credentials() -> None:
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    owner_id = uuid4()
+    current_time = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        clock=lambda: current_time,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="voice.mp3",
+        kind=MaterialKind.MUSIC,
+        media_type="audio/mpeg",
+        size_bytes=12_345,
+        sha256="b" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=12_345,
+        sha256="b" * 64,
+        crc64ecma="700",
+    )
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.complete_upload(
+            tenant_id=other_tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+
+    current_time = draft.credentials.expires_at + timedelta(seconds=1)
+    with pytest.raises(UploadCredentialExpiredError):
+        await service.complete_upload(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+    failed = await service.get_material(tenant_id=tenant_id, material_id=draft.material.id)
+    assert failed.status == "upload_failed"
+    assert failed.cleanup_required is True
+
+
+@pytest.mark.asyncio
+async def test_referenced_material_cannot_be_deleted_until_reference_is_removed() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 16, 11, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="cover.png",
+        kind=MaterialKind.IMAGE,
+        media_type="image/png",
+        size_bytes=4096,
+        sha256="c" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=4096,
+        sha256="c" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    await service.add_reference(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=material.id,
+        reference_type="timeline",
+        reference_id=uuid4(),
+    )
+
+    with pytest.raises(MaterialInUseError):
+        await service.delete_material(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            material_id=material.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_task_progress_resume_failure_and_retry_state_machine() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="cut.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="d" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="d" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    assert task.status == DownloadTaskStatus.QUEUED
+
+    running = await service.start_download_task(tenant_id=tenant_id, task_id=task.id)
+    assert running.status == DownloadTaskStatus.RUNNING
+    progressed = await service.update_download_progress(
+        tenant_id=tenant_id,
+        task_id=task.id,
+        downloaded_bytes=400,
+        resume_token="bytes=400-",
+    )
+    assert progressed.progress == 40
+    assert progressed.resume_token == "bytes=400-"
+    failed = await service.fail_download_task(
+        tenant_id=tenant_id,
+        task_id=task.id,
+        error_code="network_timeout",
+        retryable=True,
+    )
+    assert failed.status == DownloadTaskStatus.FAILED
+    retried = await service.retry_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        task_id=task.id,
+    )
+    assert retried.status == DownloadTaskStatus.QUEUED
+    assert retried.retry_count == 1
+    assert retried.downloaded_bytes == 400
+    assert retried.resume_token == "bytes=400-"
+
+    with pytest.raises(InvalidDownloadTaskTransition):
+        await service.retry_download_task(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            task_id=task.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_uses_trusted_object_metadata_instead_of_client_claims() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 16, 13, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="trusted.png",
+        kind=MaterialKind.IMAGE,
+        media_type="image/png",
+        size_bytes=2048,
+        sha256="e" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=2048,
+        sha256="e" * 64,
+        crc64ecma="700",
+    )
+
+    completed = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+
+    assert completed.status == "available"
+    assert verifier.requests == [(tenant_id, draft.material.storage_key)]
+
+
+@pytest.mark.asyncio
+async def test_download_task_can_complete_or_cancel_without_forging_terminal_state() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 16, 14, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="download.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="f" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="f" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    completed_task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.start_download_task(tenant_id=tenant_id, task_id=completed_task.id)
+
+    completed = await service.complete_download_task(
+        tenant_id=tenant_id,
+        task_id=completed_task.id,
+    )
+
+    assert completed.status == DownloadTaskStatus.SUCCEEDED
+    assert completed.progress == 100
+    assert completed.downloaded_bytes == completed.total_bytes
+    assert completed.resume_token is None
+    assert completed.completed_at is not None
+
+    cancelled_task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    cancelled = await service.cancel_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        task_id=cancelled_task.id,
+    )
+    assert cancelled.status == DownloadTaskStatus.CANCELLED
+    assert cancelled.completed_at is not None
+
+    with pytest.raises(InvalidDownloadTaskTransition):
+        await service.fail_download_task(
+            tenant_id=tenant_id,
+            task_id=completed_task.id,
+            error_code="late_failure",
+            retryable=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_progress_rejects_corrupt_or_regressive_worker_updates() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="bounded.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="1" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="1" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.start_download_task(tenant_id=tenant_id, task_id=task.id)
+    await service.update_download_progress(
+        tenant_id=tenant_id,
+        task_id=task.id,
+        downloaded_bytes=400,
+        resume_token="bytes=400-",
+    )
+
+    for invalid_bytes in (-1, 399, 1001):
+        with pytest.raises(InvalidMaterialInput):
+            await service.update_download_progress(
+                tenant_id=tenant_id,
+                task_id=task.id,
+                downloaded_bytes=invalid_bytes,
+                resume_token="bytes=invalid-",
+            )
+    with pytest.raises(InvalidMaterialInput):
+        await service.update_download_progress(
+            tenant_id=tenant_id,
+            task_id=task.id,
+            downloaded_bytes=500,
+            resume_token="x" * 501,
+        )
+    with pytest.raises(InvalidMaterialInput):
+        await service.fail_download_task(
+            tenant_id=tenant_id,
+            task_id=task.id,
+            error_code="INVALID ERROR CODE",
+            retryable=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_task_user_actions_are_owner_scoped() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    other_member_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="private.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="2" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="2" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.cancel_download_task(
+            tenant_id=tenant_id,
+            actor_id=other_member_id,
+            task_id=task.id,
+        )
+    cancelled = await service.cancel_download_task(
+        tenant_id=tenant_id,
+        actor_id=other_member_id,
+        task_id=task.id,
+        manage_all=True,
+    )
+    assert cancelled.status is DownloadTaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_cleanup_remains_durable_and_can_be_retried() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    cleaner = FlakyObjectCleaner()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        object_cleaner=cleaner,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="corrupt.png",
+        kind=MaterialKind.IMAGE,
+        media_type="image/png",
+        size_bytes=1000,
+        sha256="3" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=999,
+        sha256="4" * 64,
+        crc64ecma="700",
+    )
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+
+    with pytest.raises(OSError, match="temporary object storage failure"):
+        await service.cleanup_material_object(
+            tenant_id=tenant_id,
+            material_id=draft.material.id,
+        )
+    still_pending = await service.get_material(
+        tenant_id=tenant_id,
+        material_id=draft.material.id,
+    )
+    assert still_pending.cleanup_required is True
+
+    cleaned = await service.cleanup_material_object(
+        tenant_id=tenant_id,
+        material_id=draft.material.id,
+    )
+    assert cleaned.cleanup_required is False
+    assert cleaner.requests == [
+        (tenant_id, draft.material.storage_key),
+        (tenant_id, draft.material.storage_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preview_url_is_short_lived_and_scoped_to_material_storage_key() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    now = datetime(2026, 7, 16, 15, 0, tzinfo=UTC)
+    verifier = RecordingObjectVerifier()
+    preview_issuer = RecordingPreviewIssuer()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        preview_issuer=preview_issuer,
+        clock=lambda: now,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="preview.jpg",
+        kind=MaterialKind.IMAGE,
+        media_type="image/jpeg",
+        size_bytes=1000,
+        sha256="5" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="5" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+
+    preview = await service.request_preview_url(
+        tenant_id=tenant_id,
+        material_id=material.id,
+    )
+
+    assert preview.expires_at == now + timedelta(minutes=5)
+    assert preview_issuer.requests == [
+        (tenant_id, material.storage_key, now + timedelta(minutes=5)),
+    ]
+    with pytest.raises(MaterialNotFoundError):
+        await service.request_preview_url(
+            tenant_id=uuid4(),
+            material_id=material.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_aborted_and_expired_upload_drafts_are_marked_for_cleanup() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    current_time = datetime(2026, 7, 16, 16, 0, tzinfo=UTC)
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: current_time,
+    )
+    aborted_draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="aborted.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="6" * 64,
+        crc64ecma="700",
+    )
+    aborted = await service.abort_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=aborted_draft.material.id,
+    )
+    assert aborted.status == "upload_failed"
+    assert aborted.cleanup_required is True
+
+    expired_draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="expired.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="7" * 64,
+        crc64ecma="700",
+    )
+    current_time = expired_draft.credentials.expires_at + timedelta(seconds=1)
+    expired = await service.expire_upload_drafts(limit=10)
+
+    assert [material.id for material in expired] == [expired_draft.material.id]
+    assert expired[0].status == "upload_failed"
+    assert expired[0].cleanup_required is True
+
+
+@pytest.mark.asyncio
+async def test_download_state_transition_fails_on_concurrent_revision_change() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    repository = ConflictingDownloadRepository()
+    service = MediaLibraryService(
+        repository=repository,
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="race.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="9" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="9" * 64,
+        crc64ecma="700",
+    )
+    material = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        source_type="material",
+        source_id=material.id,
+    )
+
+    with pytest.raises(DownloadTaskConcurrentUpdateError):
+        await service.start_download_task(tenant_id=tenant_id, task_id=task.id)
+
+
+@pytest.mark.asyncio
+async def test_list_references_is_tenant_scoped_and_ordered_by_creation() -> None:
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    moments = iter(
+        datetime(2026, 7, 16, 11, minute, tzinfo=UTC) for minute in range(30)
+    )
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: next(moments),
+    )
+
+    async def make_material(target_tenant_id, name: str):
+        draft = await service.request_upload_credentials(
+            tenant_id=target_tenant_id,
+            actor_id=owner_id,
+            name=name,
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=1024,
+            sha256="d" * 64,
+            crc64ecma="700",
+        )
+        verifier.objects[(target_tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+            size_bytes=1024,
+            sha256="d" * 64,
+            crc64ecma="700",
+        )
+        return await service.complete_upload(
+            tenant_id=target_tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+
+    material = await make_material(tenant_id, "list-refs.mp4")
+    other_material = await make_material(other_tenant_id, "other.mp4")
+
+    first = await service.add_reference(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+    second = await service.add_reference(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=material.id,
+        reference_type="render_job",
+        reference_id=uuid4(),
+    )
+    await service.add_reference(
+        tenant_id=other_tenant_id,
+        actor_id=owner_id,
+        material_id=other_material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+
+    listed = await service.list_references(tenant_id=tenant_id, material_id=material.id)
+    assert [reference.id for reference in listed] == [first.id, second.id]
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.list_references(tenant_id=other_tenant_id, material_id=material.id)
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_reject_materials_over_size_limit() -> None:
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(InvalidMaterialInput, match="^素材大小无效$"):
+        await service.request_upload_credentials(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            name="oversized.mp4",
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=MAX_MATERIAL_SIZE_BYTES + 1,
+            sha256="a" * 64,
+            crc64ecma="700",
+        )
+
+    boundary = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="boundary.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=MAX_MATERIAL_SIZE_BYTES,
+        sha256="b" * 64,
+        crc64ecma="700",
+    )
+    assert boundary.material.size_bytes == MAX_MATERIAL_SIZE_BYTES
+
+
+class RecordingAuditSink:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def record(self, event) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_key_material_and_download_operations_record_sanitized_audit_events() -> None:
+    """素材上传/删除/引用/下载任务关键操作必须产出可桥接 C14 的脱敏审计事件。"""
+
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="audit.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="700",
+    )
+    material = draft.material
+    verifier.objects[(tenant_id, material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="700",
+    )
+    await service.complete_upload(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=material.id
+    )
+    reference = await service.add_reference(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        material_id=material.id,
+        reference_type="timeline_clip",
+        reference_id=uuid4(),
+    )
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.cancel_download_task(
+        tenant_id=tenant_id, actor_id=actor_id, task_id=task.id
+    )
+
+    second = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="material",
+        source_id=material.id,
+    )
+    await service.start_download_task(tenant_id=tenant_id, task_id=second.id)
+    await service.fail_download_task(
+        tenant_id=tenant_id, task_id=second.id, error_code="network_timeout", retryable=True
+    )
+    await service.retry_download_task(
+        tenant_id=tenant_id, actor_id=actor_id, task_id=second.id
+    )
+
+    actions = [event.action for event in audit_sink.events]
+    assert actions == [
+        "video.material.upload_requested",
+        "video.material.upload_completed",
+        "video.material.reference_created",
+        "video.download_task.created",
+        "video.download_task.cancelled",
+        "video.download_task.created",
+        "video.download_task.retried",
+    ]
+    upload_requested = audit_sink.events[0]
+    assert upload_requested.tenant_id == tenant_id
+    assert upload_requested.actor_user_id == actor_id
+    assert upload_requested.resource_id == material.id
+    detail_keys = {key for key, _ in upload_requested.details}
+    assert "sha256" not in detail_keys
+    assert "tmp_secret_key" not in detail_keys
+    reference_event = audit_sink.events[2]
+    assert reference_event.resource_id == material.id
+    assert ("reference_id", str(reference.reference_id)) in reference_event.details
+
+    disposable = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="disposable.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="b" * 64,
+        crc64ecma="700",
+    )
+    await service.delete_material(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=disposable.material.id
+    )
+    deleted_event = audit_sink.events[-1]
+    assert deleted_event.action == "video.material.deleted"
+    assert deleted_event.resource_id == disposable.material.id
+
+
+@pytest.mark.asyncio
+async def test_failed_complete_upload_does_not_record_success_audit() -> None:
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        name="mismatch.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="700",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=999,
+        sha256="b" * 64,
+        crc64ecma="700",
+    )
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=draft.material.id
+        )
+    assert [event.action for event in audit_sink.events] == [
+        "video.material.upload_requested",
+    ]
+
+
+class StubArtifactSourceResolver:
+    def __init__(self) -> None:
+        self.artifacts: dict[tuple[object, object], int] = {}
+
+    async def resolve_artifact(self, *, tenant_id, artifact_id):
+        from agent_platform.capabilities.video_studio.media_library import (
+            ResolvedDownloadSource,
+        )
+
+        size = self.artifacts.get((tenant_id, artifact_id))
+        if size is None:
+            return None
+        return ResolvedDownloadSource(size_bytes=size)
+
+
+@pytest.mark.asyncio
+async def test_download_task_supports_artifact_source_with_tenant_isolation() -> None:
+    """成片（Core Artifact）来源：按租户解析大小，未知/跨租户成片一律不存在。"""
+
+    resolver = StubArtifactSourceResolver()
+    audit_sink = RecordingAuditSink()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        artifact_source_resolver=resolver,
+        audit_sink=audit_sink,
+    )
+    tenant_id = uuid4()
+    other_tenant_id = uuid4()
+    actor_id = uuid4()
+    artifact_id = uuid4()
+    resolver.artifacts[(tenant_id, artifact_id)] = 4096
+
+    task = await service.create_download_task(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        source_type="artifact",
+        source_id=artifact_id,
+    )
+    assert task.source_type == "artifact"
+    assert task.total_bytes == 4096
+    assert task.status is DownloadTaskStatus.QUEUED
+    assert audit_sink.events[-1].action == "video.download_task.created"
+    assert ("source_type", "artifact") in audit_sink.events[-1].details
+
+    with pytest.raises(MaterialNotFoundError):
+        await service.create_download_task(
+            tenant_id=other_tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=artifact_id,
+        )
+    with pytest.raises(MaterialNotFoundError):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_task_rejects_unknown_source_type_and_missing_resolver() -> None:
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    with pytest.raises(InvalidMaterialInput):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="bogus",
+            source_id=uuid4(),
+        )
+
+    # 成片来源解析器未装配时必须失败关闭，不得伪造成功。
+    with pytest.raises(RuntimeError):
+        await service.create_download_task(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            source_type="artifact",
+            source_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_replay_reuses_active_draft_by_content_key() -> None:
+    """M-1 幂等：同 (tenant, sha256, size, folder) 的未过期草稿重放复用，不产生重复草稿。"""
+
+    issuer = RecordingCredentialIssuer()
+    moments = iter(
+        datetime(2026, 7, 17, 9, minute, tzinfo=UTC) for minute in range(30)
+    )
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: next(moments),
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    request_kwargs = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "name": "retry.mp4",
+        "kind": MaterialKind.VIDEO,
+        "media_type": "video/mp4",
+        "size_bytes": 1000,
+        "sha256": "a" * 64,
+        "crc64ecma": "700",
+    }
+
+    first = await service.request_upload_credentials(**request_kwargs)
+    replay = await service.request_upload_credentials(**request_kwargs)
+
+    assert replay.material.id == first.material.id
+    assert len(await service.list_materials(tenant_id=tenant_id)) == 1
+    # 重放必须重签新凭证（临时凭证不落库），且草稿过期时间与新凭证一致。
+    assert len(issuer.requests) == 2
+    assert replay.credentials.expires_at == replay.material.upload_expires_at
+    assert replay.material.upload_expires_at > first.material.upload_expires_at
+
+    # 不同内容键不去重。
+    other = await service.request_upload_credentials(
+        **{**request_kwargs, "sha256": "b" * 64, "name": "other.mp4"}
+    )
+    assert other.material.id != first.material.id
+    assert len(await service.list_materials(tenant_id=tenant_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_replay_ignores_expired_or_completed_drafts() -> None:
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    current = {"now": datetime(2026, 7, 17, 9, 0, tzinfo=UTC)}
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        clock=lambda: current["now"],
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    request_kwargs = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "name": "expired-replay.mp4",
+        "kind": MaterialKind.VIDEO,
+        "media_type": "video/mp4",
+        "size_bytes": 1000,
+        "sha256": "c" * 64,
+        "crc64ecma": "700",
+    }
+
+    first = await service.request_upload_credentials(**request_kwargs)
+    # 草稿过期后重放：不复用，创建新草稿。
+    current["now"] = current["now"] + timedelta(minutes=16)
+    second = await service.request_upload_credentials(**request_kwargs)
+    assert second.material.id != first.material.id
+
+    # 已完成（available）的素材不参与去重：再次上传同内容创建新草稿。
+    verifier.objects[(tenant_id, second.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="c" * 64,
+        crc64ecma="700",
+    )
+    await service.complete_upload(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=second.material.id
+    )
+    third = await service.request_upload_credentials(**request_kwargs)
+    assert third.material.id != second.material.id
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_handles_missing_object_and_storage_outage() -> None:
+    """M-3：对象缺失 → 标记 upload_failed 并受控拒绝；存储故障 → 不改状态直接上抛。"""
+
+    from agent_platform.capabilities.video_studio.storage_credentials import (
+        MaterialObjectMissing,
+        MaterialStorageUnavailable,
+    )
+
+    class MissingThenOutageVerifier:
+        def __init__(self) -> None:
+            self.error: Exception = MaterialObjectMissing("对象不存在")
+
+        async def inspect_uploaded_object(self, *, tenant_id, object_key: str):
+            raise self.error
+
+    verifier = MissingThenOutageVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    async def new_draft(name: str, sha: str):
+        return await service.request_upload_credentials(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            name=name,
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=1000,
+            sha256=sha,
+            crc64ecma="700",
+        )
+
+    missing = await new_draft("missing.mp4", "a" * 64)
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=missing.material.id
+        )
+    failed = await service.get_material(
+        tenant_id=tenant_id, material_id=missing.material.id
+    )
+    assert failed.status == "upload_failed"
+    assert failed.cleanup_required is True
+
+    outage = await new_draft("outage.mp4", "b" * 64)
+    verifier.error = MaterialStorageUnavailable("对象存储不可用")
+    with pytest.raises(MaterialStorageUnavailable):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=outage.material.id
+        )
+    untouched = await service.get_material(
+        tenant_id=tenant_id, material_id=outage.material.id
+    )
+    # 存储故障不是客户端问题：保持 pending_upload，客户端稍后重试确认。
+    assert untouched.status == "pending_upload"
+    assert untouched.cleanup_required is False
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_forged_sha256_when_server_crc64_mismatches() -> None:
+    """A: crc64 抗伪造硬化（RED→GREEN）。
+
+    恶意客户端可在 COS 对象上写入与草稿声明一致的 ``x-cos-meta-sha256`` 元数据
+    （客户端自定义元数据，可伪造），但无法伪造 COS 服务端基于实际落盘字节计算的
+    ``x-cos-hash-crc64ecma``。此处 stored 对象的 size 与 sha256 都与声明一致（模拟
+    伪造），仅服务端 crc64 与声明不符——旧的「size + 客户端 sha256」门禁会误放行，
+    升级为「size + 服务端 crc64」门禁后必须失败关闭。
+    """
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 17, 9, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="forged.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="12345",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="a" * 64,  # 伪造：与声明一致
+        crc64ecma="99999",  # 服务端可信值：反映了不同的真实字节
+    )
+
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+    failed = await service.get_material(tenant_id=tenant_id, material_id=draft.material.id)
+    assert failed.status == "upload_failed"
+    assert failed.cleanup_required is True
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_trusts_server_crc64_not_client_sha256() -> None:
+    """GREEN 对偶：门禁只信任服务端 crc64 + size，不信任可伪造的 sha256 元数据。
+
+    stored sha256 是完全不同的垃圾值（模拟客户端未写/写错元数据），但服务端 crc64
+    与声明一致 → 应放行为 available。证明 sha256 不再是安全门禁。
+    """
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 17, 9, 30, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="trusted-crc64.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="12345",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="unwritten-or-forgeable-metadata",
+        crc64ecma="12345",
+    )
+
+    completed = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    assert completed.status == "available"
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_reject_malformed_crc64() -> None:
+    """crc64 声明必须是十进制 uint64；非法值失败关闭。"""
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: datetime(2026, 7, 17, 9, 45, tzinfo=UTC),
+    )
+    for bad in ("", "abc", "-1", "1" * 21, str(2**64)):
+        with pytest.raises(InvalidMaterialInput):
+            await service.request_upload_credentials(
+                tenant_id=uuid4(),
+                actor_id=uuid4(),
+                name="bad-crc64.mp4",
+                kind=MaterialKind.VIDEO,
+                media_type="video/mp4",
+                size_bytes=1000,
+                sha256="a" * 64,
+                crc64ecma=bad,
+            )
