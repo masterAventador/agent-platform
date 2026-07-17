@@ -57,7 +57,12 @@ def derive_tenant_gateway_key(
 
 
 def tenant_gateway_key_digest(key: SecretStr) -> str:
-    """LiteLLM 用 SHA256(key) 作为 token 标识；平台只持久化该摘要。"""
+    """LiteLLM 用 SHA256(key) 作为 token 标识；摘要现场派生，同样不落库。
+
+    与 C15 的 account token 摘要模式不同：那里摘要是校验凭据的**唯一**依据所以必须持久化，
+    这里 Key 本身可由 (密钥, tenant_id, key_version) 重新派生，摘要随之可再算，
+    因此存它没有收益、只会在库里留下一份由凭据派生的材料。
+    """
 
     return hashlib.sha256(_secret_value(key).encode("utf-8")).hexdigest()
 
