@@ -639,7 +639,13 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
-当前已知失败：无。
+当前已知失败：**1 项**（2026-07-17 发现，主代理在 main 实测复现）。
+
+`infra/litellm/test_config.py::LiteLlmComposeContractTest::test_local_stub_override_is_test_only_and_not_published` 在 main 上 FAILED（`1 failed, 16 passed`）。经 C16 实现代理与 C16 规格复审**各自独立** `git checkout f5fb483` 实测，确认**早于 C12/C16 两个条目开工即已存在**，与二者无关；两者按「单个任务提交只能包含该任务改动」未夹带修复，处理正确。
+
+根因（主代理实测定位）：该用例断言 `stub["image"] == EXPECTED_IMAGE`，而 `EXPECTED_IMAGE` 是 LiteLLM 官方镜像常量 `ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513…`；但 `infra/litellm/compose.stub.yml` 中 `openai-stub` 服务的镜像是 `agent-platform-litellm-stub:local`。**拿 stub 服务去比 LiteLLM 镜像常量属测试自身笔误**，疑似自创建起从未通过（与 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」同型）。修复须先确认 `openai-stub` 的预期镜像语义，再改断言，**不得为了变绿而放宽 stub 的隔离契约**（该用例的职责是钉住「本地 stub override 仅供测试、不得进入发布配置」）。
+
+**本条不得以「非本轮引入」为由长期挂账**——第 6 节基线此前长期声明「当前已知失败：无」，与该红线共存，属台账失真；已按「文档与代码冲突时以可运行代码为事实」修正，并单开条目收口。
 
 ## 7. 完成记录
 
