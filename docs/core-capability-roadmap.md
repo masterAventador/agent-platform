@@ -54,6 +54,7 @@
 - OpenTelemetry Trace/Metrics/Logs、告警规则和本机 Compose 基础设施；
 - 全平台审计协议、HMAC-SHA256 密钥签名审计链、脱敏、保留清扫和运维审计入口；
 - 平台级长期记忆：四级命名空间、运行时数据通道注入与受控提取、用户记忆中心；
+- 独立审批中心：审批状态机、Tool 风险审批统一协议接入、待办/批准/拒绝/转交/超时、审批中心页面；
 - React Web 的认证、工作区切换、员工、任务、知识、Skill、Tool 和死信页面。
 
 ### 3.2 仍不完整或尚未实现的能力
@@ -68,11 +69,11 @@
 | 动态输入输出 | 已完成 | `input_schema` 已驱动动态表单、前后端运行时校验和文件输入；`output_schema` 已驱动结构化卡片、表格与 JSON 展示，并在 Worker 与真实运行时边界执行受控校验 | C06 |
 | 知识运行时 | 已完成 | 员工绑定、版本化检索配置（召回/阈值/重排/元数据过滤）、运行时 RAG 注入与可追溯引用已合入主线并通过真实 RAGFlow 验收 | C07 |
 | Skill 生命周期 | 已完成 | 草稿、版本、安全审核、发布、下线、删除、回滚、内置安装、引用保护、差异和使用关系界面已闭环 | C08 |
-| Tool/MCP 生命周期 | 待集成 | C09 已合入主线（连接测试、自动发现同步、编辑删除、版本化与凭据产品化）；审批中心协议待 C13、生产凭据待 C18、stdio 传输 E2E 缺口待补 | C09 |
+| Tool/MCP 生命周期 | 待集成 | C09 已合入主线；C13 审批中心已提供统一审批协议（Tool 风险审批已接入）；剩余生产凭据待 C18、stdio 传输 E2E 缺口待补 | C09 |
 | 长期记忆 | 已完成 | 四级命名空间 Memory 领域/API/运行时注入与工具写入/受控提取/治理与记忆中心页面已合入并通过双复审与真实运行时 E2E | C10 |
 | 工作流/混合员工 | 未开放 | 前端强制禁用，生产 Workflow Registry 没有可用流程 | C11 |
 | 定时任务 | 未实现 | 配置字段存在但强制关闭，无调度、历史和失败治理 | C12 |
-| 审批中心 | 进行中 | 只有任务详情控制，无独立审批记录、待办、超时和通知（分支 `task/c13-approval-center` 实施中） | C13 |
+| 审批中心 | 已完成 | 独立审批记录/状态机/待办/批准/拒绝/转交/超时/幂等、Tool 风险审批接入统一协议、审批中心页面 + 工作台卡片已合入并通过双复审与真实 PG 并发门禁及审批 E2E | C13 |
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 部分完成 | 缺成员邀请、角色管理、密码找回、验证、SSO/MFA | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
@@ -288,7 +289,7 @@
 
 ### C09 Tool/MCP 完整生命周期与凭据产品化
 
-**状态：`🧪 待集成`（已合入主线；审批中心协议待 C13、生产凭据服务待 C18、stdio 传输 E2E 缺口待补）**
+**状态：`🧪 待集成`（已合入主线；C13 已提供审批协议并接入 Tool 风险审批；剩余生产凭据服务待 C18、stdio 传输 E2E 缺口待补）**
 
 **开始日期：2026-07-16**
 
@@ -370,11 +371,15 @@
 
 ### C13 独立审批中心
 
-**状态：`🚧 进行中`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-17**
 
-开工说明：前置 C03 已完成。经既定并行门禁与 C10 并行（边界隔离说明见 C10 开工说明）。实现分支 `task/c13-approval-center`（worktree `wt/c13`），迁移编号占用 `20260716_0030`（down_revision 暂指 `20260716_0028`，主代理合并时统一重链）。审批平台协议须直接支撑 C09 Tool 风险审批的接入复用（C09 待集成项）与后续工作流/能力包审批。
+**完成日期：2026-07-17**
+
+开工说明：前置 C03 已完成。与 C10 并行。实现分支 `task/c13-approval-center`（worktree `wt/c13`）；迁移合入时按「先合入者保留编号」重链——C10 记忆迁移取 0029，本条目 `20260716_0030` 的 down_revision 重链至 0029 保持单头。
+
+2026-07-17 完成记录（本任务提交，merge 合入，先 RED 后 GREEN）：审批领域与状态机（迁移 `20260716_0030`，pending→approved/rejected/expired/withdrawn/transferred 全终态封死，转交产生新 pending 双向链接、不重置超时）；`/api/v1/approvals` 提供待办列表/详情/批准/拒绝(必填理由)/转交/历史，超时以决策/读取惰性判定为权威 + 后台清扫兜底（配置驱动间隔、每租户独立事务、单条失败仅计数），撤回、request_key 建记录幂等 + decision_key 决策幂等，系统通知走平台 run 事件不引第三方。**Tool 风险审批接入统一协议不另起旁路**：deep agent interrupt → worker 落 APPROVAL_REQUIRED 事件（携 tool_name/arguments 快照）→ 同事务 `sync_run_approvals` 以 `request_key=tool:{run_id}:{approval_id}` 幂等建 Approval → `ApprovalService` 决策统一驱动既有 run approve/reject 命令 + 事件 + 审计；run control 入口 `control_run` 复用 `decide_by_invocation`，**run 处于 WAITING_FOR_APPROVAL 却查无审批记录时 fail-closed 409（不回退 legacy 直发 raw 命令，堵旁路窗口）**。审批决定与 Run/Tool Invocation/用户/审计四方可追溯（resource_type=approval，脱敏）。前端审批中心页面 + 工作台待审批卡片；Demo Seed 幂等 1 pending + 1 approved 历史。**修复的真实生产缺口**：`run_worker_service`（worker 进程）从不装配审计 HMAC（此前只有 `create_app` 装配），C13 作为首个从 worker 投递路径写审计的功能首次暴露——worker 现按与 API 完全相同的 `configure_audit_hashing(app_settings.audit_hmac_key.get_secret_value())` 同源装配、同一条 HMAC 链、dev/test 回退与 staging/production fail-closed 一致（双复审逐字核对确认）。双复审：首轮质量复审 FAIL 抓到 [M] run 控制 fail-open 旁路、[M] 并发/CAS 只在 SQLite 验证、[L] invocation_id=None 守卫缺失、[L] 假并发测试命名，退回集中修复；修复后 fail-closed 堵旁路 + 新增真实 PostgreSQL 并发门禁 3 用例（并发决策只一方胜/并发同 request_key 只留一条/清扫 vs 决策 CAS 一致）+ invocation_id 守卫 + 测试改名，主代理接管复跑全部通过。合入时解决与 C10 的 4 处共享文件冲突（导航/testMatch/demo_seed ID/迁移测试双函数语义重建）并重链迁移。验证命令：`cd backend && uv run pytest tests/unit/platform/approvals tests/contract/approvals tests/integration/queue/test_run_worker_approvals.py tests/integration/database/test_migrations.py -q`（含审批 86）；`TEST_DATABASE_URL=... uv run pytest tests/integration/approvals -q`（真实 PG 3/3）；`uv run pytest -q`（合并后全量 1399 passed, 45 skipped）；`uv run ruff check . && uv run mypy`（212 文件）；`cd frontend && pnpm test`（48 文件 242）+ lint/typecheck/build；`infra/platform/test-runtime-e2e.sh` 审批 3 用例 + 合并后审批 3 + 记忆 2 交叉验证全绿（随机隔离栈，验后清零）。
 
 完成定义：
 
@@ -547,16 +552,16 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 ## 6. 当前验证基线
 
-基线日期：2026-07-17。
+基线日期：2026-07-17（C13 合入后）。
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | C10 合入后默认环境 1324 通过、42 跳过、0 失败；条件跳过均明确标注缺少真实 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱、真实腾讯云 COS 或真实 RAGFlow 凭据 |
+| 后端 Pytest | C13 合入后默认环境 1399 通过、42 跳过、0 失败；条件跳过均明确标注缺少真实 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱、真实腾讯云 COS 或真实 RAGFlow 凭据 |
 | 后端 Unit + Contract | 863 项通过；新增覆盖动态输入输出契约、前端不可表达 JSON Schema 关键字拒绝、动态 properties 必须关闭 additionalProperties、历史已发布动态 Schema 运行入口 fail-closed、历史已发布文件字段 Schema 未启用 `file_upload` 时即使文件字段可选且本次未提交文件也 fail-closed、legacy 自由输入与零字段动态空输入兼容、浏览器 RegExp 不兼容 pattern 拒绝、文件控件约束收窄、数组文件语义拒绝、动态文件字段与本次附件绑定、幂等重放固定原员工版本 Schema、前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
 | Mypy | 200 个源码文件通过（C09 合入后） |
-| 前端 Vitest | C10 合入后 46 个测试文件、230 项测试通过 |
+| 前端 Vitest | C13 合入后 48 个测试文件、242 项测试通过 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过 |
@@ -590,7 +595,8 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C07 | ✅ 已完成 | 2026-07-16 | 2026-07-17 | 本任务提交（merge 合入） | 双复审通过后合入：迁移 0027 重链 0026；后端全量 1198、默认 Playwright 23/23（单 worker）、runtime E2E 6/6；真实 RAGFlow v0.25.6 独立栈验收通过（检索契约/元数据过滤/生命周期，栈用后销毁）；常驻栈真实用户冒烟通过；已声明限制（重排端到端待重排模型实例、事件键单检索）见第 4 节终审记录 |
 | C14 | ✅ 已完成 | 2026-07-16 | 2026-07-17 | 本任务提交（两次 merge 合入 + 收口提交） | 三轮复审后主体合入 main；用户决定立即加固 S7，HMAC 密钥签名分支经安全复审（一轮整改 + 增量确认 PASS）合入：合并后后端全量 1067 通过、Playwright 20/20（隔离端口）、常驻栈重建后以真实用户路径冒烟通过（登录 → 审计页 → `auth.login_succeeded` 以 `hmac-sha256.v1` 落库、链头封印生效、迁移 0025 TOFU 回填完成）。2026-07-17 隔离验收栈终验 `bash infra/platform/test-mvp-profile.sh` 完整通过（exit 0，详见第 4 节 C14 终验记录与第 6 节基线）；剩余威胁面（持钥攻击者、整库回滚需外部锚定）已如实声明归 C18；L3-L5 follow-up 见第 4 节 C14 记录 |
 | C10 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；双复审 PASS；验证证据与登记的观察项见第 4 节 C10 完成记录（后端全量 1324、前端 230、隔离栈 Playwright 26、runtime E2E 9，均含记忆用例） |
-| C09、C11-C13、C15-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
+| C13 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；双复审（首轮质量复审 FAIL→集中修复 fail-closed/真实 PG 并发门禁/守卫→复跑 PASS）；修复 worker 审计 HMAC 生产缺口；验证见第 4 节 C13 完成记录（后端全量 1399、前端 242、真实 PG 并发 3/3、审批 runtime E2E 3 + 合并交叉 5） |
+| C09、C11、C12、C15-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
 
 C05 补充质量验证：代码复审发现会话失败投影除准备失败外，还需要显式覆盖续租失败和孤儿运行恢复失败；进一步复审发现会话投影与 Run 状态、事件、command、ownership/approval 收尾共处同一事务，若 `conversation_messages` 序号并发冲突或投影异常会拖垮核心运行收尾。已补充 RED 用例 `test_worker_completion_survives_conversation_projection_failure` 与 `test_recovered_snapshot_survives_conversation_projection_failure`，修复后投影改为核心事务提交后的独立安全事务，唯一约束冲突最多重试 3 次，最终失败只记录受控日志，不影响 Run 结果。已通过 `cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged tests/integration/queue/test_run_worker.py::test_renewal_failure_marks_running_run_failed_and_releases_environment tests/integration/queue/test_run_worker.py::test_started_tool_without_advanced_checkpoint_fails_uncertain_without_replay -q`（3 passed）、投影异常降级组（5 passed），并通过包含会话契约、迁移、正常输出、超长输出、三条失败投影和五条投影异常降级的综合后端目标回归（21 passed），确保三条直接失败路径都会写入 `conversation_messages` 的 error 消息，且投影失败不泄露底层异常细节、不阻断核心收尾。
 
