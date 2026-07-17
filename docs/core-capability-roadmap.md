@@ -401,12 +401,22 @@
 
 - **【M，自查失职】C-4 曾是空门禁**：上一轮写下「补回归门禁守住该性质」，但该用例只在**整跳结束后**采样 `pg_stat_activity`——那时所有 session 必已关闭，断言恒真。复审变异验证（把逐条循环挪进扫描 session）后它仍 passed。已重写为在**逐条处理进行中**采样：正确实现只应有 1 条连接在事务里（逐条 session 自己），扫描 session 若还开着就是 2 条。**变异验证**：挪进扫描 session → `assert [2] == [1]` 转红；还原 → 通过。这是同一失误模式（把不存在的证据写进台账）第二次出现，本轮已对全部「已覆盖/已守住」表述逐条做变异验证，结论见下。
 - **【L】暂停分支状态守卫顺序**：`enabled` 判定排在状态守卫之前，多副本竞态下（副本 A 扫到 DEFERRED → 副本 B 抢先派发 → 用户暂停 → 副本 A 重读到 `enabled=False`+`DISPATCHED`）会对 DISPATCHED 调 `skipped()` 抛非法转换，被宽 except 接住计入 `failed` 并误报告警——恰好制造了 A-3 想消灭的反向问题。RED 实测 `InvalidScheduledTaskExecutionTransition: dispatched -> skipped` + `failed=1`。已把 `enabled` 判定移到状态守卫之后。
-- **【G1】已派发执行无超时 → 定时任务可能永久静默停摆**：查证结论——孤儿恢复扫描 `recover_incomplete_runs` **兜不住**：它对 `waiting_for_input`/`waiting_for_approval` 是「恢复运行时」而非「终结」，只有 `running` 会被判孤儿失败。其中 `waiting_for_approval` 另有 C13 审批超时（默认 24h）驱动 run reject 兜底；**`waiting_for_input` 无任何机制终结**——调度产生的 Run 没有交互用户会回应，执行永久停在 DISPATCHED，`list_active_for_task` 恒返回它，SKIP/QUEUE 策略下该任务永久静默停摆，且 `purge_terminal_before` 只清终态、永不回收。已实现配置驱动的执行超时（`scheduled_task_execution_timeout_seconds`，默认 24h）：超时把**调度侧执行**结算为 failed 并告警，不去动 Run 本身（那是 C05/C13 的语义边界），且**不触发重试**（原 Run 可能仍活着，重试会绕过 SKIP 并发策略再起一个）。
+- **【G1】已派发执行无超时 → 定时任务可能永久静默停摆**：查证结论——孤儿恢复扫描 `recover_incomplete_runs` **兜不住**：它对 `waiting_for_input`/`waiting_for_approval` 是「恢复运行时」而非「终结」，只有 `running` 会被判孤儿失败。其中 `waiting_for_approval` 另有 C13 审批超时（默认 24h）驱动 run reject 兜底；**`waiting_for_input` 无任何机制终结**——调度产生的 Run 没有交互用户会回应，执行永久停在 DISPATCHED，`list_active_for_task` 恒返回它，SKIP/QUEUE 策略下该任务永久静默停摆，且 `purge_terminal_before` 只清终态、永不回收。已实现配置驱动的执行超时（`scheduled_task_execution_timeout_seconds`，默认 24h）：超时把**调度侧执行**结算为 failed，发告警日志与审计（`scheduled_task.execution_timed_out`），不去动 Run 本身（那是 C05/C13 的语义边界），也不触发重试。**超时严格限定在「无人终结」的状态**（`waiting_for_input`，以及 run 引用已丢失）——见下一轮对该范围的收窄。
 - **【L5】日志张冠李戴**：`_wait_for_database_ready` 硬编码 `artifact_storage_reconciliation_*`，调度器等待 schema 时打的是 artifact 协调器的日志名。已参数化 `log_scope`，四个调用方各报自己的名字。
 
 剩余未完成（不得据此标记完成）：客户端创建/编辑/暂停/执行记录页面、时区/重启恢复/重复触发/权限的 Playwright E2E、C16 配额接入。
 
-已知局限（如实声明，非缺陷）：`_DEMO_STARTED_AT`（2026-07-01）+ 执行历史保留 90 天 → 约 2026-09-29 后常驻开发栈的清理循环会删掉演示执行历史；重放 Demo Seed 可恢复该历史记录，但与「Demo 数据默认保留」略有张力，待前端任务接入时一并决定是否延长保留或改用相对时间。
+2026-07-17 第四轮（代码质量复审 FAIL 后整改，先 RED 后 GREEN，新增/修改门禁均经变异验证）：
+
+- **【M】超时机制误杀健康长跑 Run**：第三轮我把超时的正当性完全建立在「`waiting_for_input` 无人终结」上（该论证属实），但**实现的触发条件是「所有非终态」**——实现范围远大于论证范围。后果：一个正常跑着的 Run 超过 24h 就被记为 failed；它随后真正 COMPLETED 时执行已离开 `list_dispatched` 集合，**永远不会被回填**，用户历史里留下与事实相反的失败记录。配置下限 `ge=60` 让该路径极易触达（运维把超时调到 5 分钟就会误杀所有 >5min 的正常 Run）。RED 实测：`running`/`queued`/`waiting_for_approval` 三态各自被误杀 + 健康 Run 成功后仍为 failed。**已收窄为 `_UNTERMINATED_RUN_STATUSES = {waiting_for_input}`**（外加 run 引用已丢失的情况）。逐状态的终结者论证：`running` → Worker `recover_incomplete_runs` 判孤儿失败；`queued` → 命令进死信后由死信结算（`_settle_valid`）驱动 run FAILED；`waiting_for_approval` → C13 审批超时驱动 reject；只有 `waiting_for_input` 无任何终结者。
+- **【L】超时结算补审计**：`scheduled_task.execution_timed_out`（此前只有日志），与派发/自动暂停一致。
+- **【L】`skipped` 指标失真**：`_dispatch_pending_one` 的所有 `False` 返回都被计入 `result.skipped`，良性竞态（执行已被别副本推进、上一轮仍在跑）混进业务跳过计数。已改为三值 `_PendingOutcome{DISPATCHED,SKIPPED,NOOP}`，NOOP 不计入任何业务指标。
+- **【LOW】C-4 门禁收敛**：docstring 概括为「扫候选 session 必须在逐条处理前关闭」，但采样只经 `create_employee_run`，实际只覆盖 `_claim_due_tasks` 一相。**已把三个相位全部纳入采样**（参数化 `_settle_one`/`_dispatch_pending_one`/`_claim_one`），并对每一相各自做变异验证（把该相位的扫描 session 按住不放 → 三条全部独立转红）。选择扩大门禁而非收窄措辞，因为「声称比证据宽」已是我连续两轮的失误模式。
+
+已知局限（如实声明，非缺陷）：
+
+- **超时之后 `ConcurrencyPolicy.SKIP` 不再保证「同一时刻只有一个 Run」**：超时结算解除了 `list_active_for_task` 闸门，而被卡住的那个 Run（`waiting_for_input`）可能仍活着，下一个触发点会正常派发，因此可能出现两个 Run 并存。这是**刻意取舍**：替代方案是任务永久静默停摆，明显更糟。用例 `test_a_timed_out_execution_unblocks_the_task_for_later_triggers` 固化了该行为。触发条件：仅当某个执行的 Run 卡在 `waiting_for_input` 超过 `scheduled_task_execution_timeout_seconds`（默认 24h）。
+- `_DEMO_STARTED_AT`（2026-07-01）+ 执行历史保留 90 天 → 约 2026-09-29 后常驻开发栈的清理循环会删掉演示执行历史；重放 Demo Seed 可恢复该历史记录，但与「Demo 数据默认保留」略有张力，待前端任务接入时一并决定是否延长保留或改用相对时间。
 
 完成定义：
 

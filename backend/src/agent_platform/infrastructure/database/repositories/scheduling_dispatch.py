@@ -61,6 +61,14 @@ from agent_platform.platform.scheduling.guards import (
 
 logger = logging.getLogger(__name__)
 
+# 只有「无人终结」的状态才需要调度侧超时兜底。其余非终态各自另有终结者，
+# 再加一层超时会误杀健康长跑 Run，且它真正完成时已不在 `list_dispatched` 集合里、
+# 永远不会被回填，用户历史里会留下与事实相反的失败记录：
+# - running            -> Worker `recover_incomplete_runs` 判孤儿失败；
+# - queued             -> 命令进死信后由死信结算驱动 run 失败；
+# - waiting_for_approval -> C13 审批超时驱动 reject。
+_UNTERMINATED_RUN_STATUSES = frozenset({RunStatus.WAITING_FOR_INPUT})
+
 _TERMINAL_RUN_SETTLEMENTS = {
     RunStatus.COMPLETED: "succeeded",
     RunStatus.FAILED: "failed",
@@ -151,12 +159,25 @@ async def _settle_one(
     run = await SqlAlchemyRunRepository(session).get(
         tenant_id=execution.tenant_id, run_id=execution.run_id
     )
-    if run is None or run.status not in _TERMINAL_RUN_SETTLEMENTS:
+    if run is None:
+        # run 引用已丢失（FK ondelete=SET NULL / 记录已删）：没有任何东西会再让它终态。
         return await _settle_if_timed_out(
             session,
             execution=execution,
             now=now,
             execution_timeout=execution_timeout,
+            run_status=None,
+        )
+    if run.status not in _TERMINAL_RUN_SETTLEMENTS:
+        if run.status not in _UNTERMINATED_RUN_STATUSES:
+            # 另有终结者：不误杀，等它自己走到终态再结算。
+            return False
+        return await _settle_if_timed_out(
+            session,
+            execution=execution,
+            now=now,
+            execution_timeout=execution_timeout,
+            run_status=run.status,
         )
     task = await tasks.get(
         tenant_id=execution.tenant_id, task_id=execution.scheduled_task_id
@@ -178,14 +199,18 @@ async def _settle_if_timed_out(
     execution: ScheduledTaskExecution,
     now: datetime,
     execution_timeout: timedelta,
+    run_status: RunStatus | None,
 ) -> bool:
-    """Run 迟迟不终态时给执行封顶，避免定时任务被一条执行永久静默堵死。
+    """给「无人终结」的执行封顶，避免定时任务被一条执行永久静默堵死。
 
-    可达触发点：Run 停在 `waiting_for_input`——孤儿恢复扫描对该状态是「恢复运行时」
-    而非「终结」，没有任何机制会让它进终态；`waiting_for_approval` 另有 C13 审批
-    超时兜底，不靠这里。超时只结算**调度侧**的执行记录，不去动 Run 本身（那属于
-    C05/C13 的语义边界），也**不触发重试**——原 Run 可能仍活着，重试会绕过 SKIP
-    并发策略再起一个。
+    只在 `_UNTERMINATED_RUN_STATUSES`（以及 run 引用已丢失）时调用——调用方负责
+    把另有终结者的状态挡在外面。超时只结算**调度侧**的执行记录，不去动 Run 本身
+    （那是 C05/C13 的语义边界），也不触发重试。
+
+    已知副作用（如实记录，非疏漏）：结算解除了 `list_active_for_task` 闸门，因此
+    **超时之后 `ConcurrencyPolicy.SKIP` 不再保证同一时刻只有一个 Run**——被卡住的
+    Run 可能仍活着，而下一个触发点会正常派发。这是刻意取舍：替代方案是任务永久
+    静默停摆，明显更糟。见 roadmap C12「已知局限」。
     """
 
     if now - execution.updated_at <= execution_timeout:
@@ -205,6 +230,21 @@ async def _settle_if_timed_out(
             "execution_id": str(execution.id),
             "scheduled_task_id": str(execution.scheduled_task_id),
             "run_id": str(execution.run_id) if execution.run_id else None,
+        },
+    )
+    # 与派发/自动暂停一致：改状态并解除并发闸门的变更必须留痕。
+    await emit_audit_event(
+        session,
+        tenant_id=execution.tenant_id,
+        actor_user_id=None,
+        action="scheduled_task.execution_timed_out",
+        resource_type="scheduled_task",
+        resource_id=execution.scheduled_task_id,
+        metadata={
+            "execution_id": str(execution.id),
+            "run_id": str(execution.run_id) if execution.run_id else None,
+            "run_status": run_status.value if run_status is not None else None,
+            "timeout_seconds": int(execution_timeout.total_seconds()),
         },
     )
     return True
@@ -245,9 +285,12 @@ async def _dispatch_pending(
     for candidate in candidates:
         try:
             async with session_factory() as session:
-                if await _dispatch_pending_one(session, execution=candidate, now=now):
+                outcome = await _dispatch_pending_one(
+                    session, execution=candidate, now=now
+                )
+                if outcome is _PendingOutcome.DISPATCHED:
                     result.dispatched += 1
-                else:
+                elif outcome is _PendingOutcome.SKIPPED:
                     result.skipped += 1
                 await session.commit()
         except Exception:
@@ -261,26 +304,26 @@ async def _dispatch_pending(
 
 async def _dispatch_pending_one(
     session: AsyncSession, *, execution: ScheduledTaskExecution, now: datetime
-) -> bool:
+) -> _PendingOutcome:
     tasks, executions = _repositories(session)
     task = await tasks.lock_task(task_id=execution.scheduled_task_id)
     if task is None:
-        return False
+        return _PendingOutcome.NOOP
     # 拿到任务行锁后重新读执行记录：认领与结算之间的窗口不能凭旧快照决策（TOCTOU）。
     current = await executions.get(
         tenant_id=execution.tenant_id, execution_id=execution.id
     )
     if current is None:
-        return False
+        return _PendingOutcome.NOOP
     # 状态守卫必须排在暂停判定之前：扫描到写入之间该执行可能已被别的副本推进
     # （DEFERRED→DISPATCHED），对非待派发状态调 skipped() 会抛非法转换，被上层宽
     # except 接住后计入 failed 并误报告警——那正是 A-3 要消灭的「良性竞态报成真失败」。
     if current.status is ExecutionStatus.RETRY_WAITING:
         if current.next_attempt_at is None or current.next_attempt_at > now:
-            return False
+            return _PendingOutcome.NOOP
     elif current.status is not ExecutionStatus.DEFERRED:
-        # 已被其他副本推进或已终态：本跳无事可做，不是失败。
-        return False
+        # 已被其他副本推进或已终态：本跳无事可做，既不是失败也不是业务跳过。
+        return _PendingOutcome.NOOP
 
     if not task.enabled:
         # 用户已暂停：排队中的触发点与等待中的重试都不得再起 Run。就地结算成终态，
@@ -289,13 +332,17 @@ async def _dispatch_pending_one(
             current.skipped(reason=SkipReason.TASK_PAUSED, now=now),
             expected_revision=current.revision,
         )
-        return False
+        return _PendingOutcome.SKIPPED
 
     if current.status is ExecutionStatus.DEFERRED and await _has_other_active(
         executions, task_id=task.id, exclude_id=current.id
     ):
-        return False
-    return await _dispatch_execution(session, task=task, execution=current, now=now) is None
+        # 上一轮仍在跑：继续排队等下一跳，不是业务跳过。
+        return _PendingOutcome.NOOP
+    dispatched = (
+        await _dispatch_execution(session, task=task, execution=current, now=now) is None
+    )
+    return _PendingOutcome.DISPATCHED if dispatched else _PendingOutcome.SKIPPED
 
 
 async def _has_other_active(
@@ -405,6 +452,14 @@ async def _claim_one(
         # （此前靠 _advance 的 CAS 恰好失败才没出事，属于巧合正确。）
         return
     await _advance(session, task=task, next_run_at=plan.next_run_at, now=now)
+
+
+class _PendingOutcome(StrEnum):
+    """待派发执行这一跳的结果；NOOP 是良性竞态，不该计入任何业务指标。"""
+
+    DISPATCHED = "dispatched"
+    SKIPPED = "skipped"
+    NOOP = "noop"
 
 
 class _Contention(StrEnum):

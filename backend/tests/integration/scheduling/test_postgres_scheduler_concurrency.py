@@ -449,24 +449,55 @@ async def test_the_scheduler_loop_and_audit_sweep_coexist_on_real_postgres(
 
 
 @pytest.mark.asyncio
-async def test_the_candidate_scan_session_is_closed_before_per_item_work(
+async def _prepare_phase(
+    session_factory: async_sessionmaker, phase: str
+) -> None:
+    """让目标相位在下一跳至少有一个候选。"""
+
+    if phase == "_claim_one":
+        await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.ALLOW)
+        return
+    if phase == "_settle_one":
+        # 先跑一跳制造 DISPATCHED 执行，下一跳的结算相位就有候选。
+        await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.ALLOW)
+        await run_scheduler_tick(
+            session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50
+        )
+        return
+    # _dispatch_pending_one：QUEUE 策略下第二个触发点会排队成 DEFERRED。
+    await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.QUEUE)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    await run_scheduler_tick(
+        session_factory,
+        now=datetime(2026, 7, 17, 12, 0, 5, tzinfo=UTC),
+        batch_limit=50,
+    )
+
+
+@pytest.mark.parametrize(
+    "phase", ["_settle_one", "_dispatch_pending_one", "_claim_one"]
+)
+@pytest.mark.asyncio
+async def test_every_phase_closes_its_candidate_scan_session_before_per_item_work(
     session_factory: async_sessionmaker,
     monkeypatch: pytest.MonkeyPatch,
+    phase: str,
 ) -> None:
-    """扫候选的只读 session 必须在逐条处理**之前**关闭，不能把长事务拖过整个循环。
+    """三个相位都必须先关掉扫候选的只读 session，再逐条处理。
 
-    采样点必须在逐条处理**进行中**：跳结束后所有 session 无论如何都已关闭，
-    那时采样恒为 0，是一条什么都不守的空门禁（本用例的前身就是如此）。
-    处理中正确实现只应有 1 条连接在事务里（逐条 session 自己）；若扫描 session
-    还开着，就会有第 2 条。
+    采样点必须在逐条处理**进行中**：跳结束后所有 session 无论如何都已关闭，那时
+    采样恒为 0，是一条什么都不守的空门禁。逐条函数入口处该 session 尚未开事务，
+    因此先 `SELECT 1` 把它拉进事务，计数才有确定语义——正确实现下只应有 1 条连接
+    在事务里（逐条 session 自己）；扫描 session 若还开着就是 2 条。
     """
 
-    await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.ALLOW)
+    await _prepare_phase(session_factory, phase)
 
     samples: list[int] = []
-    original = scheduling_dispatch.create_employee_run
+    original = getattr(scheduling_dispatch, phase)
 
-    async def sampling_create_employee_run(**kwargs: object) -> object:
+    async def sampling(session: object, **kwargs: object) -> object:
+        await session.execute(text("SELECT 1"))  # type: ignore[attr-defined]
         async with session_factory() as probe:
             in_transaction = await probe.execute(
                 text(
@@ -477,21 +508,20 @@ async def test_the_candidate_scan_session_is_closed_before_per_item_work(
                 )
             )
             samples.append(int(in_transaction.scalar_one()))
-        return await original(**kwargs)  # type: ignore[arg-type]
+        return await original(session, **kwargs)
 
-    monkeypatch.setattr(
-        scheduling_dispatch, "create_employee_run", sampling_create_employee_run
-    )
+    monkeypatch.setattr(scheduling_dispatch, phase, sampling)
 
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     try:
         await run_scheduler_tick(
             async_sessionmaker(engine, expire_on_commit=False),
-            now=JUST_AFTER_TRIGGER,
+            now=datetime(2026, 7, 17, 12, 30, tzinfo=UTC),
             batch_limit=50,
         )
     finally:
         await engine.dispose()
 
+    assert samples, f"{phase} 相位没有候选，本用例没测到东西"
     # 逐条处理期间只有逐条 session 自己持有事务；扫描 session 早已归还连接。
-    assert samples == [1]
+    assert set(samples) == {1}

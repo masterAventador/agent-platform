@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories import scheduling_dispatch
+from agent_platform.infrastructure.database.repositories.audit import AuditEventRecord
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunRepository,
 )
@@ -553,3 +555,176 @@ async def test_a_timed_out_execution_unblocks_the_task_for_later_triggers(
     )
 
     assert len(await load_runs(session_factory)) == 2
+
+
+async def _park_run(
+    session_factory: async_sessionmaker,
+    *,
+    tenant_id: UUID,
+    run_id: UUID,
+    status: RunStatus,
+) -> None:
+    """把 Run 推到指定的非终态，模拟真实运行中的各种停留。"""
+
+    if status is RunStatus.QUEUED:
+        return
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        run = await runs.get(tenant_id=tenant_id, run_id=run_id)
+        assert run is not None
+        running = run.transition_to(RunStatus.RUNNING)
+        await runs.update(running)
+        if status is not RunStatus.RUNNING:
+            await runs.update(running.transition_to(status))
+        await session.commit()
+
+
+@pytest.mark.parametrize(
+    "parked_status",
+    [RunStatus.RUNNING, RunStatus.QUEUED, RunStatus.WAITING_FOR_APPROVAL],
+)
+@pytest.mark.asyncio
+async def test_a_run_that_someone_else_terminates_is_never_killed_by_the_timeout(
+    session_factory: async_sessionmaker,
+    parked_status: RunStatus,
+) -> None:
+    """超时只针对「无人终结」的状态，不得误杀健康长跑 Run。
+
+    - `running` 的孤儿由 Worker `recover_incomplete_runs` 判失败；
+    - `queued` 的命令进死信后由死信结算驱动 run 失败；
+    - `waiting_for_approval` 由 C13 审批超时驱动 reject。
+    三者都另有终结者，再加一层超时是重复且有害的。
+    """
+
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    run = (await load_runs(session_factory))[0]
+    await _park_run(
+        session_factory, tenant_id=seed.tenant_id, run_id=run.id, status=parked_status
+    )
+
+    # 远超默认 24h 超时后仍不得结算。
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(hours=26), batch_limit=50
+    )
+
+    execution = [
+        item
+        for item in await load_executions(session_factory, task)
+        if item.scheduled_for == FIRST_TRIGGER
+    ][0]
+    assert execution.status is ExecutionStatus.DISPATCHED
+    assert execution.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_long_run_still_settles_as_succeeded_after_the_timeout_window(
+    session_factory: async_sessionmaker,
+) -> None:
+    """跑了很久但最终成功的 Run，执行历史必须是 succeeded——不能留下与事实相反的失败。
+
+    误杀之后该执行已离开 `list_dispatched` 集合，Run 真正完成时永远不会被回填。
+    """
+
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    run = (await load_runs(session_factory))[0]
+    await _park_run(
+        session_factory, tenant_id=seed.tenant_id, run_id=run.id, status=RunStatus.RUNNING
+    )
+
+    # 跑了 26 小时……
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(hours=26), batch_limit=50
+    )
+    # ……然后成功了。
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        stored = await runs.get(tenant_id=seed.tenant_id, run_id=run.id)
+        assert stored is not None
+        await runs.update(stored.transition_to(RunStatus.COMPLETED))
+        await session.commit()
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(hours=27), batch_limit=50
+    )
+
+    execution = [
+        item
+        for item in await load_executions(session_factory, task)
+        if item.scheduled_for == FIRST_TRIGGER
+    ][0]
+    assert execution.status is ExecutionStatus.SUCCEEDED
+    assert execution.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_settlement_is_audited(
+    session_factory: async_sessionmaker,
+) -> None:
+    seed = await seed_workspace(session_factory)
+    await add_task(session_factory, seed)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    run = (await load_runs(session_factory))[0]
+    await _park_run(
+        session_factory,
+        tenant_id=seed.tenant_id,
+        run_id=run.id,
+        status=RunStatus.WAITING_FOR_INPUT,
+    )
+
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(days=2), batch_limit=50
+    )
+
+    async with session_factory() as session:
+        actions = [
+            record.action
+            for record in (await session.execute(select(AuditEventRecord))).scalars()
+        ]
+    # 把执行改成 failed 并解除并发闸门的状态变更必须留痕（与派发/自动暂停一致）。
+    assert "scheduled_task.execution_timed_out" in actions
+
+
+@pytest.mark.asyncio
+async def test_benign_pending_races_do_not_inflate_the_skipped_metric(
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """良性竞态（执行已被别的副本推进）不得混进业务跳过计数，否则指标失真。"""
+
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed, concurrency_policy=ConcurrencyPolicy.QUEUE)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    first_run = (await load_runs(session_factory))[0]
+    await run_scheduler_tick(
+        session_factory, now=SECOND_TRIGGER + timedelta(seconds=5), batch_limit=50
+    )
+    deferred = [
+        item
+        for item in await load_executions(session_factory, task)
+        if item.status is ExecutionStatus.DEFERRED
+    ][0]
+    async with session_factory() as session:
+        assert await SqlAlchemyScheduledTaskExecutionRepository(session).update_with_cas(
+            deferred.dispatched(run_id=first_run.id, now=SECOND_TRIGGER),
+            expected_revision=deferred.revision,
+        )
+        await session.commit()
+
+    async def stale_scan(_self, *, now: object, limit: object) -> list:
+        del now, limit
+        return [deferred]
+
+    monkeypatch.setattr(
+        SqlAlchemyScheduledTaskExecutionRepository, "list_pending_dispatch", stale_scan
+    )
+
+    result = await run_scheduler_tick(
+        session_factory, now=datetime(2026, 7, 17, 12, 30, tzinfo=UTC), batch_limit=50
+    )
+
+    assert result.failed == 0
+    # 什么都没发生就不该记成"跳过了一次业务触发"。
+    assert result.skipped == 0
