@@ -239,6 +239,8 @@ class SqlAlchemyScheduledTaskRepository:
                 last_run_at=task.last_run_at,
                 misfire_policy=task.misfire_policy.value,
                 concurrency_policy=task.concurrency_policy.value,
+                misfire_grace_seconds=task.misfire_grace_seconds,
+                misfire_backfill_window_seconds=task.misfire_backfill_window_seconds,
                 max_retries=task.max_retries,
                 retry_backoff_seconds=task.retry_backoff_seconds,
                 revision=task.revision,

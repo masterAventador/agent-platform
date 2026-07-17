@@ -24,7 +24,7 @@ import pytest
 import pytest_asyncio
 from alembic import command as alembic_command
 from alembic.config import Config
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -115,7 +115,11 @@ async def session_factory(migrated_postgres_url: str) -> AsyncIterator[async_ses
 
 
 async def seed_task(
-    factory: async_sessionmaker, *, concurrency_policy: ConcurrencyPolicy
+    factory: async_sessionmaker,
+    *,
+    concurrency_policy: ConcurrencyPolicy,
+    schedule: Schedule | None = None,
+    created_at: datetime = CREATED_AT,
 ) -> ScheduledTask:
     tenant_id, user_id, employee_id = uuid4(), uuid4(), uuid4()
     draft = EmployeeDraft(
@@ -192,9 +196,9 @@ async def seed_task(
             employee_id=employee_id,
             created_by=user_id,
             name="每小时巡检",
-            schedule=Schedule.cron(expression="0 * * * *", timezone="UTC"),
+            schedule=schedule or Schedule.cron(expression="0 * * * *", timezone="UTC"),
             input_data={"topic": "巡检"},
-            now=CREATED_AT,
+            now=created_at,
             concurrency_policy=concurrency_policy,
         )
         await SqlAlchemyScheduledTaskRepository(session).add(task)
@@ -360,3 +364,119 @@ async def test_concurrent_replicas_respect_the_skip_concurrency_policy(
     # 上一轮仍在跑：第二个触发点只留下一条 skipped 历史，不产生第二个 Run。
     assert await count(session_factory, RunRecord) == 1
     assert await count(session_factory, ScheduledTaskExecutionRecord) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_scheduler_loop_and_audit_sweep_coexist_on_real_postgres(
+    session_factory: async_sessionmaker,
+) -> None:
+    """调度循环与审计保留清扫并存必须互不干扰——把口头声称变成仓库门禁。
+
+    内存 SQLite 的所有 session 共享同一条连接（StaticPool），并发后台循环会互相
+    干扰，因此 `test_audit_retention_sweep.py` 的 lifespan 用例关掉了调度循环。
+    该隔离只对 SQLite 成立：真实 PostgreSQL 下每个 session 独占连接，两个循环必须
+    都能跑完。这条用例就是那句「真实 PG 下已验证正常」的证据本身。
+    """
+
+    from datetime import timedelta as _timedelta
+
+    from agent_platform.api.app import create_app
+    from agent_platform.config import AppSettings
+    from tests.contract.audit.test_audit_retention_sweep import (
+        AllowAllRateLimiter,
+        FakeKnowledgeProvider,
+        InMemorySkillStorage,
+        _seed_tenant_events,
+    )
+
+    # 调度循环用真实 now()，因此任务必须相对真实时间到期（固定的过去时间会被
+    # misfire 策略判为错过而跳过，测不到派发）。
+    real_now = datetime.now(UTC)
+    task = await seed_task(
+        session_factory,
+        concurrency_policy=ConcurrencyPolicy.ALLOW,
+        schedule=Schedule.once(run_at=real_now + timedelta(seconds=1), timezone="UTC"),
+        created_at=real_now,
+    )
+    await _seed_tenant_events(
+        session_factory,
+        task.tenant_id,
+        expired=2,
+        fresh=1,
+        expired_age=_timedelta(days=3),
+    )
+
+    app = create_app(
+        settings=AppSettings(
+            auth_cookie_secure=False,
+            audit_retention_days=1,
+            audit_retention_sweep_interval_seconds=3600,
+            scheduler_enabled=True,
+            scheduler_tick_interval_seconds=1,
+        ),
+        session_factory=session_factory,
+        auth_rate_limiter=AllowAllRateLimiter(),
+        knowledge_provider=FakeKnowledgeProvider(),
+        skill_storage=InMemorySkillStorage(),
+    )
+
+    async def expired_audit_events() -> int:
+        # 只数清扫该负责的过期事件；调度器自己写的 scheduled_task.dispatched 审计
+        # 也落在同一租户，用总数断言会把两个循环的职责搅在一起。
+        async with session_factory() as session:
+            total = await session.execute(
+                select(func.count())
+                .select_from(AuditEventRecord)
+                .where(
+                    AuditEventRecord.tenant_id == task.tenant_id,
+                    AuditEventRecord.action.like("retention.expired_%"),
+                )
+            )
+            return int(total.scalar_one())
+
+    assert await expired_audit_events() == 2
+
+    async with app.router.lifespan_context(app):
+        for _ in range(100):
+            if await expired_audit_events() == 0 and await count(session_factory, RunRecord) >= 1:
+                break
+            await asyncio.sleep(0.05)
+
+    # 审计清扫清掉了全部过期事件；调度循环同期真的派发了 Run。两个循环都跑完了。
+    assert await expired_audit_events() == 0
+    assert await count(session_factory, RunRecord) >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_tick_leaves_no_connection_idle_in_transaction(
+    session_factory: async_sessionmaker,
+) -> None:
+    """一跳结束后不得留下 idle-in-transaction 连接。
+
+    调度的三个阶段各自先用只读 session 扫候选、关闭后再逐条处理；只读 session 不
+    显式 commit，靠 SQLAlchemy 关闭时回滚把连接干净地还回池子。实测：块内为
+    `idle in transaction`、块退出后为 `idle`。这条用例守住该性质——一旦有人把逐条
+    处理挪进扫描 session 里，长事务就会在这里暴露。
+    """
+
+    await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.ALLOW)
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    try:
+        await run_scheduler_tick(
+            async_sessionmaker(engine, expire_on_commit=False),
+            now=JUST_AFTER_TRIGGER,
+            batch_limit=50,
+        )
+        async with session_factory() as session:
+            stuck = await session.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND pid <> pg_backend_pid() "
+                    "AND state = 'idle in transaction'"
+                )
+            )
+            assert int(stuck.scalar_one()) == 0
+    finally:
+        await engine.dispose()

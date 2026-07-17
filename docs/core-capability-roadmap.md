@@ -376,7 +376,7 @@
 
 2026-07-17 后端主链进展（本任务提交，先 RED 后 GREEN）：
 
-- **调度语义**：Cron / 单次预约 / IANA 时区 / 启停 / `next_run_at` 全部落地。Cron 解析与 DST 语义委托 `cronsim==2.7`（零依赖、公开 API、无侵入），春季跳过的本地时间在当日下一个有效时间触发、秋季重复的本地时间只触发一次（fold=0 侧），均有断言 UTC 瞬时的用例覆盖；`schedule.py` 是全平台唯一直接依赖 cronsim 的位置。
+- **调度语义**：Cron / 单次预约 / IANA 时区 / 启停 / `next_run_at` 全部落地。Cron 解析与 DST 语义委托 `cronsim`（`pyproject.toml` 声明 `>=2.6`，锁文件固定 2.7；零依赖、公开 API、无侵入），春季跳过的本地时间在当日下一个有效时间触发、秋季重复的本地时间只触发一次（fold=0 侧），均有断言 UTC 瞬时的用例覆盖；`schedule.py` 是全平台唯一直接依赖 cronsim 的位置。
 - **不建旁路执行体系**：抽出唯一的 Run 创建共享路径 `run_dispatch.create_employee_run`，API 直跑、会话轮次派生与调度三方复用同一实现，调度产生的就是正常 Run + START 命令，由既有 Dispatcher/Worker 执行。
 - **多副本安全（双重防线）**：`FOR UPDATE SKIP LOCKED` 认领任务行 + `(scheduled_task_id, scheduled_for)` 唯一索引兜底；执行记录先于 Run 落库，冲突即整事务回滚，绝不留孤儿 Run。已由真实 PostgreSQL 并发门禁 4 用例证明（两副本竞争同一触发点只产生 1 个 Run/1 条命令/1 条执行记录）。
 - **策略**：misfire 支持 `skip`（默认）/`run_once`/`run_all`；`run_all` 受补跑窗口（默认 24h）约束、每跳补一个点，避免停机越久补跑越多的无界成本；misfire 判定不回溯枚举错过的触发点（分钟级 Cron 停机一年即数十万个点，枚举本身即无界）。并发策略支持 `allow`/`skip`（默认）/`queue`，`queue` 队列深度恒为 1、后续触发点合并为 `queue_collapsed` 历史。重试为指数退避 + 上限，次数用尽转终态 `failed`。
@@ -387,6 +387,15 @@
 - **Demo Seed**：幂等补齐 1 个启用中的工作日 Cron 任务 + 1 个暂停的单次预约 + 1 条成功执行历史（绑定终态 run，不会被 Worker 恢复扫描判为孤儿）。
 
 本阶段验证命令：`cd backend && uv run pytest tests/unit tests/contract -q`（1453 passed）；`uv run pytest tests/integration/scheduling tests/integration/runs/test_run_dispatch.py tests/integration/database/test_migrations.py -q`；`TEST_DATABASE_URL=... uv run pytest tests/integration/scheduling/test_postgres_scheduler_concurrency.py -q`（真实 PG 4/4）；`uv run ruff check .`；`uv run mypy`（249 文件）。
+
+2026-07-17 第二轮（独立双复审 FAIL 后集中整改，先 RED 后 GREEN）：
+
+- **【阻断】暂停语义在派发路径缺失**：`_dispatch_pending_one` 全程不看 `task.enabled`，用户点暂停后，排队中的触发点与退避到点的重试仍会起新 Run（RED 实测 `assert 2 == 1`）。修复：拿任务行锁后判 `enabled`，并把该执行就地结算为 `skipped(task_paused)`（新增 `SkipReason.TASK_PAUSED` 与 `RETRY_WAITING→SKIPPED` 转换），否则它每跳被重复捞出、永不结算。原有「暂停不派发」用例只覆盖了认领路径，派发路径零覆盖。
+- **【阻断】Demo Seed 写入产品自身契约禁止的状态**：演示员工发布版 `scheduled_tasks: false`，却给它种了 2 条定时任务——API 对该组合返回 409、调度守卫会把任务一到期就自动暂停，此前靠把 `next_run_at` 硬编码成 2027 远期时间掩盖。修复：演示员工发布版真正开启该能力；`next_run_at` 由 cron 表达式与时区真实推算（不再硬编码）；单次预约用暂停态而非伪造时间表达「先别真跑」；运行态字段（enabled/next_run_at/last_run_at/revision）移出可变字段，建后归调度器所有，重放 Seed 不冲掉调度进度。
+- **自动暂停不再靠 CAS 巧合**：`_dispatch_execution` 改为返回 `SkipReason | None`，`_claim_one` 据此区分「已自动暂停 → 绝不 `_advance`」与「未暂停 → 推进到下一触发点」；此前两条 CAS 都用旧 revision，靠第二次静默失败才没把暂停解除。
+- **冲突分类收窄**：`IntegrityError` 判定从包住整个 `_claim_one` 收到只包触发点插入那一条语句（savepoint 隔离）；非触发点的完整性故障（Run/命令/审计）不再被伪装成「另一个副本抢先了」静默丢弃，现在计入 `result.failed` 并触发告警（RED 实测 `assert 0 == 1`）。补了让该分支真正被生产路径执行的用例。
+- **CAS 漏列补齐**：`update_with_cas` 补写 `misfire_grace_seconds` 与 `misfire_backfill_window_seconds`（RED 实测 `assert 60 == 17`），避免将来 API 暴露这两个字段时改动被静默丢弃。
+- **补齐虚假声称的证据**：极端频率（`* * * * *`）此前声称覆盖实为零用例，现补 2 条（默认 SKIP 不堆积、ALLOW 每触发一个 Run）；lifespan 取消此前只有注释无断言，现断言任务具名、`cancelled()` 为真且无悬挂任务（移除 `cancel()` 后 lifespan 直接挂死，证明该路径承重）；「真实 PG 下调度循环与审计清扫并存正常」此前只有口头验证，现落为真实 PG 门禁用例；只读 session 的 idle-in-transaction 实测为块退出即 `idle`（无泄漏），并补回归门禁守住该性质。
 
 剩余未完成（不得据此标记完成）：客户端创建/编辑/暂停/执行记录页面、时区/重启恢复/重复触发/权限的 Playwright E2E、C16 配额接入。
 

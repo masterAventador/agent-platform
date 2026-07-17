@@ -211,6 +211,14 @@ async def _dispatch_pending_one(
     )
     if current is None:
         return False
+    if not task.enabled:
+        # 用户已暂停：排队中的触发点与等待中的重试都不得再起 Run。就地结算成终态，
+        # 否则它们会每一跳被重新捞出，白占派发预算且永远不结算。
+        await executions.update_with_cas(
+            current.skipped(reason=SkipReason.TASK_PAUSED, now=now),
+            expected_revision=current.revision,
+        )
+        return False
     if current.status is ExecutionStatus.RETRY_WAITING:
         if current.next_attempt_at is None or current.next_attempt_at > now:
             return False
@@ -219,7 +227,7 @@ async def _dispatch_pending_one(
             return False
     else:
         return False
-    return await _dispatch_execution(session, task=task, execution=current, now=now)
+    return await _dispatch_execution(session, task=task, execution=current, now=now) is None
 
 
 async def _has_other_active(
@@ -250,11 +258,6 @@ async def _claim_due_tasks(
             async with session_factory() as session:
                 await _claim_one(session, task_id=task_id, now=now, result=result)
                 await session.commit()
-        except IntegrityError:
-            # 同一触发点已被另一个副本落库：唯一索引挡下，本副本整事务回滚，无重复 Run。
-            logger.info(
-                "scheduled_task_trigger_already_claimed", extra={"task_id": str(task_id)}
-            )
         except Exception:
             result.failed += 1
             result.failures.append(str(task_id))
@@ -309,16 +312,31 @@ async def _claim_one(
         status=ExecutionStatus.DEFERRED,
         now=now,
     )
-    # 先落触发点再建 Run：唯一索引冲突时整事务回滚，绝不留下孤儿 Run。
-    await executions.add(execution)
-    await session.flush()
+    # 先落触发点再建 Run：只有这一条语句可能合法地撞上触发点唯一索引，因此冲突判定
+    # 只包住它——套在整个 _claim_one 外面会把 Run/命令/审计的完整性故障也误判成
+    # 「另一个副本抢先了」而静默丢弃。savepoint 让冲突回滚后外层事务仍可提交。
+    try:
+        async with session.begin_nested():
+            await executions.add(execution)
+            await session.flush()
+    except IntegrityError:
+        logger.info(
+            "scheduled_task_trigger_already_claimed",
+            extra={"task_id": str(task.id), "scheduled_for": plan.scheduled_for.isoformat()},
+        )
+        return
 
-    if await _dispatch_execution(session, task=task, execution=execution, now=now):
+    guard = await _dispatch_execution(session, task=task, execution=execution, now=now)
+    if guard is None:
         await _mark_dispatched(session, task=task, next_run_at=plan.next_run_at, now=now)
         result.dispatched += 1
-    else:
-        await _advance(session, task=task, next_run_at=plan.next_run_at, now=now)
-        result.skipped += 1
+        return
+    result.skipped += 1
+    if pause_reason_for_guard(guard) is not None:
+        # 守卫已把任务自动暂停：绝不能再用暂停前的旧快照 _advance 把它写回 enabled。
+        # （此前靠 _advance 的 CAS 恰好失败才没出事，属于巧合正确。）
+        return
+    await _advance(session, task=task, next_run_at=plan.next_run_at, now=now)
 
 
 class _Contention(StrEnum):
@@ -363,8 +381,12 @@ async def _dispatch_execution(
     task: ScheduledTask,
     execution: ScheduledTaskExecution,
     now: datetime,
-) -> bool:
-    """守卫通过则创建正常 Run + START 命令；否则受控跳过并自动暂停任务。"""
+) -> SkipReason | None:
+    """守卫通过则创建正常 Run + START 命令，返回 None；否则受控跳过并返回跳过原因。
+
+    返回原因而不是 bool，调用方才能区分「守卫失败且任务已被自动暂停」（不得再推进
+    next_run_at）与「守卫失败但任务仍启用」（应推进到下一个触发点）。
+    """
 
     _, executions = _repositories(session)
     context = await _load_dispatch_context(session, task=task)
@@ -374,7 +396,7 @@ async def _dispatch_execution(
             execution.skipped(reason=guard, now=now), expected_revision=execution.revision
         )
         await _auto_pause(session, task=task, reason=guard, now=now)
-        return False
+        return guard
 
     assert context.published_version is not None
     run = await create_employee_run(
@@ -398,7 +420,7 @@ async def _dispatch_execution(
             "attempt": execution.attempts + 1,
         },
     )
-    return True
+    return None
 
 
 async def _load_dispatch_context(

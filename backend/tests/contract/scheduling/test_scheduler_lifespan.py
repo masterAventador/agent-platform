@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from agent_platform.api.app import create_app
+from agent_platform.api.app import SCHEDULER_TASK_NAME, create_app
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
@@ -25,6 +25,14 @@ from tests.integration.scheduling.conftest import seed_workspace
 class AllowAllRateLimiter:
     async def ensure_allowed(self, *, scope: str, key: str) -> None:
         del scope, key
+
+
+def _scheduler_tasks() -> list[asyncio.Task]:
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == SCHEDULER_TASK_NAME and not task.done()
+    ]
 
 
 async def count_runs(factory: async_sessionmaker) -> int:
@@ -72,8 +80,15 @@ async def test_the_api_lifespan_dispatches_a_due_scheduled_task() -> None:
             if await count_runs(sessions) == 1:
                 break
             await asyncio.sleep(0.05)
+        running = _scheduler_tasks()
+        assert len(running) == 1
+        scheduler_task = running[0]
+        assert scheduler_task.done() is False
 
-    # 退出 lifespan 后调度任务已被取消并 await 干净，不留悬挂任务。
+    # 退出 lifespan 后调度任务必须已被取消并 await 干净，不留悬挂任务。
+    assert scheduler_task.done() is True
+    assert scheduler_task.cancelled() is True
+    assert _scheduler_tasks() == []
     assert await count_runs(sessions) == 1
     await engine.dispose()
 
@@ -110,6 +125,7 @@ async def test_the_scheduler_loop_can_be_disabled_by_configuration() -> None:
 
     async with app.router.lifespan_context(app):
         await asyncio.sleep(0.2)
+        assert _scheduler_tasks() == []
 
     assert await count_runs(sessions) == 0
     await engine.dispose()

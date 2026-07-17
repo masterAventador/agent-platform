@@ -59,6 +59,7 @@ class PauseReason(StrEnum):
 class SkipReason(StrEnum):
     """某个触发点没有产生 Run 的原因（都会留下可见的执行历史）。"""
 
+    TASK_PAUSED = "task_paused"
     MISFIRE_SKIPPED = "misfire_skipped"
     MISFIRE_WINDOW_EXCEEDED = "misfire_window_exceeded"
     CONCURRENCY_SKIPPED = "concurrency_skipped"
@@ -116,7 +117,13 @@ _ALLOWED_EXECUTION_TRANSITIONS: dict[ExecutionStatus, frozenset[ExecutionStatus]
         }
     ),
     ExecutionStatus.RETRY_WAITING: frozenset(
-        {ExecutionStatus.DISPATCHED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+        {
+            ExecutionStatus.DISPATCHED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+            # 任务被暂停时，等待重试的执行必须能就地结算，不能一直挂着被反复扫描。
+            ExecutionStatus.SKIPPED,
+        }
     ),
     ExecutionStatus.SUCCEEDED: frozenset(),
     ExecutionStatus.FAILED: frozenset(),

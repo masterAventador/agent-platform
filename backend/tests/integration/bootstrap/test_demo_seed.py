@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, timedelta
 
 import pytest
 import pytest_asyncio
@@ -442,3 +443,77 @@ async def test_demo_seed_provides_representative_memories_idempotently(
     assert all(record.status == "active" for record in memories)
     contents = {record.content for record in memories}
     assert len(contents) == len(memories)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_scheduled_tasks_are_consistent_with_their_employee(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seed 不得写入产品自身契约禁止的状态。
+
+    演示定时任务挂在演示员工上，而 API 只允许给「发布版开启了 scheduled_tasks」的
+    员工建定时任务；调度守卫也会把关闭该能力的任务一到期就自动暂停。两者必须自洽，
+    否则阶段二 UI 上来后用户既不能编辑这条演示任务，也不能给演示员工新建定时任务。
+    """
+    from agent_platform.bootstrap.demo_seed import (
+        DEMO_ONCE_SCHEDULED_TASK_ID,
+        DEMO_SCHEDULED_TASK_ID,
+    )
+    from agent_platform.infrastructure.database.repositories.scheduling import (
+        ScheduledTaskRecord,
+    )
+    from agent_platform.platform.scheduling.entities import is_scheduling_enabled
+    from agent_platform.platform.scheduling.schedule import Schedule
+
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        version = (
+            await session.scalars(
+                select(EmployeeVersionRecord).where(
+                    EmployeeVersionRecord.employee_id == DEMO_EMPLOYEE_ID
+                )
+            )
+        ).one()
+        tasks = (
+            await session.scalars(
+                select(ScheduledTaskRecord).where(
+                    ScheduledTaskRecord.tenant_id == DEMO_TENANT_ID
+                )
+            )
+        ).all()
+        employee = await session.get(EmployeeRecord, DEMO_EMPLOYEE_ID)
+
+    # 演示员工的发布版必须真的开着定时能力，API 才会接受这些任务。
+    assert is_scheduling_enabled(version.definition.get("capabilities")) is True
+    assert employee is not None
+    assert employee.capabilities.get("scheduled_tasks") is True
+
+    by_id = {task.id: task for task in tasks}
+    assert set(by_id) == {DEMO_SCHEDULED_TASK_ID, DEMO_ONCE_SCHEDULED_TASK_ID}
+    assert all(task.employee_id == DEMO_EMPLOYEE_ID for task in tasks)
+
+    cron_task = by_id[DEMO_SCHEDULED_TASK_ID]
+    assert cron_task.enabled is True
+    assert cron_task.next_run_at is not None
+    # next_run_at 必须与 cron 表达式/时区自洽——不能是伪造的远期时间，
+    # 否则阶段二 UI 会显示自相矛盾的「下次执行时间」。
+    schedule = Schedule.cron(
+        expression=cron_task.cron_expression or "", timezone=cron_task.timezone
+    )
+    previous = cron_task.next_run_at.replace(tzinfo=UTC) - timedelta(seconds=1)
+    assert schedule.next_occurrence_after(previous) == cron_task.next_run_at.replace(
+        tzinfo=UTC
+    )
+
+    # 单次预约用暂停态表达「开发栈起来先别真跑」，而不是伪造 next_run_at。
+    once_task = by_id[DEMO_ONCE_SCHEDULED_TASK_ID]
+    assert once_task.enabled is False
+    assert once_task.next_run_at is None

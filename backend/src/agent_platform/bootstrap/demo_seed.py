@@ -73,6 +73,7 @@ from agent_platform.platform.scheduling.entities import (
     ExecutionStatus,
     MisfirePolicy,
 )
+from agent_platform.platform.scheduling.schedule import Schedule, ScheduleKind
 from agent_platform.platform.tenants.invitations import InvitationStatus
 from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tools.entities import McpTransport, ToolRiskLevel
@@ -358,7 +359,9 @@ def _demo_records(
         "output_schema": {"type": "object"},
         "capabilities": {
             "conversation": True,
-            "scheduled_tasks": False,
+            # C12：演示定时任务挂在这个员工上，发布版必须真的开启该能力，
+            # 否则 API 拒绝创建、调度守卫也会把任务一到期就自动暂停。
+            "scheduled_tasks": True,
             "file_upload": True,
             "memory": True,
         },
@@ -529,7 +532,7 @@ def _demo_records(
                 output_schema={"type": "object"},
                 capabilities={
                     "conversation": True,
-                    "scheduled_tasks": False,
+                    "scheduled_tasks": True,
                     "file_upload": True,
                     "memory": True,
                 },
@@ -1110,9 +1113,15 @@ def _demo_scheduled_task_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
     以及一条已成功的执行历史（绑定终态 run，不会被 Worker 恢复扫描判为孤儿）。
 
     幂等：全部使用稳定 uuid5 标识；重复执行只补齐/更新，不制造重复记录。
-    Cron 任务的 next_run_at 落在远期，避免开发栈刚起就立刻真跑一个 Run。
+
+    `next_run_at` 由 cron 表达式与时区真实推算，不硬编码——伪造的远期时间会让
+    UI 显示与调度语义自相矛盾。运行态字段（enabled/next_run_at/last_run_at/
+    revision）只在首次插入时写入、不列入可变字段：建后由调度器拥有，重放 Seed
+    不会把调度进度冲掉。单次预约用暂停态表达「开发栈起来先别真跑」。
     """
 
+    # 运行态字段（enabled/pause_reason/next_run_at/last_run_at/revision）不可变更：
+    # 首次插入后归调度器所有，重放 Seed 不得覆盖。
     task_fields = (
         "tenant_id",
         "employee_id",
@@ -1123,19 +1132,15 @@ def _demo_scheduled_task_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
         "run_at",
         "timezone",
         "input_data",
-        "enabled",
-        "pause_reason",
-        "next_run_at",
-        "last_run_at",
         "misfire_policy",
         "concurrency_policy",
         "misfire_grace_seconds",
         "misfire_backfill_window_seconds",
         "max_retries",
         "retry_backoff_seconds",
-        "revision",
     )
-    next_run_at = datetime(2027, 1, 4, 1, 0, tzinfo=UTC)
+    cron_schedule = Schedule.cron(expression="0 9 * * 1-5", timezone="Asia/Shanghai")
+    next_run_at = cron_schedule.next_occurrence_after(datetime.now(UTC))
     return [
         (
             ScheduledTaskRecord(
@@ -1144,10 +1149,10 @@ def _demo_scheduled_task_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
                 employee_id=DEMO_EMPLOYEE_ID,
                 created_by=DEMO_USER_ID,
                 name="每个工作日早上九点巡检",
-                schedule_kind="cron",
-                cron_expression="0 9 * * 1-5",
+                schedule_kind=cron_schedule.kind.value,
+                cron_expression=cron_schedule.cron_expression,
                 run_at=None,
-                timezone="Asia/Shanghai",
+                timezone=cron_schedule.timezone,
                 input_data={"topic": "每日巡检"},
                 enabled=True,
                 pause_reason=None,
@@ -1174,7 +1179,7 @@ def _demo_scheduled_task_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
                 employee_id=DEMO_EMPLOYEE_ID,
                 created_by=DEMO_USER_ID,
                 name="季度报告单次预约（已暂停）",
-                schedule_kind="once",
+                schedule_kind=ScheduleKind.ONCE.value,
                 cron_expression=None,
                 run_at=datetime(2027, 4, 1, 1, 0, tzinfo=UTC),
                 timezone="Asia/Shanghai",

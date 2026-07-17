@@ -108,6 +108,9 @@ logger = logging.getLogger(__name__)
 
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
+# 具名后台任务便于诊断与生命周期断言（与能力包后台任务的命名方式一致）。
+SCHEDULER_TASK_NAME = "agent-platform-scheduler"
+
 
 async def _wait_for_database_ready(
     session_factory: SessionFactory,
@@ -351,7 +354,9 @@ def create_app(
         audit_retention_task = asyncio.create_task(sweep_audit_retention())
         approval_expiry_task = asyncio.create_task(sweep_approval_expiry())
         scheduler_task = (
-            asyncio.create_task(run_scheduler()) if app_settings.scheduler_enabled else None
+            asyncio.create_task(run_scheduler(), name=SCHEDULER_TASK_NAME)
+            if app_settings.scheduler_enabled
+            else None
         )
         capability_tasks = [
             asyncio.create_task(worker_factory(), name=worker_name)
