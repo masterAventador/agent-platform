@@ -375,10 +375,94 @@ describe('ScheduledTasksPage', () => {
 
     await user.click(within(dialog).getByRole('button', { name: /保\s*存/ }))
     await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1))
-    // 未改动预约时间时，往返换算必须回到原来的 UTC 瞬时。
+    // 未改动预约时间时原样复用服务端给的 run_at（逐字，连格式都不重写）。
     expect(mutate.mock.calls[0][0].schedule).toEqual({
       kind: 'once',
-      run_at: '2026-08-01T02:00:00.000Z',
+      run_at: '2026-08-01T02:00:00Z',
+      timezone: 'Asia/Shanghai',
+    })
+  })
+
+  // 用户没碰时间字段就保存，任务时刻必须**逐字不变**。若走 UTC→当地→UTC 回环，
+  // 落在秋季重复小时第二次出现的 once 任务会被静默提前 1 小时（当地时间不带 fold
+  // 标识，回环必然丢信息）。根治办法是压根不做这个回环。
+  it('编辑 once 任务时不改时间字段则原样复用原 run_at，不做 UTC 回环', async () => {
+    const mutate = vi.fn()
+    vi.mocked(useUpdateScheduledTask).mockReturnValue(mutationStub(mutate) as never)
+    vi.mocked(useScheduledTasks).mockReturnValue({
+      data: {
+        items: [{
+          ...cronTask,
+          name: '落在夏令时回拨重复小时的预约',
+          schedule: {
+            kind: 'once' as const,
+            timezone: 'America/New_York',
+            cron_expression: null,
+            // 01:30 EST —— 2026-11-01 01:30 当地时间的【第二次】出现。
+            run_at: '2026-11-01T06:30:00.000Z',
+          },
+        }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      },
+      isPending: false,
+      isError: false,
+    } as never)
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: /编\s*辑/ }))
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByLabelText('预约时间')).toHaveValue('2026-11-01T01:30')
+
+    // 只改名字，完全不碰预约时间。
+    await user.clear(within(dialog).getByLabelText('任务名称'))
+    await user.type(within(dialog).getByLabelText('任务名称'), '只改个名字')
+    await user.click(within(dialog).getByRole('button', { name: /保\s*存/ }))
+
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1))
+    expect(mutate.mock.calls[0][0].schedule).toEqual({
+      kind: 'once',
+      run_at: '2026-11-01T06:30:00.000Z',
+      timezone: 'America/New_York',
+    })
+  })
+
+  it('编辑 once 任务时改了时间字段则按所选时区重新换算', async () => {
+    const mutate = vi.fn()
+    vi.mocked(useUpdateScheduledTask).mockReturnValue(mutationStub(mutate) as never)
+    vi.mocked(useScheduledTasks).mockReturnValue({
+      data: {
+        items: [{
+          ...cronTask,
+          schedule: {
+            kind: 'once' as const,
+            timezone: 'Asia/Shanghai',
+            cron_expression: null,
+            run_at: '2026-08-01T02:00:00Z',
+          },
+        }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      },
+      isPending: false,
+      isError: false,
+    } as never)
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(screen.getByRole('button', { name: /编\s*辑/ }))
+    const dialog = screen.getByRole('dialog')
+    await user.clear(within(dialog).getByLabelText('预约时间'))
+    await user.type(within(dialog).getByLabelText('预约时间'), '2026-08-02T15:30')
+    await user.click(within(dialog).getByRole('button', { name: /保\s*存/ }))
+
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1))
+    expect(mutate.mock.calls[0][0].schedule).toEqual({
+      kind: 'once',
+      run_at: '2026-08-02T07:30:00.000Z',
       timezone: 'Asia/Shanghai',
     })
   })

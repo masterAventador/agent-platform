@@ -62,6 +62,61 @@ describe('zonedWallClockToUtc', () => {
     expect(zonedWallClockToUtc(wallClock, 'America/New_York')).toBe(instant)
   })
 
+  // 春季跳变缺口：该当地时间根本不存在。必须显式选择前移/后移，而不是让
+  // 「两趟偏移校正」自己去撞一个不存在的不动点后静默返回不自洽的结果。
+  // compatible（与 Temporal 默认一致）= 按缺口长度后移到切换后的等价瞬时。
+  it('春季跳变缺口内不存在的当地时间按 compatible 后移到切换后的瞬时', () => {
+    // 2026-03-08 02:30 America/New_York 不存在（02:00 EST 直接跳到 03:00 EDT）。
+    // 后移 = 03:30 EDT = 07:30Z。绝不能返回 06:30Z（= 01:30 EST，落在切换【前】、
+    // 比用户填的还早 1 小时）。
+    expect(zonedWallClockToUtc('2026-03-08T02:30', 'America/New_York'))
+      .toBe('2026-03-08T07:30:00.000Z')
+  })
+
+  it('春季缺口支持显式前移，earlier 落在切换前的等价瞬时', () => {
+    expect(zonedWallClockToUtc('2026-03-08T02:30', 'America/New_York', 'earlier'))
+      .toBe('2026-03-08T06:30:00.000Z')
+  })
+
+  // 秋季重复小时：同一当地时间对应两个瞬时，必须能分别寻址，默认取 earlier。
+  it('秋季重复小时的两次出现分别可寻址', () => {
+    expect(zonedWallClockToUtc('2026-11-01T01:30', 'America/New_York', 'earlier'))
+      .toBe('2026-11-01T05:30:00.000Z')
+    expect(zonedWallClockToUtc('2026-11-01T01:30', 'America/New_York', 'later'))
+      .toBe('2026-11-01T06:30:00.000Z')
+    // 默认（compatible）取 earlier
+    expect(zonedWallClockToUtc('2026-11-01T01:30', 'America/New_York'))
+      .toBe('2026-11-01T05:30:00.000Z')
+  })
+
+  // 30 分钟 DST：偏移差不是整小时，任何按「1 小时」硬编码的实现都会在这里露馅。
+  it('Australia/Lord_Howe 的 30 分钟 DST：缺口按 compatible 后移 30 分钟', () => {
+    // 2026-10-04 02:00 LHST(+10:30) 跳到 02:30 LHDT(+11)，02:15 不存在。
+    // 后移 30 分钟 = 02:45 LHDT = 2026-10-03T15:45Z。
+    expect(zonedWallClockToUtc('2026-10-04T02:15', 'Australia/Lord_Howe'))
+      .toBe('2026-10-03T15:45:00.000Z')
+  })
+
+  it('Australia/Lord_Howe 的 30 分钟 DST：重复的当地时间两次出现分别可寻址', () => {
+    // 2026-04-05 01:45 出现两次：+11 时为 14:45Z，+10:30 时为 15:15Z（相差 30 分钟）。
+    expect(zonedWallClockToUtc('2026-04-05T01:45', 'Australia/Lord_Howe', 'earlier'))
+      .toBe('2026-04-04T14:45:00.000Z')
+    expect(zonedWallClockToUtc('2026-04-05T01:45', 'Australia/Lord_Howe', 'later'))
+      .toBe('2026-04-04T15:15:00.000Z')
+  })
+
+  // 症状 2 的直接钉子：fold 第二次出现的瞬时，往返后不得漂移。
+  // 只有保留 fold 侧信息才可能成立；做不到就必须由调用方避免回环（见页面用例）。
+  it('fold 两次出现都能用显式消歧无损往返', () => {
+    const earlier = '2026-11-01T05:30:00.000Z'
+    const later = '2026-11-01T06:30:00.000Z'
+    const zone = 'America/New_York'
+    expect(zonedWallClockToUtc(utcToZonedWallClock(earlier, zone), zone, 'earlier'))
+      .toBe(earlier)
+    expect(zonedWallClockToUtc(utcToZonedWallClock(later, zone), zone, 'later'))
+      .toBe(later)
+  })
+
   it('非法输入返回 null，交由表单内联报错，不提交垃圾给后端', () => {
     expect(zonedWallClockToUtc('', 'Asia/Shanghai')).toBeNull()
     expect(zonedWallClockToUtc('not-a-time', 'Asia/Shanghai')).toBeNull()

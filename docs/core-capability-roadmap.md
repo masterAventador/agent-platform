@@ -416,11 +416,21 @@
 - **Playwright E2E**（`frontend/e2e/scheduled-tasks.spec.ts`，4 用例全绿）：① 时区——页面选 `America/New_York` 建 Cron，回显当地 09:00 且库中 UTC 为 13:00/14:00；② DST——同一当地 09:00 在冬/夏令时分别落到 14:00Z/13:00Z，回显都是 09:00；③ 重复触发 + 重启恢复——两个调度副本竞争同一触发点只产生一条执行记录、无孤儿 Run，整组 SIGKILL 后历史冻结、重启后继续推进且无任何触发点重复；④ 权限——同企业 member（有 `runs.execute`、无 `runs.manage`）看不到他人任务，直达详情与带 owner 租户头的 GET/executions/pause/resume/DELETE 一律 404，列表返回空且任务未被越权删除。
 - **调度进程承载方式**：调度循环随 API lifespan 运行、无独立入口，故 E2E 用独立 API 进程承载它（`AGENT_PLATFORM_SCHEDULER_TICK_INTERVAL_SECONDS=1`），Playwright 管理的 API 关闭调度器（`playwright.config.ts`）避免竞争。**自查发现并修正的假通过**：`uv run` 会再 fork 出真正的 uvicorn 子进程，最初只 SIGKILL `uv` 包装进程会把调度器留成孤儿（实测 ppid 变 1 且端口仍返回 200），「重启恢复」用例因此**没真正杀掉调度器**、属于因错误原因通过。已改为 `detached` 进程组整组杀 + 以「端口不再服务」为退出判据 + 增加「停机窗口内历史必须冻结」对照断言；**变异验证**：改回只杀包装进程后用例立即转红（`调度进程 … 没有真正停止服务`）。
 
-阶段二验证命令：`cd frontend && pnpm test`（61 文件 / 330 用例全绿）；`pnpm lint`；`pnpm typecheck`；`pnpm build`；`pnpm exec playwright test scheduled-tasks.spec.ts`（4/4，随机项目名 + 随机端口隔离栈，验后销毁）；`pnpm exec playwright test`（默认全量 37 passed / 1 failed，唯一失败为下方登记的既有失效用例）。
+2026-07-17 阶段二第二轮（独立双复审均 FAIL 后按根因集中整改，先 RED 后 GREEN）：
+
+- **【高危，正确性】`zonedWallClockToUtc` 的「两趟偏移校正」在 DST 边界不成立**：该做法等价于解不动点方程 `offset(t) = asIfUtc - t`，而它在春季跳变缺口内**无解**、在秋季重复小时内**有两解**；二趟迭代既不检测也不消歧，只会静默返回不自洽的瞬时。两个同源症状：① 春季不存在的当地时间（`2026-03-08T02:30` America/New_York）返回 `06:30Z`（= 01:30 EST，落在切换**前**，比用户所填还早 1 小时），且与当时注释声称的「落到切换后」**方向相反**，此前**零用例覆盖**；② 秋季重复小时第二次出现的瞬时往返漂移 1 小时。已按枚举 + 校验重写：用边界两侧偏移各算一个候选，以「候选渲染回当地时间是否等于用户所填」判定候选是否真实存在——1 个成立即普通情况；2 个成立即重复小时，按 `disambiguation` 取前/后；0 个成立即跳变缺口，按 `disambiguation` 显式选择切换前/后一侧。消歧语义与 `Temporal.ZonedDateTime` 对齐（`compatible` 默认：缺口后移、重复取第一次）。**不引第三方依赖**：`Temporal` 在本机 Node 26 仍为 `undefined`（实测），用它需再引 polyfill；`date-fns-tz` 为约 30 行标准逻辑引入运行时依赖不划算。新增用例覆盖跳变缺口、fold 两次出现、`Australia/Lord_Howe` 的 **30 分钟** DST（非整小时偏移，任何按 1 小时硬编码的实现都会露馅）。
+- **【高危，命中真实用户路径】编辑 `once` 任务的 UTC→当地→UTC 回环导致静默提前**：当地时间字符串**不携带 fold 标识**，回环必然丢信息，因此显式消歧也救不了——全年扫描（每 30min）实测：修复消歧后 `America/New_York` 仍有 2 个、`Pacific/Chatham` 2 个、`Australia/Lord_Howe` 1 个瞬时不回原点，且**恰好全是 fold 第二次出现**。根治办法是**不做这个回环**：编辑 `once` 任务时若用户未改动预约时间与时区，直接原样复用原 `run_at`（逐字，连格式都不重写），只有真改了才重新换算。此前用户编辑一条落在 fall-back 重复小时的 `once` 任务、**只改名字**保存，任务就被静默提前 1 小时。
+- **【原往返用例是教科书式假绿】**：旧用例取样 `2026-11-01T05:30:00.000Z`——同一 fold 的**第一次**出现，恰好能过；与失败样本仅差 1 小时。选中了通过的那个、漏掉了失败的那个，于是 146 个用例全绿的同时函数在静默返错。已补 fold 两次出现的显式往返用例。
+- **【完成定义第 5 条点名的「编辑」「暂停」此前只有组件测试】**：项目规则明写组件测试不能单独作为该类功能的完成依据，而上一轮台账「剩余未完成」只写了 C16 配额、**漏登记该 E2E 缺口**，属文档措辞掩盖代码缺口。已补 3 条 Playwright：改 Cron 与时区后列表回显同步更新；**落在 DST 重复小时的 `once` 任务只改名字保存、时刻逐字不变**（正面钉住上述回环缺陷，**变异验证**：撤掉复用修复后该用例立即转红，`Expected 2027-11-07 06:30 / Received 2027-11-07 05:30`）；暂停→恢复在界面与库中同步生效且恢复后重算 `next_run_at`。
+- **【竞态用例存在真实假绿面】**：原「无重复 `scheduled_for`」断言在**只有一个副本真正 tick 时同样成立**（去重靠唯一约束），而当时只有 health 探活——活着 ≠ 在调度。且单个每分钟任务下先抢到的副本会吃掉全部触发点，「两副本各自认领过」本身就不确定、直接断言会 flaky。已改为确定性构造：一次放出 **30 个同时到期**的任务并把 `SCHEDULER_TICK_BATCH_LIMIT` 设为 1，两副本只能交替认领；并给每个副本单独落盘日志（后端未配 dictConfig，默认 formatter 会丢弃 `extra`，故 E2E 用**测试专用** `--log-config` 让 `dispatched/skipped` 真正打进日志，未改动任何后端代码），断言两副本**各自**认领数 > 0 且合计覆盖全部触发点。**变异验证**：只起一个副本时新断言立即转红（`claimedByB` `Expected: > 0 / Received: 0`），而旧的「无重复」断言在同一条件下照样通过——正是被堵上的那个假绿面。
+- **【注释与代码不符】**：`skipReasonLabels` / `pauseReasonLabels` 的注释称「缺项会让用户看到空白标签」，实际调用方 `?? item.skip_reason` 回落展示原始机器码。已改为与行为一致的表述。同类问题本轮共两处（另一处即上述 DST 注释方向写反），均已修正。
+
+阶段二验证命令：`cd frontend && pnpm test`（61 文件 / **338** 用例全绿）；`pnpm lint`；`pnpm typecheck`；`pnpm build`；`pnpm exec playwright test scheduled-tasks.spec.ts`（**8/8**，随机项目名 + 随机端口隔离栈，验后销毁并复查容器/网络/卷与孤儿 uvicorn 均为 0）；`pnpm exec playwright test`（默认全量 **41 passed / 1 failed**，唯一失败为下方红线 3 登记的既有失效用例）。
 
 阶段二已知缺口（如实声明）：
 
 - **「无 `runs.execute` 的成员看不到入口」无法用真实角色做 E2E**：`_ROLE_PERMISSIONS` 中 owner/admin/member **三个角色都含 `runs.execute`**，产品当前不存在缺该权限的真实角色，E2E 无法构造这样的用户而不伪造角色。该分支由 `App.test.tsx` 的组件级门禁用例覆盖（隐藏入口 + 直达 `/scheduled-tasks`、`/scheduled-tasks/:taskId` 显示统一 403）。真正可达且已 E2E 覆盖的是「有 `runs.execute`、无 `runs.manage` 的成员访问他人任务得 404」。若将来引入只读角色，须补该分支的真实 E2E。
+- **`once` 任务落在 DST 重复小时时，界面只能寻址第一次出现**：表单按 `compatible` 消歧，用户在 fall-back 重复小时里填的当地时间恒解析为第一次出现；要精确安排在第二次出现只能通过平台 API 直接给 UTC `run_at`（E2E 即以此构造该前置）。这是当地时间不带 fold 标识的固有信息缺失，非缺陷；已保证**既有任务不会因编辑被静默改动**。若将来需要界面寻址第二次出现，需在表单显式提供「第一次/第二次」选择。
 - **执行历史保留与 Demo 数据的张力未决**：阶段一登记的 `_DEMO_STARTED_AT` + 90 天保留将在约 2026-09-29 后清掉演示执行历史；本阶段未改动该策略（属独立产品取舍，且不影响页面正确性），仍待决定延长保留或改用相对时间。
 
 2026-07-17 第四轮（代码质量复审 FAIL 后整改，先 RED 后 GREEN，新增/修改门禁均经变异验证）：

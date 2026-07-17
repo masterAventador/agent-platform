@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { openSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import {
@@ -52,10 +53,24 @@ export function schedulerPort(offset: number): number {
  * 「同一触发点只产生一条执行记录」。Playwright 管理的那个 API 进程关掉了
  * 调度器（见 playwright.config.ts），避免与本进程竞争、让断言不确定。
  */
-export function startScheduler(port: number): SchedulerProcess {
+export interface SchedulerOptions {
+  /** 日志落盘路径；用于事后核对该副本**真的认领过触发点**（活着 ≠ 在调度）。 */
+  logPath?: string
+  /** 每跳最多认领多少个任务。设为 1 可让多副本交替认领，使竞争可观测且不靠运气。 */
+  batchLimit?: number
+}
+
+export function startScheduler(port: number, options: SchedulerOptions = {}): SchedulerProcess {
+  const logFd = options.logPath === undefined ? 'ignore' : openSync(options.logPath, 'a')
   const child = spawn(
     'uv',
-    ['run', 'uvicorn', 'agent_platform.api.app:app', '--host', '127.0.0.1', '--port', String(port)],
+    [
+      'run', 'uvicorn', 'agent_platform.api.app:app',
+      '--host', '127.0.0.1', '--port', String(port),
+      // 让 scheduler_tick_completed 的 dispatched/skipped/settled 真正打进日志：
+      // 后端未配置 dictConfig，默认 formatter 会把 extra 丢掉。
+      '--log-config', resolve(frontendRoot, 'e2e/helpers/scheduler-log-config.json'),
+    ],
     {
       cwd: backendRoot,
       // detached：让子进程自成进程组。`uv run` 会再 fork 出真正的 uvicorn 子进程，
@@ -70,8 +85,11 @@ export function startScheduler(port: number): SchedulerProcess {
         AGENT_PLATFORM_SCHEDULER_ENABLED: 'true',
         // 1 秒节拍：让「到点触发」在测试时长内真实发生，不改变调度语义。
         AGENT_PLATFORM_SCHEDULER_TICK_INTERVAL_SECONDS: '1',
+        ...(options.batchLimit === undefined
+          ? {}
+          : { AGENT_PLATFORM_SCHEDULER_TICK_BATCH_LIMIT: String(options.batchLimit) }),
       },
-      stdio: 'ignore',
+      stdio: logFd === 'ignore' ? 'ignore' : ['ignore', logFd, logFd],
     },
   )
   return {
@@ -138,4 +156,28 @@ export async function isServing(port: number): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+
+/**
+ * 该副本认领过的触发点数量（dispatched + 业务 skipped）。
+ *
+ * 只看 `scheduler_tick_completed` 这条日志——它仅在本跳真的 dispatch/skip/settle 过
+ * 才会打印，因此计数 > 0 直接证明**这个副本**认领过触发点，而不只是端口活着。
+ * 良性竞态（NOOP）按阶段一的设计不计入任何业务指标，所以不会污染该计数。
+ */
+export function countClaimedTriggerPoints(logPath: string): number {
+  let content = ''
+  try {
+    content = readFileSync(logPath, 'utf8')
+  } catch {
+    return 0
+  }
+  let claimed = 0
+  for (const line of content.split('\n')) {
+    const match = /scheduler_tick_completed dispatched=(\d+|-) skipped=(\d+|-)/.exec(line)
+    if (match === null) continue
+    claimed += (match[1] === '-' ? 0 : Number(match[1])) + (match[2] === '-' ? 0 : Number(match[2]))
+  }
+  return claimed
 }

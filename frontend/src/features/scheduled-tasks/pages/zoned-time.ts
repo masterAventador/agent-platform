@@ -57,21 +57,64 @@ export function utcToZonedWallClock(instant: string, timezone: string): string {
 }
 
 /**
+ * 当地时间在 DST 边界上的消歧策略（语义与 `Temporal.ZonedDateTime` 一致）。
+ *
+ * - `compatible`（默认）：跳变缺口内的时间**后移**到切换后的等价瞬时；重复的
+ *   时间取**第一次**出现。
+ * - `earlier`：缺口取切换前一侧；重复取第一次出现。
+ * - `later`：缺口取切换后一侧；重复取第二次出现。
+ */
+export type Disambiguation = 'compatible' | 'earlier' | 'later'
+
+/** 某个 UTC 瞬时在指定时区渲染出的当地时间（`YYYY-MM-DDTHH:mm`）。 */
+function wallClockAt(instant: number, timeZone: string): string {
+  return zonedParts(new Date(instant), timeZone).slice(0, 16).replace(' ', 'T')
+}
+
+/**
  * 当地时间（用户在所选时区里填的）→ UTC 瞬时。
  *
- * 先把当地时间当作 UTC 得到一个近似点，用该点的偏移回推；由于偏移本身随
- * DST 变化，再用回推结果处的偏移校正一次，覆盖跨 DST 边界的输入。
- * 春季不存在的当地时间会落到切换后的等价瞬时——与后端 `Schedule.once`
- * 接受 aware datetime 后直接转 UTC 的语义一致，不额外收紧。
+ * **不能用「把当地时间当 UTC 再按偏移回推、迭代校正」的做法**：那等价于解不动点
+ * 方程 `offset(t) = asIfUtc - t`，而该方程在春季跳变缺口内**无解**、在秋季重复
+ * 小时内**有两解**，迭代既不会收敛也不会报错，只会静默返回一个不自洽的瞬时。
+ *
+ * 这里改为枚举 + 校验：用边界两侧的偏移各算一个候选，再用「把候选渲染回当地时间
+ * 是否等于用户所填」来判定候选是否真实存在——
+ * - 恰好 1 个候选成立 → 普通情况，直接返回；
+ * - 2 个候选都成立 → 重复小时（fall-back），按 `disambiguation` 取前/后；
+ * - 0 个候选成立 → 跳变缺口（spring-forward），该当地时间不存在，按
+ *   `disambiguation` 显式选择切换前/后一侧，而不是撞出一个错误答案。
+ *
+ * 偏移取当地时间前后各一天处的值：DST 切换间隔远大于一天，足以覆盖两侧；
+ * 也因此天然支持非整小时的 DST（如 `Australia/Lord_Howe` 的 30 分钟）。
  */
-export function zonedWallClockToUtc(wallClock: string, timezone: string): string | null {
-  const match = WALL_CLOCK_PATTERN.exec(wallClock.trim())
-  if (!match) return null
-  const asIfUtc = Date.parse(`${wallClock.trim().replace(' ', 'T')}:00Z`)
+export function zonedWallClockToUtc(
+  wallClock: string,
+  timezone: string,
+  disambiguation: Disambiguation = 'compatible',
+): string | null {
+  const normalized = wallClock.trim().replace(' ', 'T')
+  if (!WALL_CLOCK_PATTERN.exec(normalized)) return null
+  const asIfUtc = Date.parse(`${normalized}:00Z`)
   if (Number.isNaN(asIfUtc)) return null
-  const firstGuess = asIfUtc - timezoneOffsetMs(new Date(asIfUtc), timezone)
-  const corrected = asIfUtc - timezoneOffsetMs(new Date(firstGuess), timezone)
-  return new Date(corrected).toISOString()
+
+  const day = 86_400_000
+  const candidates = [
+    asIfUtc - timezoneOffsetMs(new Date(asIfUtc - day), timezone),
+    asIfUtc - timezoneOffsetMs(new Date(asIfUtc + day), timezone),
+  ]
+  const ordered = [...new Set(candidates)].sort((left, right) => left - right)
+  const existing = ordered.filter((instant) => wallClockAt(instant, timezone) === normalized)
+
+  if (existing.length === 1) return new Date(existing[0]).toISOString()
+  if (existing.length > 1) {
+    // 重复小时：两个瞬时都真实存在，必须由调用方显式选择，不能靠巧合。
+    const picked = disambiguation === 'later' ? existing[existing.length - 1] : existing[0]
+    return new Date(picked).toISOString()
+  }
+  // 跳变缺口：该当地时间不存在。compatible/later 后移到切换后一侧，earlier 取切换前一侧。
+  const picked = disambiguation === 'earlier' ? ordered[0] : ordered[ordered.length - 1]
+  return new Date(picked).toISOString()
 }
 
 /**

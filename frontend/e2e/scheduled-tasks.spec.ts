@@ -1,7 +1,12 @@
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, test, type Page } from '@playwright/test'
 
 import { registerAndLogin } from './helpers/auth'
 import {
+  countClaimedTriggerPoints,
   isServing,
   queryE2eDatabase,
   schedulerPort,
@@ -129,18 +134,220 @@ test('单次预约跨 DST 边界时换算正确且回显与所选时区自洽', 
     .toContainText('2027-07-15 09:00 (America/New_York)')
 })
 
-// C12 完成定义第 6 条（重复触发 + 重启恢复）：两个调度副本竞争同一触发点只
-// 产生一条执行记录；SIGKILL 后重启，用户看到的执行历史连续且不重复。
-test('两副本竞争不重复触发，调度进程重启后执行历史连续无重复', async ({ page }) => {
+// C12 完成定义第 5 条点名的「编辑」：真实用户改 Cron 与时区，列表回显必须同步更新，
+// 且下次执行时间按**新时区**渲染。
+test('编辑定时任务改 Cron 与时区后列表回显同步更新', async ({ page }) => {
+  test.setTimeout(180_000)
+  await registerAndLogin(page)
+  await publishSchedulableEmployee(page, '编辑验收专员')
+
+  await openCreateForm(page)
+  let dialog = page.getByRole('dialog')
+  await pickOption(page, '数字员工', '编辑验收专员')
+  await dialog.getByLabel('任务名称').fill('待改的巡检')
+  await dialog.getByLabel('Cron 表达式').fill('0 9 * * 1-5')
+  await selectTimezone(page, 'Asia/Shanghai')
+  await dialog.getByRole('button', { name: /创\s*建/ }).click()
+  const original = page.getByRole('row', { name: /待改的巡检/ })
+  await expect(original).toContainText('Cron 0 9 * * 1-5（Asia/Shanghai）')
+  await expect(original).toContainText(/\d{4}-\d{2}-\d{2} 09:00 \(Asia\/Shanghai\)/)
+
+  await original.getByRole('button', { name: /编\s*辑/ }).click()
+  dialog = page.getByRole('dialog')
+  // 回显既有调度
+  await expect(dialog.getByLabel('Cron 表达式')).toHaveValue('0 9 * * 1-5')
+  await dialog.getByLabel('任务名称').fill('改完的巡检')
+  await dialog.getByLabel('Cron 表达式').fill('30 22 * * *')
+  await selectTimezone(page, 'America/New_York')
+  await dialog.getByRole('button', { name: /保\s*存/ }).click()
+
+  // 列表按新表达式 + 新时区回显，且下次执行时间与新时区自洽（22:30 当地）。
+  const updated = page.getByRole('row', { name: /改完的巡检/ })
+  await expect(updated).toContainText('Cron 30 22 * * *（America/New_York）')
+  await expect(updated).toContainText(/\d{4}-\d{2}-\d{2} 22:30 \(America\/New_York\)/)
+  await expect(page.getByRole('row', { name: /待改的巡检/ })).toHaveCount(0)
+  expect(queryE2eDatabase(
+    "select cron_expression || '|' || timezone from scheduled_tasks where name='改完的巡检'",
+  )).toBe('30 22 * * *|America/New_York')
+})
+
+// 症状 2 的正面钉子：落在秋季 DST 回拨重复小时的 once 任务，用户只改名字保存，
+// 时刻必须逐字不变。此前 UTC→当地→UTC 回环会把它静默提前 1 小时。
+test('编辑落在 DST 重复小时的单次预约、不碰时间字段时时刻逐字不变', async ({ page }) => {
+  test.setTimeout(180_000)
+  await registerAndLogin(page)
+  await publishSchedulableEmployee(page, 'DST 编辑验收专员')
+
+  const employeeId = queryE2eDatabase(
+    "select id::text from employees where name='DST 编辑验收专员'",
+  )
+  const tenantId = queryE2eDatabase(
+    `select tenant_id::text from employees where id='${employeeId}'`,
+  )
+  // 2027-11-07 01:30 America/New_York 出现两次：05:30Z(EDT) 与 06:30Z(EST)。
+  // 用平台 API 把任务精确安排在**第二次**——界面按 compatible 只能寻址第一次。
+  const created = await page.request.post('/api/v1/scheduled-tasks', {
+    headers: { 'X-Tenant-ID': tenantId },
+    data: {
+      employee_id: employeeId,
+      name: 'DST 重复小时的预约',
+      schedule: { kind: 'once', run_at: '2027-11-07T06:30:00Z', timezone: 'America/New_York' },
+      input: {},
+    },
+  })
+  expect(created.status()).toBe(201)
+
+  await page.getByRole('link', { name: '定时任务' }).click()
+  const row = page.getByRole('row', { name: /DST 重复小时的预约/ })
+  await expect(row).toContainText('2027-11-07 01:30 (America/New_York)')
+
+  await row.getByRole('button', { name: /编\s*辑/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByLabel('预约时间')).toHaveValue('2027-11-07T01:30')
+  // 只改名字，完全不碰预约时间与时区。
+  await dialog.getByLabel('任务名称').fill('DST 重复小时的预约（只改名）')
+  await dialog.getByRole('button', { name: /保\s*存/ }).click()
+  await expect(page.getByRole('row', { name: /只改名/ })).toBeVisible()
+
+  // 关键：时刻仍是第二次出现的 06:30Z，没有被静默提前到 05:30Z。
+  expect(queryE2eDatabase(
+    "select to_char((run_at) at time zone 'UTC', 'YYYY-MM-DD HH24:MI')"
+    + " from scheduled_tasks where name='DST 重复小时的预约（只改名）'",
+  )).toBe('2027-11-07 06:30')
+})
+
+// C12 完成定义第 5 条点名的「暂停」：真实用户暂停/恢复，界面与库中状态同步。
+test('暂停与恢复定时任务在界面与数据库同步生效', async ({ page }) => {
+  test.setTimeout(180_000)
+  await registerAndLogin(page)
+  await publishSchedulableEmployee(page, '暂停验收专员')
+
+  await openCreateForm(page)
+  const dialog = page.getByRole('dialog')
+  await pickOption(page, '数字员工', '暂停验收专员')
+  await dialog.getByLabel('任务名称').fill('可暂停的巡检')
+  await dialog.getByLabel('Cron 表达式').fill('0 9 * * 1-5')
+  await selectTimezone(page, 'Asia/Shanghai')
+  await dialog.getByRole('button', { name: /创\s*建/ }).click()
+
+  const row = page.getByRole('row', { name: /可暂停的巡检/ })
+  await expect(row).toContainText('启用中')
+
+  await row.getByRole('button', { name: /暂\s*停/ }).click()
+  await expect(row).toContainText('已暂停')
+  expect(queryE2eDatabase(
+    "select enabled::text from scheduled_tasks where name='可暂停的巡检'",
+  )).toBe('false')
+  // 人工暂停不带原因（自动暂停才有），界面不应冒出机器码。
+  expect(queryE2eDatabase(
+    "select coalesce(pause_reason, '') from scheduled_tasks where name='可暂停的巡检'",
+  )).toBe('')
+
+  await row.getByRole('button', { name: /恢\s*复/ }).click()
+  await expect(row).toContainText('启用中')
+  expect(queryE2eDatabase(
+    "select enabled::text from scheduled_tasks where name='可暂停的巡检'",
+  )).toBe('true')
+  // 恢复后必须重新算出下次执行时间，否则任务永远不会再跑。
+  expect(queryE2eDatabase(
+    "select (next_run_at is not null)::text from scheduled_tasks where name='可暂停的巡检'",
+  )).toBe('true')
+})
+
+// C12 完成定义第 6 条（重复触发）：多副本部署下，同一触发点绝不产生两条执行记录。
+//
+// 关键在于让「竞争」可观测且不靠运气：只有一个每分钟任务时，先抢到的副本会把所有
+// 触发点都吃掉，另一个副本一次都没认领过——那样「无重复」这个断言在单副本下同样
+// 成立，等于没有证明力。这里改为一次性放出 30 个同时到期的任务并把每跳批量限制为
+// 1，两个副本只能交替认领，于是「两副本各自认领过 ≥1 个不同触发点」成为确定性事实。
+test('两副本各自认领触发点，且同一触发点绝不重复', async ({ page }) => {
+  test.setTimeout(300_000)
+  const schedulers: SchedulerProcess[] = []
+  const logs = [
+    join(tmpdir(), `c12-scheduler-a-${Date.now()}.log`),
+    join(tmpdir(), `c12-scheduler-b-${Date.now()}.log`),
+  ]
+  try {
+    await registerAndLogin(page)
+    await publishSchedulableEmployee(page, '重复触发验收专员')
+    const employeeId = queryE2eDatabase(
+      "select id::text from employees where name='重复触发验收专员'",
+    )
+    const tenantId = queryE2eDatabase(
+      `select tenant_id::text from employees where id='${employeeId}'`,
+    )
+
+    const taskCount = 30
+    for (let index = 0; index < taskCount; index += 1) {
+      const created = await page.request.post('/api/v1/scheduled-tasks', {
+        headers: { 'X-Tenant-ID': tenantId },
+        data: {
+          employee_id: employeeId,
+          name: `并发巡检-${index}`,
+          schedule: { kind: 'cron', cron_expression: '* * * * *', timezone: 'Asia/Shanghai' },
+          input: {},
+        },
+      })
+      expect(created.status()).toBe(201)
+    }
+
+    // 每跳只认领 1 个任务 → 两副本必然交替认领这 30 个同时到期的触发点。
+    schedulers.push(
+      startScheduler(schedulerPort(1), { logPath: logs[0], batchLimit: 1 }),
+      startScheduler(schedulerPort(2), { logPath: logs[1], batchLimit: 1 }),
+    )
+    await Promise.all(schedulers.map((scheduler) => waitForScheduler(scheduler)))
+
+    // 有界等待：Cron 每分钟一跳，等到大部分任务被认领即可。
+    await expect.poll(
+      () => Number(queryE2eDatabase(
+        'select count(*) from scheduled_task_executions e join scheduled_tasks t'
+        + ` on t.id = e.scheduled_task_id where t.tenant_id='${tenantId}'`,
+      )),
+      { timeout: 180_000, intervals: [2_000] },
+    ).toBeGreaterThanOrEqual(taskCount)
+
+    // 证明两个副本**各自都在真的调度**，而不是一个在干活、另一个只是端口活着。
+    const claimedByA = countClaimedTriggerPoints(logs[0])
+    const claimedByB = countClaimedTriggerPoints(logs[1])
+    expect(claimedByA).toBeGreaterThan(0)
+    expect(claimedByB).toBeGreaterThan(0)
+    // 两副本认领数之和覆盖全部触发点：没有触发点被漏掉，也没有被重复认领。
+    expect(claimedByA + claimedByB).toBeGreaterThanOrEqual(taskCount)
+
+    // 同一 (任务, 触发点) 绝不出现两条执行记录。
+    expect(queryE2eDatabase(
+      'select count(*) from (select e.scheduled_task_id, e.scheduled_for'
+      + ' from scheduled_task_executions e join scheduled_tasks t on t.id = e.scheduled_task_id'
+      + ` where t.tenant_id='${tenantId}'`
+      + ' group by e.scheduled_task_id, e.scheduled_for having count(*) > 1) duplicates',
+    )).toBe('0')
+    // 每条执行记录至多绑定一个 Run，不存在孤儿 Run。
+    expect(Number(queryE2eDatabase(
+      `select count(*) from runs where tenant_id='${tenantId}'`,
+    ))).toBeLessThanOrEqual(Number(queryE2eDatabase(
+      'select count(*) from scheduled_task_executions e join scheduled_tasks t'
+      + ` on t.id = e.scheduled_task_id where t.tenant_id='${tenantId}'`,
+    )))
+  } finally {
+    for (const scheduler of schedulers) scheduler.kill()
+    await Promise.all(schedulers.map((scheduler) => waitForExit(scheduler).catch(() => undefined)))
+    for (const log of logs) rmSync(log, { force: true })
+  }
+})
+
+// C12 完成定义第 6 条（重启恢复）：调度进程被 SIGKILL 后重启，用户看到的执行历史
+// 连续、不重复，任务继续按调度推进。
+test('调度进程重启后执行历史连续且无重复', async ({ page }) => {
   test.setTimeout(420_000)
   const schedulers: SchedulerProcess[] = []
   try {
     await registerAndLogin(page)
-    await publishSchedulableEmployee(page, '重复触发验收专员')
+    await publishSchedulableEmployee(page, '重启恢复验收专员')
 
     await openCreateForm(page)
     const dialog = page.getByRole('dialog')
-    await pickOption(page, '数字员工', '重复触发验收专员')
+    await pickOption(page, '数字员工', '重启恢复验收专员')
     await dialog.getByLabel('任务名称').fill('每分钟巡检')
     await dialog.getByLabel('Cron 表达式').fill('* * * * *')
     await selectTimezone(page, 'Asia/Shanghai')
@@ -150,8 +357,7 @@ test('两副本竞争不重复触发，调度进程重启后执行历史连续�
     const taskId = queryE2eDatabase("select id::text from scheduled_tasks where name='每分钟巡检'")
     expect(taskId).toMatch(/^[0-9a-f-]{36}$/)
 
-    // 两个副本同时抢同一个触发点：这是多副本部署的真实形态。
-    schedulers.push(startScheduler(schedulerPort(1)), startScheduler(schedulerPort(2)))
+    schedulers.push(startScheduler(schedulerPort(1)))
     await Promise.all(schedulers.map((scheduler) => waitForScheduler(scheduler)))
 
     await page.getByRole('link', { name: /每分钟巡检/ }).click()
@@ -165,27 +371,13 @@ test('两副本竞争不重复触发，调度进程重启后执行历史连续�
       { timeout: 150_000, intervals: [2_000] },
     ).toBeGreaterThan(0)
 
-    const beforeRestart = Number(queryE2eDatabase(
-      `select count(*) from scheduled_task_executions where scheduled_task_id='${taskId}'`,
-    ))
-    // 每个触发点最多一条执行记录——两个副本没有各自产生一条。
-    expect(queryE2eDatabase(
-      'select count(*) from (select scheduled_for from scheduled_task_executions'
-      + ` where scheduled_task_id='${taskId}' group by scheduled_for having count(*) > 1) duplicates`,
-    )).toBe('0')
-    // 也没有产生比执行记录更多的 Run（不存在孤儿 Run）。
-    expect(Number(queryE2eDatabase(
-      'select count(*) from runs where id in (select run_id from scheduled_task_executions'
-      + ` where scheduled_task_id='${taskId}' and run_id is not null)`,
-    ))).toBeLessThanOrEqual(beforeRestart)
-
     // 用户视角：执行记录逐条可见，触发时间按任务时区渲染。
     await page.reload()
     const executions = page.getByRole('region', { name: '执行记录' })
     await expect(executions.getByRole('row').filter({ hasText: /\(Asia\/Shanghai\)/ }).first())
       .toBeVisible()
 
-    // 崩溃：直接 SIGKILL 两个副本（整组），不给优雅退出的机会。
+    // 崩溃：直接 SIGKILL（整个进程组），不给优雅退出的机会。
     for (const scheduler of schedulers) scheduler.kill()
     await Promise.all(schedulers.map((scheduler) => waitForExit(scheduler)))
     // 证明调度器**真的**停了：端口不再服务。否则下面的「重启后恢复」会因为
@@ -203,7 +395,7 @@ test('两副本竞争不重复触发，调度进程重启后执行历史连续�
       `select count(*) from scheduled_task_executions where scheduled_task_id='${taskId}'`,
     ))).toBe(afterKill)
 
-    // 重启一个副本：调度状态只存在于数据库，重启必须从中恢复。
+    // 重启：调度状态只存在于数据库，重启必须从中恢复。
     const restarted = startScheduler(schedulerPort(3))
     schedulers.push(restarted)
     await waitForScheduler(restarted)

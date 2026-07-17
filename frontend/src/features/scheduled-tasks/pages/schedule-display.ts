@@ -37,7 +37,7 @@ export const executionStatusLabels: Record<ExecutionStatus, { color: string; tex
   skipped: { color: 'default', text: '已跳过' },
 }
 
-/** 与后端 `SkipReason` 一一对应；缺项会让用户看到空白标签。 */
+/** 与后端 `SkipReason` 一一对应；缺项时调用方回落展示原始机器码，不是空白。 */
 export const skipReasonLabels: Record<string, string> = {
   task_paused: '任务已暂停',
   misfire_skipped: '错过触发点，按策略跳过',
@@ -50,7 +50,7 @@ export const skipReasonLabels: Record<string, string> = {
   input_schema_incompatible: '输入与发布版本的 Schema 不兼容',
 }
 
-/** 与后端 `PauseReason` 一一对应；无原因表示人工暂停。 */
+/** 与后端 `PauseReason` 一一对应；缺项时调用方回落展示原始机器码。无原因表示人工暂停。 */
 export const pauseReasonLabels: Record<string, string> = {
   employee_not_runnable: '数字员工当前不可运行，已自动暂停',
   scheduled_tasks_disabled: '发布版本未开启定时任务能力，已自动暂停',

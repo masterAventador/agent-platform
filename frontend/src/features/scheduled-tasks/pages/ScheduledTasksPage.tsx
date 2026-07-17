@@ -339,12 +339,23 @@ function ScheduledTaskFormModal({
         timezone: values.timezone,
       }
     } else {
-      const runAt = zonedWallClockToUtc(values.runAt, values.timezone)
-      if (runAt === null) {
-        form.setFields([{ name: 'runAt', errors: ['请填写有效的预约时间'] }])
-        return
+      // 用户没动过预约时间与时区时，原样复用原 run_at，**不做 UTC→当地→UTC 回环**：
+      // 当地时间不携带 fold 标识，落在秋季重复小时第二次出现的任务一旦回环就会被
+      // 静默提前一个 DST 偏移量。只有用户真的改了时间/时区，才需要重新换算。
+      const original = isEditing && task.schedule.kind === 'once' ? task.schedule : undefined
+      const timeUntouched = original !== undefined
+        && values.runAt === initialValues.runAt
+        && values.timezone === initialValues.timezone
+      if (original !== undefined && timeUntouched) {
+        schedule = { kind: 'once', run_at: original.run_at, timezone: values.timezone }
+      } else {
+        const runAt = zonedWallClockToUtc(values.runAt, values.timezone)
+        if (runAt === null) {
+          form.setFields([{ name: 'runAt', errors: ['请填写有效的预约时间'] }])
+          return
+        }
+        schedule = { kind: 'once', run_at: runAt, timezone: values.timezone }
       }
-      schedule = { kind: 'once', run_at: runAt, timezone: values.timezone }
     }
     const payload = {
       name: values.name,
