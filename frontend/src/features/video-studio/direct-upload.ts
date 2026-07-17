@@ -38,6 +38,9 @@ export async function uploadMaterialFile(
     Region: draft.credentials.region,
     Key: draft.material.storage_key,
     Body: file,
+    // 服务端核验数据来源：COS ETag 非内容 sha256，complete-upload 通过
+    // head_object 读取该自定义元数据与草稿声明比对。
+    Headers: { 'x-cos-meta-sha256': draft.material.sha256 },
     onProgress: ({ percent }) => onProgress(Math.round(percent * 100)),
   })
   onProgress(100)

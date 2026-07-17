@@ -221,9 +221,23 @@ class SqlAlchemyMediaLibraryRepository:
         for key, value in _material_to_record_values(material).items():
             setattr(record, key, value)
 
-    async def get_material(self, *, tenant_id: UUID, material_id: UUID) -> Material | None:
-        record = await self._session.get(VideoMaterialRecord, material_id)
-        if record is None or record.tenant_id != tenant_id:
+    async def get_material(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+        for_update: bool = False,
+    ) -> Material | None:
+        query = select(VideoMaterialRecord).where(
+            VideoMaterialRecord.tenant_id == tenant_id,
+            VideoMaterialRecord.id == material_id,
+        )
+        if for_update:
+            # 行级锁（PostgreSQL SELECT ... FOR UPDATE；SQLite 忽略该子句），
+            # 使 delete_material 与 add_reference 在同一素材行上串行化。
+            query = query.with_for_update()
+        record = (await self._session.execute(query)).scalar_one_or_none()
+        if record is None:
             return None
         return _record_to_material(record)
 
@@ -254,6 +268,50 @@ class SqlAlchemyMediaLibraryRepository:
                     VideoMaterialRecord.upload_expires_at < now,
                 )
                 .order_by(VideoMaterialRecord.upload_expires_at, VideoMaterialRecord.id)
+                .limit(limit)
+            )
+        ).scalars()
+        return [_record_to_material(record) for record in records]
+
+    async def find_active_upload_draft(
+        self,
+        *,
+        tenant_id: UUID,
+        sha256: str,
+        size_bytes: int,
+        folder_id: UUID | None,
+        now: datetime,
+    ) -> Material | None:
+        record = (
+            await self._session.execute(
+                select(VideoMaterialRecord)
+                .where(
+                    VideoMaterialRecord.tenant_id == tenant_id,
+                    VideoMaterialRecord.status == "pending_upload",
+                    VideoMaterialRecord.deleted_at.is_(None),
+                    VideoMaterialRecord.sha256 == sha256,
+                    VideoMaterialRecord.size_bytes == size_bytes,
+                    (
+                        VideoMaterialRecord.folder_id.is_(None)
+                        if folder_id is None
+                        else VideoMaterialRecord.folder_id == folder_id
+                    ),
+                    VideoMaterialRecord.upload_expires_at > now,
+                )
+                .order_by(VideoMaterialRecord.created_at, VideoMaterialRecord.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if record is None:
+            return None
+        return _record_to_material(record)
+
+    async def list_cleanup_required_materials(self, *, limit: int) -> list[Material]:
+        records = (
+            await self._session.execute(
+                select(VideoMaterialRecord)
+                .where(VideoMaterialRecord.cleanup_required.is_(True))
+                .order_by(VideoMaterialRecord.updated_at, VideoMaterialRecord.id)
                 .limit(limit)
             )
         ).scalars()

@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 
+const uploadFileMock = vi.hoisted(() =>
+  vi.fn(async (_options: Record<string, unknown>) => ({ statusCode: 200 })),
+)
+
+vi.mock('cos-js-sdk-v5', () => ({
+  default: class {
+    uploadFile = uploadFileMock
+  },
+}))
+
 import type { MaterialUploadCredentialResponse } from './api/media-library'
 import { sha256File, uploadMaterialFile } from './direct-upload'
 
@@ -52,5 +62,51 @@ describe('B04 COS 直传', () => {
       ),
     ).rejects.toThrow('material upload credentials have expired')
     vi.useRealTimers()
+  })
+})
+
+
+describe('B04 COS 直传元数据', () => {
+  it('直传时写入 x-cos-meta-sha256 元数据供服务端核验', async () => {
+    uploadFileMock.mockClear()
+    const sha = 'b'.repeat(64)
+    const draft = {
+      material: {
+        id: '00000000-0000-4000-8000-000000000202',
+        folder_id: null,
+        name: 'meta.mp4',
+        kind: 'video',
+        media_type: 'video/mp4',
+        size_bytes: 3,
+        sha256: sha,
+        storage_key: 'materials/tenant/material/meta.mp4',
+        status: 'pending_upload',
+        tags: [],
+        cleanup_required: false,
+        artifact_id: null,
+        created_at: '2026-07-17T09:00:00Z',
+        updated_at: '2026-07-17T09:00:00Z',
+      },
+      credentials: {
+        provider: 'tencent-cos',
+        bucket: 'bucket-123',
+        region: 'ap-beijing',
+        key_prefix: 'materials/tenant/material/',
+        tmp_secret_id: 'tmp-id',
+        tmp_secret_key: 'tmp-key',
+        session_token: 'tmp-token',
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    } satisfies MaterialUploadCredentialResponse
+
+    await uploadMaterialFile(
+      new File(['abc'], 'meta.mp4', { type: 'video/mp4' }),
+      draft,
+      vi.fn(),
+    )
+
+    expect(uploadFileMock).toHaveBeenCalledTimes(1)
+    const options = uploadFileMock.mock.calls[0][0] as Record<string, unknown>
+    expect(options.Headers).toMatchObject({ 'x-cos-meta-sha256': sha })
   })
 })

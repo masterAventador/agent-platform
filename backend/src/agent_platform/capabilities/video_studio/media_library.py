@@ -13,6 +13,7 @@ from agent_platform.capabilities.video_studio.storage_credentials import (
     IssuedMaterialPreview,
     IssuedUploadCredentials,
     MaterialObjectCleaner,
+    MaterialObjectMissing,
     MaterialObjectVerifier,
     MaterialPreviewUrlIssuer,
     MaterialUploadCredentialIssuer,
@@ -284,7 +285,13 @@ class MaterialRepository(Protocol):
 
     async def update_material(self, material: Material) -> None: ...
 
-    async def get_material(self, *, tenant_id: UUID, material_id: UUID) -> Material | None: ...
+    async def get_material(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+        for_update: bool = False,
+    ) -> Material | None: ...
 
     async def list_materials(self, *, tenant_id: UUID) -> list[Material]: ...
 
@@ -294,6 +301,18 @@ class MaterialRepository(Protocol):
         now: datetime,
         limit: int,
     ) -> list[Material]: ...
+
+    async def find_active_upload_draft(
+        self,
+        *,
+        tenant_id: UUID,
+        sha256: str,
+        size_bytes: int,
+        folder_id: UUID | None,
+        now: datetime,
+    ) -> Material | None: ...
+
+    async def list_cleanup_required_materials(self, *, limit: int) -> list[Material]: ...
 
     async def add_reference(self, reference: MaterialReference) -> None: ...
 
@@ -352,7 +371,14 @@ class InMemoryMaterialRepository:
     async def update_material(self, material: Material) -> None:
         self.materials[(material.tenant_id, material.id)] = material
 
-    async def get_material(self, *, tenant_id: UUID, material_id: UUID) -> Material | None:
+    async def get_material(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+        for_update: bool = False,
+    ) -> Material | None:
+        del for_update  # 内存仓储无并发事务语义；行级锁由 SQL 仓储在真实 PG 上提供。
         return self.materials.get((tenant_id, material_id))
 
     async def list_materials(self, *, tenant_id: UUID) -> list[Material]:
@@ -376,6 +402,41 @@ class InMemoryMaterialRepository:
                 and _as_utc(material.upload_expires_at) < _as_utc(now)
             ),
             key=lambda material: (material.upload_expires_at, material.id),
+        )[:limit]
+
+    async def find_active_upload_draft(
+        self,
+        *,
+        tenant_id: UUID,
+        sha256: str,
+        size_bytes: int,
+        folder_id: UUID | None,
+        now: datetime,
+    ) -> Material | None:
+        candidates = sorted(
+            (
+                material
+                for material in self.materials.values()
+                if material.tenant_id == tenant_id
+                and material.status == "pending_upload"
+                and material.deleted_at is None
+                and material.sha256 == sha256
+                and material.size_bytes == size_bytes
+                and material.folder_id == folder_id
+                and _as_utc(material.upload_expires_at) > _as_utc(now)
+            ),
+            key=lambda material: (material.created_at, material.id),
+        )
+        return candidates[0] if candidates else None
+
+    async def list_cleanup_required_materials(self, *, limit: int) -> list[Material]:
+        return sorted(
+            (
+                material
+                for material in self.materials.values()
+                if material.cleanup_required
+            ),
+            key=lambda material: (material.updated_at, material.id),
         )[:limit]
 
     async def add_reference(self, reference: MaterialReference) -> None:
@@ -559,6 +620,37 @@ class MediaLibraryService:
         expires_at = now + self._upload_credential_ttl
         if folder_id is not None:
             await self._ensure_folder_exists(tenant_id=tenant_id, folder_id=folder_id)
+        # M-1 幂等：同 (tenant, sha256, size, folder) 的未过期草稿直接复用，
+        # 审计失败 500 后客户端重试不会重复产生草稿；临时凭证不落库，重放重签。
+        existing = await self._repository.find_active_upload_draft(
+            tenant_id=tenant_id,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            folder_id=folder_id,
+            now=now,
+        )
+        if existing is not None:
+            refreshed = replace(existing, upload_expires_at=expires_at, updated_at=now)
+            await self._repository.update_material(refreshed)
+            credentials = await self._credential_issuer.issue_upload_credentials(
+                tenant_id=tenant_id,
+                key_prefix=self.key_prefix_for(refreshed),
+                expires_at=expires_at,
+                allowed_actions=MATERIAL_UPLOAD_ACTIONS,
+            )
+            self._record_audit(
+                action="video.material.upload_requested",
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                resource_id=refreshed.id,
+                details=(
+                    ("name", refreshed.name),
+                    ("kind", refreshed.kind.value),
+                    ("size_bytes", str(refreshed.size_bytes)),
+                    ("replayed", "true"),
+                ),
+            )
+            return MaterialUploadDraft(material=refreshed, credentials=credentials)
         material = Material.pending_upload(
             tenant_id=tenant_id,
             owner_id=actor_id,
@@ -592,8 +684,18 @@ class MediaLibraryService:
         )
         return MaterialUploadDraft(material=material, credentials=credentials)
 
-    async def get_material(self, *, tenant_id: UUID, material_id: UUID) -> Material:
-        material = await self._repository.get_material(tenant_id=tenant_id, material_id=material_id)
+    async def get_material(
+        self,
+        *,
+        tenant_id: UUID,
+        material_id: UUID,
+        for_update: bool = False,
+    ) -> Material:
+        material = await self._repository.get_material(
+            tenant_id=tenant_id,
+            material_id=material_id,
+            for_update=for_update,
+        )
         if material is None or material.deleted_at is not None:
             raise MaterialNotFoundError("素材不存在")
         return material
@@ -639,10 +741,21 @@ class MediaLibraryService:
             )
             await self._repository.update_material(failed)
             raise UploadCredentialExpiredError("上传凭证已过期")
-        stored_object = await self._object_verifier.inspect_uploaded_object(
-            tenant_id=tenant_id,
-            object_key=material.storage_key,
-        )
+        try:
+            stored_object = await self._object_verifier.inspect_uploaded_object(
+                tenant_id=tenant_id,
+                object_key=material.storage_key,
+            )
+        except MaterialObjectMissing:
+            await self._repository.update_material(
+                replace(
+                    material,
+                    status="upload_failed",
+                    cleanup_required=True,
+                    updated_at=now,
+                )
+            )
+            raise InvalidMaterialInput("上传对象不存在或未完成直传") from None
         if (
             stored_object.size_bytes != material.size_bytes
             or stored_object.sha256 != material.sha256
@@ -728,7 +841,8 @@ class MediaLibraryService:
         reference_type: str,
         reference_id: UUID,
     ) -> MaterialReference:
-        await self.get_material(tenant_id=tenant_id, material_id=material_id)
+        # L-2：锁定素材行使引用创建与删除在同一行锁上串行化。
+        await self.get_material(tenant_id=tenant_id, material_id=material_id, for_update=True)
         reference = MaterialReference(
             id=uuid4(),
             tenant_id=tenant_id,
@@ -763,7 +877,10 @@ class MediaLibraryService:
         )
 
     async def delete_material(self, *, tenant_id: UUID, actor_id: UUID, material_id: UUID) -> None:
-        material = await self.get_material(tenant_id=tenant_id, material_id=material_id)
+        # L-2：先对素材行加锁再检查引用，消除与 add_reference 的 TOCTOU 窗口。
+        material = await self.get_material(
+            tenant_id=tenant_id, material_id=material_id, for_update=True
+        )
         if await self._repository.count_references(tenant_id=tenant_id, material_id=material_id):
             raise MaterialInUseError("素材仍被引用")
         await self._repository.update_material(

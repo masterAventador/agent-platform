@@ -10,6 +10,14 @@ class MaterialStorageCredentialsUnavailable(RuntimeError):
     """临时凭证签发上游失败或响应不可信时的失败关闭错误。"""
 
 
+class MaterialObjectMissing(RuntimeError):
+    """声明的存储对象在对象存储中不存在（客户端未完成直传或已被清理）。"""
+
+
+class MaterialStorageUnavailable(RuntimeError):
+    """对象存储上游暂时故障；不代表客户端上传有问题，可稍后重试。"""
+
+
 @dataclass(frozen=True, slots=True)
 class IssuedUploadCredentials:
     provider: str

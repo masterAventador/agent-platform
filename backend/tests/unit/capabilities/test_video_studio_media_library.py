@@ -1098,3 +1098,146 @@ async def test_download_task_rejects_unknown_source_type_and_missing_resolver() 
             source_type="artifact",
             source_id=uuid4(),
         )
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_replay_reuses_active_draft_by_content_key() -> None:
+    """M-1 幂等：同 (tenant, sha256, size, folder) 的未过期草稿重放复用，不产生重复草稿。"""
+
+    issuer = RecordingCredentialIssuer()
+    moments = iter(
+        datetime(2026, 7, 17, 9, minute, tzinfo=UTC) for minute in range(30)
+    )
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: next(moments),
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    request_kwargs = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "name": "retry.mp4",
+        "kind": MaterialKind.VIDEO,
+        "media_type": "video/mp4",
+        "size_bytes": 1000,
+        "sha256": "a" * 64,
+    }
+
+    first = await service.request_upload_credentials(**request_kwargs)
+    replay = await service.request_upload_credentials(**request_kwargs)
+
+    assert replay.material.id == first.material.id
+    assert len(await service.list_materials(tenant_id=tenant_id)) == 1
+    # 重放必须重签新凭证（临时凭证不落库），且草稿过期时间与新凭证一致。
+    assert len(issuer.requests) == 2
+    assert replay.credentials.expires_at == replay.material.upload_expires_at
+    assert replay.material.upload_expires_at > first.material.upload_expires_at
+
+    # 不同内容键不去重。
+    other = await service.request_upload_credentials(
+        **{**request_kwargs, "sha256": "b" * 64, "name": "other.mp4"}
+    )
+    assert other.material.id != first.material.id
+    assert len(await service.list_materials(tenant_id=tenant_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_replay_ignores_expired_or_completed_drafts() -> None:
+    issuer = RecordingCredentialIssuer()
+    verifier = RecordingObjectVerifier()
+    current = {"now": datetime(2026, 7, 17, 9, 0, tzinfo=UTC)}
+    service = MediaLibraryService.in_memory(
+        credential_issuer=issuer,
+        object_verifier=verifier,
+        clock=lambda: current["now"],
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+    request_kwargs = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "name": "expired-replay.mp4",
+        "kind": MaterialKind.VIDEO,
+        "media_type": "video/mp4",
+        "size_bytes": 1000,
+        "sha256": "c" * 64,
+    }
+
+    first = await service.request_upload_credentials(**request_kwargs)
+    # 草稿过期后重放：不复用，创建新草稿。
+    current["now"] = current["now"] + timedelta(minutes=16)
+    second = await service.request_upload_credentials(**request_kwargs)
+    assert second.material.id != first.material.id
+
+    # 已完成（available）的素材不参与去重：再次上传同内容创建新草稿。
+    verifier.objects[(tenant_id, second.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="c" * 64,
+    )
+    await service.complete_upload(
+        tenant_id=tenant_id, actor_id=actor_id, material_id=second.material.id
+    )
+    third = await service.request_upload_credentials(**request_kwargs)
+    assert third.material.id != second.material.id
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_handles_missing_object_and_storage_outage() -> None:
+    """M-3：对象缺失 → 标记 upload_failed 并受控拒绝；存储故障 → 不改状态直接上抛。"""
+
+    from agent_platform.capabilities.video_studio.storage_credentials import (
+        MaterialObjectMissing,
+        MaterialStorageUnavailable,
+    )
+
+    class MissingThenOutageVerifier:
+        def __init__(self) -> None:
+            self.error: Exception = MaterialObjectMissing("对象不存在")
+
+        async def inspect_uploaded_object(self, *, tenant_id, object_key: str):
+            raise self.error
+
+    verifier = MissingThenOutageVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+    )
+    tenant_id = uuid4()
+    actor_id = uuid4()
+
+    async def new_draft(name: str, sha: str):
+        return await service.request_upload_credentials(
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            name=name,
+            kind=MaterialKind.VIDEO,
+            media_type="video/mp4",
+            size_bytes=1000,
+            sha256=sha,
+        )
+
+    missing = await new_draft("missing.mp4", "a" * 64)
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=missing.material.id
+        )
+    failed = await service.get_material(
+        tenant_id=tenant_id, material_id=missing.material.id
+    )
+    assert failed.status == "upload_failed"
+    assert failed.cleanup_required is True
+
+    outage = await new_draft("outage.mp4", "b" * 64)
+    verifier.error = MaterialStorageUnavailable("对象存储不可用")
+    with pytest.raises(MaterialStorageUnavailable):
+        await service.complete_upload(
+            tenant_id=tenant_id, actor_id=actor_id, material_id=outage.material.id
+        )
+    untouched = await service.get_material(
+        tenant_id=tenant_id, material_id=outage.material.id
+    )
+    # 存储故障不是客户端问题：保持 pending_upload，客户端稍后重试确认。
+    assert untouched.status == "pending_upload"
+    assert untouched.cleanup_required is False

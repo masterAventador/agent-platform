@@ -88,12 +88,27 @@ def test_video_studio_state_wires_real_tencent_sts_issuer_when_configured() -> N
         cos_secret_id=SecretStr("test-secret-id"),
         cos_secret_key=SecretStr("test-secret-key"),
     )
+    from agent_platform.capabilities.video_studio.tencent_cos import (
+        TencentCosMaterialObjectCleaner,
+        TencentCosMaterialObjectVerifier,
+        TencentCosMaterialPreviewUrlIssuer,
+    )
+
     installed = resolve_installed_backend_registrations(settings)
     (registration,) = installed.registrations
 
     state = registration.create_state(registration.settings)
     issuer = state["video_material_upload_credential_issuer"]
     assert isinstance(issuer, TencentStsMaterialUploadCredentialIssuer)
+    assert isinstance(
+        state["video_material_object_verifier"], TencentCosMaterialObjectVerifier
+    )
+    assert isinstance(
+        state["video_material_preview_url_issuer"], TencentCosMaterialPreviewUrlIssuer
+    )
+    assert isinstance(
+        state["video_material_object_cleaner"], TencentCosMaterialObjectCleaner
+    )
 
 
 def test_video_studio_state_stays_fail_closed_without_sts_configuration() -> None:
@@ -110,3 +125,34 @@ def test_social_operations_declares_no_extra_app_state() -> None:
     (registration,) = installed.registrations
 
     assert registration.create_state(registration.settings) == {}
+
+
+def test_video_studio_declares_media_maintenance_background_worker() -> None:
+    """M-2：video-studio 注册生产回收清扫为 lifespan 后台任务；social 无后台任务。"""
+
+    import asyncio
+
+    installed = resolve_installed_backend_registrations(_settings(("video-studio",)))
+    (registration,) = installed.registrations
+
+    workers = registration.create_background_workers(
+        registration.settings,
+        _fake_session_factory,
+        registration.create_state(registration.settings),
+    )
+    assert len(workers) == 1
+    name, worker_factory = workers[0]
+    assert name == "video-media-library-maintenance"
+    coroutine = worker_factory()
+    assert asyncio.iscoroutine(coroutine)
+    coroutine.close()
+
+    social = resolve_installed_backend_registrations(AppSettings()).registrations[0]
+    assert (
+        social.create_background_workers(social.settings, _fake_session_factory, {})
+        == ()
+    )
+
+
+def _fake_session_factory():  # pragma: no cover - 仅用于装配断言
+    raise AssertionError("装配测试不应真正打开会话")

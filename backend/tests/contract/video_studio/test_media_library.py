@@ -826,3 +826,175 @@ async def test_sts_issue_failure_maps_to_controlled_503(
         headers={"X-Tenant-ID": tenant_id},
     )
     assert listed.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_retry_after_audit_flush_failure_reuses_draft(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-1：审计 flush 失败 500 后客户端重试，不得重复产生草稿（重签凭证但复用草稿）。"""
+
+    import agent_platform.api.dependencies.capabilities as capability_dependencies
+
+    _, _, owner, _, _ = media_library_api
+    identity = await register(owner, "audit-retry-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    payload = {
+        "name": "audit-retry.mp4",
+        "kind": "video",
+        "media_type": "video/mp4",
+        "size_bytes": 1000,
+        "sha256": "d" * 64,
+    }
+
+    async def broken_emit(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("audit store unavailable")
+
+    with pytest.MonkeyPatch.context() as first_attempt:
+        first_attempt.setattr(capability_dependencies, "emit_audit_event", broken_emit)
+        failed = await owner.post(
+            "/api/v1/video-studio/materials/upload-credentials",
+            headers=headers,
+            json=payload,
+        )
+    assert failed.status_code == 500
+    assert failed.json()["detail"]["code"] == "capability_audit_flush_failed"
+
+    retried = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers=headers,
+        json=payload,
+    )
+    assert retried.status_code == 201
+    material = retried.json()["material"]
+    assert material["status"] == "pending_upload"
+    assert retried.json()["credentials"]["tmp_secret_key"] != ""
+
+    listed = await owner.get("/api/v1/video-studio/materials", headers=headers)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [material["id"]]
+
+
+@pytest.mark.asyncio
+async def test_sts_issuance_is_rate_limited_per_tenant(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    """L-1：STS 签发按租户频控，超限受控 429，不再无限打真实 STS。"""
+
+    from agent_platform.platform.auth.errors import RateLimitExceeded
+
+    class CountingRateLimiter:
+        def __init__(self) -> None:
+            self.scoped_calls: list[tuple[str, str]] = []
+
+        async def ensure_allowed(self, *, scope: str, key: str) -> None:
+            self.scoped_calls.append((scope, key))
+            if scope != "video_sts_issue":
+                return
+            issued = sum(1 for called_scope, _ in self.scoped_calls if called_scope == scope)
+            if issued > 2:
+                raise RateLimitExceeded
+
+    app, _, owner, _, _ = media_library_api
+    identity = await register(owner, "sts-rate-limit-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+    limiter = CountingRateLimiter()
+    app.state.auth_rate_limiter = limiter
+
+    def payload(index: int) -> dict[str, Any]:
+        return {
+            "name": f"rate-{index}.mp4",
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": 1000 + index,
+            "sha256": str(index) * 64,
+        }
+
+    for index in range(2):
+        accepted = await owner.post(
+            "/api/v1/video-studio/materials/upload-credentials",
+            headers=headers,
+            json=payload(index),
+        )
+        assert accepted.status_code == 201
+
+    limited = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers=headers,
+        json=payload(3),
+    )
+    assert limited.status_code == 429
+    assert limited.json()["detail"]["code"] == "video_sts_rate_limited"
+    # 频控 key 必须是租户维度。
+    assert ("video_sts_issue", tenant_id) in limiter.scoped_calls
+
+    # 超限请求不得残留草稿。
+    listed = await owner.get("/api/v1/video-studio/materials", headers=headers)
+    assert len(listed.json()["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_maps_storage_outage_to_controlled_503(
+    media_library_api: tuple[
+        FastAPI,
+        async_sessionmaker[AsyncSession],
+        AsyncClient,
+        AsyncClient,
+        ConfigurableObjectVerifier,
+    ],
+) -> None:
+    """M-3：对象存储上游故障 → 受控 503，草稿保持 pending_upload 可重试。"""
+
+    from agent_platform.capabilities.video_studio.storage_credentials import (
+        MaterialStorageUnavailable,
+    )
+
+    class OutageVerifier:
+        async def inspect_uploaded_object(self, *, tenant_id, object_key: str):
+            raise MaterialStorageUnavailable("素材对象存储暂时不可用")
+
+    app, _, owner, _, _ = media_library_api
+    identity = await register(owner, "storage-outage-owner@example.com")
+    tenant_id = identity["workspaces"][0]["id"]
+    headers = {"X-Tenant-ID": tenant_id}
+
+    draft = await owner.post(
+        "/api/v1/video-studio/materials/upload-credentials",
+        headers=headers,
+        json={
+            "name": "outage.mp4",
+            "kind": "video",
+            "media_type": "video/mp4",
+            "size_bytes": 1000,
+            "sha256": "9" * 64,
+        },
+    )
+    material = draft.json()["material"]
+    app.state.video_material_object_verifier = OutageVerifier()
+
+    response = await owner.post(
+        f"/api/v1/video-studio/materials/{material['id']}/complete-upload",
+        headers=headers,
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "video_material_storage_unavailable"
+
+    listed = await owner.get("/api/v1/video-studio/materials", headers=headers)
+    (item,) = listed.json()["items"]
+    assert item["status"] == "pending_upload"
+    assert item["cleanup_required"] is False

@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Mapping
 
 from redis.asyncio import Redis
 
@@ -12,6 +13,7 @@ class RedisAuthRateLimiter:
         *,
         register_limit: int,
         login_limit: int,
+        extra_limits: Mapping[str, int] | None = None,
     ) -> None:
         self._redis = redis
         self._limits = {
@@ -19,6 +21,8 @@ class RedisAuthRateLimiter:
             "register_ip": register_limit,
             "login": login_limit,
             "login_ip": login_limit,
+            # 能力包扩展限流作用域（如 video_sts_issue），由组合根按部署配置注入。
+            **dict(extra_limits or {}),
         }
 
     async def ensure_allowed(self, *, scope: str, key: str) -> None:

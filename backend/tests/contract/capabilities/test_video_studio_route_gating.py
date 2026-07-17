@@ -352,3 +352,42 @@ async def test_production_assembly_installs_real_sts_issuer_from_settings() -> N
     finally:
         await client.aclose()
         await engine.dispose()
+
+
+def test_lifespan_runs_video_media_maintenance_worker() -> None:
+    """M-2：生产 App lifespan 启动素材回收清扫常驻任务，停机时取消退出。"""
+
+    from capability_harness import (
+        AllowAllRateLimiter,
+        FakeKnowledgeProvider,
+        InMemorySkillStorage,
+    )
+    from fastapi.testclient import TestClient
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from agent_platform.api.app import create_app
+    from agent_platform.config import AppSettings
+    from agent_platform.infrastructure.database.models import load_database_models
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    app = create_app(
+        settings=AppSettings(
+            auth_cookie_secure=False,
+            installed_capabilities=("video-studio",),
+            video_media_maintenance_interval_seconds=3600,
+        ),
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        auth_rate_limiter=AllowAllRateLimiter(),
+        knowledge_provider=FakeKnowledgeProvider(),
+        skill_storage=InMemorySkillStorage(),
+    )
+
+    with TestClient(app):
+        names = app.state.capability_background_worker_names
+        assert names == ("video-media-library-maintenance",)
+        tasks = app.state.capability_background_tasks
+        assert len(tasks) == 1
+        assert not tasks[0].done()
+
+    assert app.state.capability_background_tasks[0].cancelled()

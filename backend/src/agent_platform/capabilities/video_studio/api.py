@@ -38,14 +38,18 @@ from agent_platform.capabilities.video_studio.storage_credentials import (
     MaterialObjectVerifier,
     MaterialPreviewUrlIssuer,
     MaterialStorageCredentialsUnavailable,
+    MaterialStorageUnavailable,
     MaterialUploadCredentialIssuer,
 )
+from agent_platform.platform.auth.errors import RateLimitExceeded
 
 router = APIRouter(prefix="/api/v1/video-studio", tags=["video-studio"])
 
 VIDEO_READ_PERMISSION = "video.read"
 VIDEO_MANAGE_PERMISSION = "video.manage"
 VIDEO_EXECUTE_PERMISSION = "video.execute"
+# 租户级 STS 签发频控作用域；限额由组合根按部署配置注入限流器。
+VIDEO_STS_ISSUE_RATE_SCOPE = "video_sts_issue"
 
 
 class MaterialFolderResponse(BaseModel):
@@ -380,6 +384,16 @@ async def request_material_upload_credentials(
     request: Request,
 ) -> MaterialUploadCredentialResponse:
     actor = _actor(VIDEO_MANAGE_PERMISSION)
+    try:
+        await request.app.state.auth_rate_limiter.ensure_allowed(
+            scope=VIDEO_STS_ISSUE_RATE_SCOPE,
+            key=str(actor.tenant_id),
+        )
+    except RateLimitExceeded:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "video_sts_rate_limited", "message": "素材上传凭证请求过于频繁"},
+        ) from None
     async with request.app.state.session_factory() as session:
         repository = SqlAlchemyMediaLibraryRepository(session)
         try:
@@ -426,7 +440,11 @@ async def complete_material_upload(
         except UploadCredentialExpiredError as error:
             await session.commit()
             raise _conflict("upload_credential_expired", str(error)) from None
+        except MaterialStorageUnavailable as error:
+            raise _unavailable("video_material_storage_unavailable", str(error)) from None
         except InvalidMaterialInput as error:
+            # 对象缺失/元数据不一致会把草稿标记为 upload_failed，需要落库。
+            await session.commit()
             raise _invalid(str(error)) from None
         await session.commit()
         return MaterialResponse.from_entity(material)
