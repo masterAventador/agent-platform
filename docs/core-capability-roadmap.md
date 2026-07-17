@@ -737,7 +737,7 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
-当前已知失败：**2 项**（2026-07-17 发现，主代理在 main 实测复现）。
+当前已知失败：**3 项**（2026-07-17 发现；红线 1/2 由主代理在 main 实测复现，红线 3 由 T8 二分发现）。**三条同一病根：真实 PG / 真实构建门禁被跳过后，旧契约测试无人更新——全部是回归，全部不是产品缺陷。**
 
 > **⚠️ 方法论盲区（2026-07-17 主代理定位，比这两条红线本身更重要）**
 >
@@ -751,7 +751,11 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 `infra/litellm/test_config.py::LiteLlmComposeContractTest::test_local_stub_override_is_test_only_and_not_published` 在 main 上 FAILED（`1 failed, 16 passed`）。经 C16 实现代理与 C16 规格复审**各自独立** `git checkout f5fb483` 实测，确认**早于 C12/C16 两个条目开工即已存在**，与二者无关；两者按「单个任务提交只能包含该任务改动」未夹带修复，处理正确。
 
-根因（主代理实测定位）：该用例断言 `stub["image"] == EXPECTED_IMAGE`，而 `EXPECTED_IMAGE` 是 LiteLLM 官方镜像常量 `ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513…`；但 `infra/litellm/compose.stub.yml` 中 `openai-stub` 服务的镜像是 `agent-platform-litellm-stub:local`。**拿 stub 服务去比 LiteLLM 镜像常量属测试自身笔误**，疑似自创建起从未通过（与 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」同型）。修复须先确认 `openai-stub` 的预期镜像语义，再改断言，**不得为了变绿而放宽 stub 的隔离契约**（该用例的职责是钉住「本地 stub override 仅供测试、不得进入发布配置」）。
+~~根因（主代理实测定位）：拿 stub 服务去比 LiteLLM 镜像常量属测试自身笔误，疑似自创建起从未通过。~~
+
+**⚠️ 上述主代理初判经 T8 二分实测证伪，实为回归**：`openai-stub` **原本用的就是官方镜像**，断言当时是对的（`251c5d9`/`87bcd38`/`94d90ab` 时均 1 passed）。是 `ee2b624 fix(core): 完整闭环 C04 文件产物验收` 把它换成本机构建的 `agent-platform-litellm-stub:local` 并把脚本/配置烤进镜像，**没同步更新测试**——实测 `ee2b624^` → 1 passed，`ee2b624` → 1 failed。不是笔误，是**契约迁移后旧断言无人更新**。
+
+**已修复（T8，零生产改动）**：`ee2b624` 迁移后 stale 的不止 image 一行——`volumes` 断言（脚本已烤进镜像、不再 bind mount）与 litellm 的 `/app/config.yaml` 挂载断言（已改为 `--config /app/config.stub.yaml`）同样过时。按「先确认预期语义再改断言、不得放宽隔离契约」，把契约追到迁移后的位置，并**补回旧断言曾隐含提供、迁移后无人再守的保证**：新增用例断言 `Dockerfile.stub` 的 `FROM` 必须等于 digest 锁定的 `EXPECTED_IMAGE`；把此前完全没钉的 `pull_policy: never`（防公共 registry 抢注同名 tag）也钉上。结果 17 → **18 passed**，4 个变异（stub 换官方镜像 / 删 pull_policy / FROM 漂到 latest / 给 stub 发布端口）**全部被抓**。
 
 **本条不得以「非本轮引入」为由长期挂账**——第 6 节基线此前长期声明「当前已知失败：无」，与该红线共存，属台账失真；已按「文档与代码冲突时以可运行代码为事实」修正，并单开条目收口。
 
@@ -759,11 +763,39 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 由 C16 阶段一的对抗性代码质量复审发现，主代理**在真实 PG 临时容器上独立复现**（`1 failed, 4 passed`；无真实 PG 时 `1 passed, 4 skipped`——见上方方法论盲区）。C16 对 `checkpoints/` 与 `memory/` **零改动**（`git diff --stat main...HEAD` 为空，主代理已核），与 C12/C16 均无关。
 
-**性质：这不是测试笔误，是生产代码路径上的真回归。** 失败为 `RuntimeControlMismatch`，抛出点 `src/agent_platform/runtimes/langgraph.py:481` 的 `_require_approval`——即 LangGraph 运行时在审批时判定「待处理的中断不是审批、或 approval_id 对不上」。`langgraph.py` 最近一次改动为 `30e64ac refactor：加固租户知识与运行时安全边界`；该测试最近一次改动为 `9c1eba7 feat: 完成运行时崩溃恢复与死信治理 [T22]`。
+~~**性质：这不是测试笔误，是生产代码路径上的真回归。**~~
+
+**⚠️ 上述主代理初判经 T8 二分实测部分证伪。准确结论：是回归（`30e64ac` 引入），但生产代码是对的，红的是被落下的旧契约测试。**
+
+二分实测（每轮全新 PG 容器 + 真实 `TEST_DATABASE_URL`）：`9c1eba7`（测试最后改动）→ **5 passed**；`30e64ac`（langgraph.py 最后改动）→ **1 failed, 4 passed**。`30e64ac` **没有碰这个测试文件**却把它弄红 → 回归点唯一确定。
+
+**根因**：`30e64ac` 把 `_pending_interrupt` 从「**信任图载荷里的 approval_id**」改为「**平台按 `uuid5(NAMESPACE_URL, f"agent-platform:{run_id}:{occurrence_id}")` 派生**」，载荷里的 `approval_id` 只做格式校验后丢弃。**这是有意的安全加固**——不让图作者自选审批身份。失败的用例写于 `9c1eba7`，用自己塞进载荷的 uuid4 去 `approve()`，旧契约下对、新契约下永远对不上。
+
+**关键**：`30e64ac` **其实更新了契约测试**（`tests/integration/runtimes/test_langgraph_runtime.py` 改动 192 行，已完整覆盖新契约：`platform_approval_id != APPROVAL_ID`、重建后 id 不变、错 id 抛 `RuntimeControlMismatch`）。它**只漏了 PG 门禁的这一个**——而后者恰好因为不设 `TEST_DATABASE_URL` 就被 skip 而藏了下来。**这是上方「方法论盲区」的直接实例，不是孤例。**
+
+**已修复（T8，零生产改动，`_require_approval` 一行未动）**：把用例对齐到 `30e64ac` 确立、且已在别处覆盖的现行契约（从 `approval.required` 事件取平台下发的 id），并补上它独有的价值——**证明派生 id 能扛住真实 PostgreSQL 的序列化往返**。新增断言：`platform_approval_id != business_approval_id`（图作者不能自选审批身份）、**重建后 id 不变**、重建后 `approve(载荷号)` 与 `approve(伪造号)` 都必须抛 `RuntimeControlMismatch` 且运行不被推进、换 run 得到不同审批号（跨 run 不能互相顶替）、拒绝路径错号必拒。**净效果是这道安全校验被钉得更死。**
+
+变异验证（T8 做 + 主代理独立复跑确认）：M1 回退到「信任图载荷 approval_id」→ 1 failed；M2 派生 id 跨重建不稳定（uuid5→uuid4）→ 1 failed；M3 弱化 `_require_approval` 不再比对审批号 → 1 failed；全部还原 → 5 passed。**M2 尤其重要**——它证明该用例现在能抓住「Worker 重启后审批全线卡死」这类此前无人守的故障。
 
 **该路径属 C11（工作流/混合员工，LangGraph 编排内核）与 C13（审批中心）的交界，两者均已标 `✅ 已完成`。** 收口时必须先查明：是 `30e64ac` 的安全边界加固引入的回归，还是 C11/C13 合入时该用例本就未在真实 PG 下跑过（参照 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」先例）。**若确认为回归，C11 和/或 C13 的 `✅` 标记必须重新审视**——完成定义里的「人工审批、拒绝、继续和取消」若在真实 PG 的 checkpoint 恢复路径上不成立，那个 ✅ 就不成立。
 
-**范围收窄（2026-07-17 主代理在常驻开发栈上实测定位）**：**普通的「审批 → 继续」活路径是通的**——在 `agent-platform-dev` 上以真实用户路径发起 Demo 员工任务，Run 走到 `waiting_for_approval`（事件序列 `run.started → run.progress → approval.required`），经 `POST /api/v1/approvals/{id}/approve`（C13 审批中心 → 驱动 C11 运行时）批准后 Run 正常推进到 `completed`。因此该红线**不是「审批全线不可用」**，问题范围收窄到该用例特有的 **closes → rebuilds → approves** 序列，即**运行时关闭重建后再审批的 checkpoint 恢复路径**。这个定位缩小了排查面：优先看 `langgraph.py` 的 `_required_pending`/`_require_approval` 在运行时从 checkpoint 重建后，待处理中断的 kind/approval_id 是否被正确恢复。
+**范围收窄（2026-07-17 主代理在常驻开发栈上实测定位）**：**普通的「审批 → 继续」活路径是通的**——在 `agent-platform-dev` 上以真实用户路径发起 Demo 员工任务，Run 走到 `waiting_for_approval`（事件序列 `run.started → run.progress → approval.required`），经 `POST /api/v1/approvals/{id}/approve`（C13 审批中心 → 驱动 C11 运行时）批准后 Run 正常推进到 `completed`。该实测与 T8 的结论一致：生产路径没坏。
+
+**C11 的 `✅` 在这条路径上成立（T8 给出证据，主代理据此维持标记）**：T8 实测了真正要害的不变量——派生 id 跨重建是否稳定：
+
+```
+payload approval_id in graph : 9af42a47-a9b3-4e64-835e-a7e585da2097
+START  issued approval_id    : d29945e8-8fdf-5e84-b0dc-84e738443cf9
+RECOVER derived approval_id  : d29945e8-8fdf-5e84-b0dc-84e738443cf9
+>>> STABLE ACROSS REBUILD    : True
+approve(recovered id) -> completed
+```
+
+**稳定，且重建后审批直达 `completed`。** 这个不变量是生产关键：`run_worker.py:1757` 在恢复后拿 `pending_approval_id()` 去跟审计/持久化审批号对账——若不稳定，Worker 每次重启后审批就会全线卡死。它是稳定的 → C11 完成定义里的「LangGraph Checkpoint、持久化、进程重启恢复、Interrupt、人工审批」在真实 PG 下成立。
+
+**红线 3（T8 新发现，落在 C13，主代理决策见下）**：`tests/integration/runs/test_postgres_terminal_concurrency.py::test_api_terminal_control_records_non_terminal_intent[reject]` —— **即使单独在全新 DB 上跑也失败**（`assert 409 == 202`），不是隔离问题。二分定位：`b319bc2^` → 4 passed；**`b319bc2 feat(core): C13 独立审批中心` → 1 failed**。用例用**随机 uuid4** 当 `approval_id` 发 reject 并期望 202，而 C13 在 `runs.py:612` 显式加了 fail-closed（注释写着「安全 fail-closed……绝不静默回退老通道直发 raw 命令」）→ 查无审批记录返回 409 `approval_record_missing`。**产品行为是对的，红的又是旧断言——与红线 1、红线 2 同一个病根。**
+
+**对 C13 `✅` 的决策（主代理）：维持 ✅，但如实记录其证据基础不完整。** 理由：产品行为正确且被验证（C13 的真实 PG 并发门禁 3/3 通过），完成定义里的「Tool 审批、工作流审批复用同一平台协议」「并发审批、越权、过期」均成立；红的是一条承载旧契约的断言。**但必须记下**：C13 合入时把一个真实 PG 门禁留成了红的，而其完成证据「真实 PG 并发 3/3」是**不含该文件的定向子集**——同一个方法论盲区。修复方向：让用例先建真实审批记录、用其 id 断言 202，并**补一条随机 id → 409 的用例把 C13 的 fail-closed 正面钉住**（此前该 fail-closed 无任何正面覆盖）。
 
 ## 7. 完成记录
 
