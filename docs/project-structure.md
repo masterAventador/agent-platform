@@ -125,8 +125,7 @@ backend/
 │   └── fixtures/                  # 后端测试数据
 ├── pyproject.toml                 # Python 依赖和工具配置
 ├── alembic.ini
-├── Dockerfile.api
-├── Dockerfile.worker
+├── Dockerfile                     # 全部后端进程共用一个镜像，靠 command 区分入口
 ├── .env.example
 └── README.md
 ```
@@ -229,7 +228,7 @@ frontend/
 ├── playwright.config.ts
 ├── wdio.conf.ts
 ├── tsconfig.json
-├── Dockerfile.web
+├── Dockerfile
 ├── .env.example
 └── README.md
 ```
