@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 
@@ -44,6 +44,7 @@ from agent_platform.infrastructure.database.repositories.tenants import (
 )
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.scheduling.entities import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     ConcurrencyPolicy,
     ExecutionStatus,
     ScheduledTask,
@@ -91,9 +92,16 @@ async def run_scheduler_tick(
     *,
     now: datetime,
     batch_limit: int,
+    execution_timeout: timedelta = timedelta(seconds=DEFAULT_EXECUTION_TIMEOUT_SECONDS),
 ) -> SchedulerTickResult:
     result = SchedulerTickResult()
-    await _settle_dispatched(session_factory, now=now, limit=batch_limit, result=result)
+    await _settle_dispatched(
+        session_factory,
+        now=now,
+        limit=batch_limit,
+        result=result,
+        execution_timeout=execution_timeout,
+    )
     await _dispatch_pending(session_factory, now=now, limit=batch_limit, result=result)
     await _claim_due_tasks(session_factory, now=now, limit=batch_limit, result=result)
     return result
@@ -105,6 +113,7 @@ async def _settle_dispatched(
     now: datetime,
     limit: int,
     result: SchedulerTickResult,
+    execution_timeout: timedelta,
 ) -> None:
     async with session_factory() as session:
         candidates = await SqlAlchemyScheduledTaskExecutionRepository(session).list_dispatched(
@@ -113,7 +122,12 @@ async def _settle_dispatched(
     for candidate in candidates:
         try:
             async with session_factory() as session:
-                if await _settle_one(session, execution=candidate, now=now):
+                if await _settle_one(
+                    session,
+                    execution=candidate,
+                    now=now,
+                    execution_timeout=execution_timeout,
+                ):
                     result.settled += 1
                 await session.commit()
         except Exception:
@@ -125,7 +139,11 @@ async def _settle_dispatched(
 
 
 async def _settle_one(
-    session: AsyncSession, *, execution: ScheduledTaskExecution, now: datetime
+    session: AsyncSession,
+    *,
+    execution: ScheduledTaskExecution,
+    now: datetime,
+    execution_timeout: timedelta,
 ) -> bool:
     tasks, executions = _repositories(session)
     if execution.run_id is None:
@@ -134,7 +152,12 @@ async def _settle_one(
         tenant_id=execution.tenant_id, run_id=execution.run_id
     )
     if run is None or run.status not in _TERMINAL_RUN_SETTLEMENTS:
-        return False
+        return await _settle_if_timed_out(
+            session,
+            execution=execution,
+            now=now,
+            execution_timeout=execution_timeout,
+        )
     task = await tasks.get(
         tenant_id=execution.tenant_id, task_id=execution.scheduled_task_id
     )
@@ -147,6 +170,44 @@ async def _settle_one(
             settled, expected_revision=execution.revision
         )
     )
+
+
+async def _settle_if_timed_out(
+    session: AsyncSession,
+    *,
+    execution: ScheduledTaskExecution,
+    now: datetime,
+    execution_timeout: timedelta,
+) -> bool:
+    """Run 迟迟不终态时给执行封顶，避免定时任务被一条执行永久静默堵死。
+
+    可达触发点：Run 停在 `waiting_for_input`——孤儿恢复扫描对该状态是「恢复运行时」
+    而非「终结」，没有任何机制会让它进终态；`waiting_for_approval` 另有 C13 审批
+    超时兜底，不靠这里。超时只结算**调度侧**的执行记录，不去动 Run 本身（那属于
+    C05/C13 的语义边界），也**不触发重试**——原 Run 可能仍活着，重试会绕过 SKIP
+    并发策略再起一个。
+    """
+
+    if now - execution.updated_at <= execution_timeout:
+        return False
+    _, executions = _repositories(session)
+    timed_out = execution.failed(
+        now=now,
+        error_message=f"execution_timed_out_after_{int(execution_timeout.total_seconds())}s",
+    )
+    if not await executions.update_with_cas(
+        timed_out, expected_revision=execution.revision
+    ):
+        return False
+    logger.warning(
+        "scheduled_task_execution_timed_out",
+        extra={
+            "execution_id": str(execution.id),
+            "scheduled_task_id": str(execution.scheduled_task_id),
+            "run_id": str(execution.run_id) if execution.run_id else None,
+        },
+    )
+    return True
 
 
 def _settlement_for(
@@ -211,6 +272,16 @@ async def _dispatch_pending_one(
     )
     if current is None:
         return False
+    # 状态守卫必须排在暂停判定之前：扫描到写入之间该执行可能已被别的副本推进
+    # （DEFERRED→DISPATCHED），对非待派发状态调 skipped() 会抛非法转换，被上层宽
+    # except 接住后计入 failed 并误报告警——那正是 A-3 要消灭的「良性竞态报成真失败」。
+    if current.status is ExecutionStatus.RETRY_WAITING:
+        if current.next_attempt_at is None or current.next_attempt_at > now:
+            return False
+    elif current.status is not ExecutionStatus.DEFERRED:
+        # 已被其他副本推进或已终态：本跳无事可做，不是失败。
+        return False
+
     if not task.enabled:
         # 用户已暂停：排队中的触发点与等待中的重试都不得再起 Run。就地结算成终态，
         # 否则它们会每一跳被重新捞出，白占派发预算且永远不结算。
@@ -219,13 +290,10 @@ async def _dispatch_pending_one(
             expected_revision=current.revision,
         )
         return False
-    if current.status is ExecutionStatus.RETRY_WAITING:
-        if current.next_attempt_at is None or current.next_attempt_at > now:
-            return False
-    elif current.status is ExecutionStatus.DEFERRED:
-        if await _has_other_active(executions, task_id=task.id, exclude_id=current.id):
-            return False
-    else:
+
+    if current.status is ExecutionStatus.DEFERRED and await _has_other_active(
+        executions, task_id=task.id, exclude_id=current.id
+    ):
         return False
     return await _dispatch_execution(session, task=task, execution=current, now=now) is None
 

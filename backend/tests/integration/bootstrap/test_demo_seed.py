@@ -517,3 +517,54 @@ async def test_demo_seed_scheduled_tasks_are_consistent_with_their_employee(
     once_task = by_id[DEMO_ONCE_SCHEDULED_TASK_ID]
     assert once_task.enabled is False
     assert once_task.next_run_at is None
+
+
+@pytest.mark.asyncio
+async def test_replaying_the_seed_does_not_clobber_scheduler_owned_runtime_state(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Seed 定义任务配置，调度器拥有运行态；重放 Seed 不得把调度进度冲掉。
+
+    enabled/pause_reason/next_run_at/last_run_at/revision 建后归调度器所有，
+    因此不在可变字段里——否则每次重放 Seed 都会把任务复活并回拨下次执行时间。
+    """
+    from datetime import datetime
+
+    from agent_platform.bootstrap.demo_seed import DEMO_SCHEDULED_TASK_ID
+    from agent_platform.infrastructure.database.repositories.scheduling import (
+        ScheduledTaskRecord,
+    )
+
+    storage = MemoryArtifactStorage()
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+
+    # 模拟调度器已经跑过若干跳、且用户把任务暂停了。
+    advanced = datetime(2099, 1, 1, 1, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        task = await session.get(ScheduledTaskRecord, DEMO_SCHEDULED_TASK_ID)
+        assert task is not None
+        task.next_run_at = advanced
+        task.last_run_at = advanced
+        task.enabled = False
+        task.revision = task.revision + 5
+        await session.commit()
+
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=storage,
+    )
+
+    async with session_factory() as session:
+        replayed = await session.get(ScheduledTaskRecord, DEMO_SCHEDULED_TASK_ID)
+    assert replayed is not None
+    assert replayed.next_run_at.replace(tzinfo=UTC) == advanced
+    assert replayed.last_run_at.replace(tzinfo=UTC) == advanced
+    assert replayed.enabled is False
+    assert replayed.revision >= 6

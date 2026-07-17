@@ -25,6 +25,8 @@ from agent_platform.platform.scheduling.errors import (
 from agent_platform.platform.scheduling.schedule import Schedule, ScheduleKind
 
 DEFAULT_MISFIRE_GRACE_SECONDS = 60
+# 已派发执行的封顶时长：Run 超过它仍未终态就结算执行，防止任务被永久堵死。
+DEFAULT_EXECUTION_TIMEOUT_SECONDS = 24 * 60 * 60
 DEFAULT_MISFIRE_BACKFILL_WINDOW_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_RETRIES = 0
 DEFAULT_RETRY_BACKOFF_SECONDS = 60
@@ -483,6 +485,7 @@ def is_scheduling_enabled(capabilities: object) -> bool:
 
 __all__ = [
     "ACTIVE_EXECUTION_STATUSES",
+    "DEFAULT_EXECUTION_TIMEOUT_SECONDS",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_MISFIRE_BACKFILL_WINDOW_SECONDS",
     "DEFAULT_MISFIRE_GRACE_SECONDS",

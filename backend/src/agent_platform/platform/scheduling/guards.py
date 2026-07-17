@@ -38,8 +38,16 @@ class DispatchContext:
 def evaluate_dispatch_guards(task: ScheduledTask, context: DispatchContext) -> SkipReason | None:
     """返回跳过原因；None 表示本次允许派发。
 
-    C16 配额校验的接入点在这里：租户配额不足时返回对应的 SkipReason 即可，
-    调用方的跳过/暂停/审计/历史链路无需改动。
+    这里的每个原因都是**配置性失效**（创建者被移出企业、员工已下线、发布版关掉了
+    定时能力、输入与发布版 Schema 不兼容）——它们不会自愈，因此都登记在
+    `_GUARD_PAUSE_REASONS` 里，由调用方自动暂停任务并留下审计。
+
+    **C16 配额接入点在这里，但配额不是配置性失效**：配额超限是**瞬态**状态，下个
+    计费周期会自愈。因此新增的配额 `SkipReason` **必须不进入** `_GUARD_PAUSE_REASONS`
+    ——不登记的原因会走 `_claim_one` 的 `_advance` 分支，表现为「本次临时跳过、
+    推进到下一个触发点、任务保持启用」，这正是配额需要的语义。把配额登记进
+    `_GUARD_PAUSE_REASONS` 会让配额一超限就永久暂停定时任务，配额恢复后也不自愈。
+    详见 `docs/core-capability-roadmap.md` C16 条目的强制门禁①。
     """
 
     if context.creator_role is None or not role_has_permission(

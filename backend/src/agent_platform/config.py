@@ -10,6 +10,9 @@ from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     validate_gateway_alias,
 )
+from agent_platform.platform.scheduling.entities import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+)
 
 _AUDIT_HMAC_KEY_MIN_LENGTH = 32
 
@@ -72,6 +75,10 @@ class AppSettings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3_600)
     scheduler_tick_batch_limit: int = Field(default=200, ge=1, le=10_000)
+    # 已派发执行的封顶时长：Run 超过它仍未终态就结算执行，避免任务被永久堵死。
+    scheduled_task_execution_timeout_seconds: int = Field(
+        default=DEFAULT_EXECUTION_TIMEOUT_SECONDS, ge=60, le=2_592_000
+    )
     scheduled_task_execution_retention_days: int = Field(default=90, ge=1, le=3_650)
     scheduled_task_execution_purge_interval_seconds: int = Field(
         default=3_600, ge=60, le=86_400

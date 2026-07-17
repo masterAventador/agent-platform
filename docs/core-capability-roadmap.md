@@ -380,7 +380,7 @@
 - **不建旁路执行体系**：抽出唯一的 Run 创建共享路径 `run_dispatch.create_employee_run`，API 直跑、会话轮次派生与调度三方复用同一实现，调度产生的就是正常 Run + START 命令，由既有 Dispatcher/Worker 执行。
 - **多副本安全（双重防线）**：`FOR UPDATE SKIP LOCKED` 认领任务行 + `(scheduled_task_id, scheduled_for)` 唯一索引兜底；执行记录先于 Run 落库，冲突即整事务回滚，绝不留孤儿 Run。已由真实 PostgreSQL 并发门禁 4 用例证明（两副本竞争同一触发点只产生 1 个 Run/1 条命令/1 条执行记录）。
 - **策略**：misfire 支持 `skip`（默认）/`run_once`/`run_all`；`run_all` 受补跑窗口（默认 24h）约束、每跳补一个点，避免停机越久补跑越多的无界成本；misfire 判定不回溯枚举错过的触发点（分钟级 Cron 停机一年即数十万个点，枚举本身即无界）。并发策略支持 `allow`/`skip`（默认）/`queue`，`queue` 队列深度恒为 1、后续触发点合并为 `queue_collapsed` 历史。重试为指数退避 + 上限，次数用尽转终态 `failed`。
-- **每次调度重新校验（fail-closed）**：创建者成员身份/`runs.execute` 权限、员工发布状态、发布版本的 `scheduled_tasks` 开关、输入对发布版 `input_schema` 的兼容性逐项重查；任一不满足则受控跳过并留下可见执行历史 + 自动暂停任务（避免每跳重复跳过导致历史无界增长）+ 审计 `scheduled_task.auto_paused`。**C16 配额校验的接入点已就位**：`platform/scheduling/guards.py::evaluate_dispatch_guards`，返回新的 `SkipReason` 即可复用既有跳过/暂停/审计/历史链路。
+- **每次调度重新校验（fail-closed）**：创建者成员身份/`runs.execute` 权限、员工发布状态、发布版本的 `scheduled_tasks` 开关、输入对发布版 `input_schema` 的兼容性逐项重查；任一不满足则受控跳过并留下可见执行历史 + 自动暂停任务（避免每跳重复跳过导致历史无界增长）+ 审计 `scheduled_task.auto_paused`。**C16 配额校验的接入点已就位**：`platform/scheduling/guards.py::evaluate_dispatch_guards`。注意区分两类语义：现有守卫原因都是**配置性失效**（不会自愈），登记在 `_GUARD_PAUSE_REASONS` 中触发自动暂停；**配额是瞬态状态，新增的配额 `SkipReason` 必须不进入 `_GUARD_PAUSE_REASONS`**，不登记者会走 `_advance` 分支表现为「本次临时跳过、推进到下一触发点、任务保持启用」——这正是配额需要的语义。详见 C16 条目强制门禁①。
 - **解除强制关闭**：`is_runnable_employee_definition` 与员工写契约不再把 `scheduled_tasks` 钉死为 `false`；历史已发布版本一律是 `false`，其解释与 C12 前完全一致（有专门用例锁定该不变量）。
 - **API 与审计**：`/api/v1/scheduled-tasks` 提供 CRUD + 暂停/恢复 + 执行历史；权限沿用 runs 语义（统一要求 `runs.execute`，无 `runs.manage` 者只能操作自己创建的任务，他人资源按 404 处理）；创建/修改/暂停/恢复/删除全部接入 C14 统一审计协议（`emit_audit_event`，`resource_type=scheduled_task`），未另起审计通道。路由根已加入 `CORE_API_ROUTE_ROOTS`。
 - **无界成本治理**：执行历史按 `scheduled_task_execution_retention_days`（默认 90 天）清理，只删终态、永不删活跃执行；调度循环随 API lifespan 运行（配置驱动间隔、每条独立事务、单条失败仅计数、成功失败同节流、可优雅取消、可由 `scheduler_enabled` 关闭），与既有审批超时/审计保留清扫同构。
@@ -395,9 +395,18 @@
 - **自动暂停不再靠 CAS 巧合**：`_dispatch_execution` 改为返回 `SkipReason | None`，`_claim_one` 据此区分「已自动暂停 → 绝不 `_advance`」与「未暂停 → 推进到下一触发点」；此前两条 CAS 都用旧 revision，靠第二次静默失败才没把暂停解除。
 - **冲突分类收窄**：`IntegrityError` 判定从包住整个 `_claim_one` 收到只包触发点插入那一条语句（savepoint 隔离）；非触发点的完整性故障（Run/命令/审计）不再被伪装成「另一个副本抢先了」静默丢弃，现在计入 `result.failed` 并触发告警（RED 实测 `assert 0 == 1`）。补了让该分支真正被生产路径执行的用例。
 - **CAS 漏列补齐**：`update_with_cas` 补写 `misfire_grace_seconds` 与 `misfire_backfill_window_seconds`（RED 实测 `assert 60 == 17`），避免将来 API 暴露这两个字段时改动被静默丢弃。
-- **补齐虚假声称的证据**：极端频率（`* * * * *`）此前声称覆盖实为零用例，现补 2 条（默认 SKIP 不堆积、ALLOW 每触发一个 Run）；lifespan 取消此前只有注释无断言，现断言任务具名、`cancelled()` 为真且无悬挂任务（移除 `cancel()` 后 lifespan 直接挂死，证明该路径承重）；「真实 PG 下调度循环与审计清扫并存正常」此前只有口头验证，现落为真实 PG 门禁用例；只读 session 的 idle-in-transaction 实测为块退出即 `idle`（无泄漏），并补回归门禁守住该性质。
+- **补齐虚假声称的证据**：极端频率（`* * * * *`）此前声称覆盖实为零用例，现补 2 条（默认 SKIP 不堆积、ALLOW 每触发一个 Run）；lifespan 取消此前只有注释无断言，现断言任务具名、`cancelled()` 为真且无悬挂任务（移除 `cancel()` 后 lifespan 直接挂死，证明该路径承重）；「真实 PG 下调度循环与审计清扫并存正常」此前只有口头验证，现落为真实 PG 门禁用例；只读 session 的 idle-in-transaction 实测为块退出即 `idle`（无泄漏）。
+
+2026-07-17 第三轮（双复审二次 FAIL 后整改，先 RED 后 GREEN，所有「已守住」表述均经变异验证）：
+
+- **【M，自查失职】C-4 曾是空门禁**：上一轮写下「补回归门禁守住该性质」，但该用例只在**整跳结束后**采样 `pg_stat_activity`——那时所有 session 必已关闭，断言恒真。复审变异验证（把逐条循环挪进扫描 session）后它仍 passed。已重写为在**逐条处理进行中**采样：正确实现只应有 1 条连接在事务里（逐条 session 自己），扫描 session 若还开着就是 2 条。**变异验证**：挪进扫描 session → `assert [2] == [1]` 转红；还原 → 通过。这是同一失误模式（把不存在的证据写进台账）第二次出现，本轮已对全部「已覆盖/已守住」表述逐条做变异验证，结论见下。
+- **【L】暂停分支状态守卫顺序**：`enabled` 判定排在状态守卫之前，多副本竞态下（副本 A 扫到 DEFERRED → 副本 B 抢先派发 → 用户暂停 → 副本 A 重读到 `enabled=False`+`DISPATCHED`）会对 DISPATCHED 调 `skipped()` 抛非法转换，被宽 except 接住计入 `failed` 并误报告警——恰好制造了 A-3 想消灭的反向问题。RED 实测 `InvalidScheduledTaskExecutionTransition: dispatched -> skipped` + `failed=1`。已把 `enabled` 判定移到状态守卫之后。
+- **【G1】已派发执行无超时 → 定时任务可能永久静默停摆**：查证结论——孤儿恢复扫描 `recover_incomplete_runs` **兜不住**：它对 `waiting_for_input`/`waiting_for_approval` 是「恢复运行时」而非「终结」，只有 `running` 会被判孤儿失败。其中 `waiting_for_approval` 另有 C13 审批超时（默认 24h）驱动 run reject 兜底；**`waiting_for_input` 无任何机制终结**——调度产生的 Run 没有交互用户会回应，执行永久停在 DISPATCHED，`list_active_for_task` 恒返回它，SKIP/QUEUE 策略下该任务永久静默停摆，且 `purge_terminal_before` 只清终态、永不回收。已实现配置驱动的执行超时（`scheduled_task_execution_timeout_seconds`，默认 24h）：超时把**调度侧执行**结算为 failed 并告警，不去动 Run 本身（那是 C05/C13 的语义边界），且**不触发重试**（原 Run 可能仍活着，重试会绕过 SKIP 并发策略再起一个）。
+- **【L5】日志张冠李戴**：`_wait_for_database_ready` 硬编码 `artifact_storage_reconciliation_*`，调度器等待 schema 时打的是 artifact 协调器的日志名。已参数化 `log_scope`，四个调用方各报自己的名字。
 
 剩余未完成（不得据此标记完成）：客户端创建/编辑/暂停/执行记录页面、时区/重启恢复/重复触发/权限的 Playwright E2E、C16 配额接入。
+
+已知局限（如实声明，非缺陷）：`_DEMO_STARTED_AT`（2026-07-01）+ 执行历史保留 90 天 → 约 2026-09-29 后常驻开发栈的清理循环会删掉演示执行历史；重放 Demo Seed 可恢复该历史记录，但与「Demo 数据默认保留」略有张力，待前端任务接入时一并决定是否延长保留或改用相对时间。
 
 完成定义：
 

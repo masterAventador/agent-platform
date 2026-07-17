@@ -15,6 +15,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories import scheduling_dispatch
+from agent_platform.infrastructure.database.repositories.runs import (
+    SqlAlchemyRunRepository,
+)
 from agent_platform.infrastructure.database.repositories.scheduling import (
     ScheduledTaskExecutionRecord,
     SqlAlchemyScheduledTaskExecutionRepository,
@@ -397,3 +400,156 @@ async def test_a_guard_reason_that_does_not_pause_advances_to_the_next_trigger(
     assert stored.enabled is True
     assert stored.pause_reason is None
     assert stored.next_run_at == SECOND_TRIGGER
+
+
+@pytest.mark.asyncio
+async def test_a_stale_pending_snapshot_on_a_paused_task_is_not_a_scheduling_failure(
+    session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """良性竞态不得被误报成调度失败（否则 A-3 想修的告警失真又从这里回来）。
+
+    副本 A 扫到 DEFERRED → 副本 B 抢先派发（→DISPATCHED）→ 用户暂停 → 副本 A 拿锁
+    重读到 enabled=False + DISPATCHED。若暂停分支排在状态守卫之前，就会对 DISPATCHED
+    调 skipped() 抛非法转换，被宽 except 接住计入 failed 并触发告警。
+    """
+
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed, concurrency_policy=ConcurrencyPolicy.QUEUE)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    first_run = (await load_runs(session_factory))[0]
+    await run_scheduler_tick(
+        session_factory, now=SECOND_TRIGGER + timedelta(seconds=5), batch_limit=50
+    )
+    deferred = [
+        item
+        for item in await load_executions(session_factory, task)
+        if item.status is ExecutionStatus.DEFERRED
+    ][0]
+
+    # 副本 B 抢先把它派发掉。
+    async with session_factory() as session:
+        assert await SqlAlchemyScheduledTaskExecutionRepository(session).update_with_cas(
+            deferred.dispatched(run_id=first_run.id, now=SECOND_TRIGGER),
+            expected_revision=deferred.revision,
+        )
+        await session.commit()
+    # 用户随后暂停任务。
+    await pause(session_factory, await load_task(session_factory, task))
+
+    # 副本 A 手里仍是那份陈旧的 DEFERRED 快照。
+    async def stale_scan(_self, *, now: object, limit: object) -> list:
+        del now, limit
+        return [deferred]
+
+    monkeypatch.setattr(
+        SqlAlchemyScheduledTaskExecutionRepository, "list_pending_dispatch", stale_scan
+    )
+
+    result = await run_scheduler_tick(
+        session_factory, now=datetime(2026, 7, 17, 12, 30, tzinfo=UTC), batch_limit=50
+    )
+
+    assert result.failed == 0
+    assert result.failures == []
+    # 已被别人推进的执行不该被本副本改写。
+    async with session_factory() as session:
+        stored = await SqlAlchemyScheduledTaskExecutionRepository(session).get(
+            tenant_id=seed.tenant_id, execution_id=deferred.id
+        )
+    assert stored is not None
+    assert stored.status is ExecutionStatus.DISPATCHED
+
+
+@pytest.mark.asyncio
+async def test_a_dispatched_execution_whose_run_never_terminates_times_out(
+    session_factory: async_sessionmaker,
+) -> None:
+    """Run 永久停在 WAITING_FOR_INPUT 时，执行必须超时结算，否则任务永久静默停摆。
+
+    孤儿恢复扫描（`recover_incomplete_runs`）对 WAITING_FOR_INPUT 是「恢复运行时」
+    而不是「终结」，所以它兜不住这条；WAITING_FOR_APPROVAL 另有 C13 审批超时兜底。
+    """
+
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed, max_retries=2)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    run = (await load_runs(session_factory))[0]
+
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        stored_run = await runs.get(tenant_id=seed.tenant_id, run_id=run.id)
+        assert stored_run is not None
+        await runs.update(
+            stored_run.transition_to(RunStatus.RUNNING).transition_to(
+                RunStatus.WAITING_FOR_INPUT
+            )
+        )
+        await session.commit()
+
+    # 超时之前：不得擅自结算一个还活着的 Run。
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(hours=1), batch_limit=50
+    )
+    before = [
+        item
+        for item in await load_executions(session_factory, task)
+        if item.scheduled_for == FIRST_TRIGGER
+    ][0]
+    assert before.status is ExecutionStatus.DISPATCHED
+
+    # 超时之后：结算为失败并放行后续触发点。
+    await run_scheduler_tick(
+        session_factory, now=JUST_AFTER_TRIGGER + timedelta(days=2), batch_limit=50
+    )
+
+    executions = await load_executions(session_factory, task)
+    timed_out = [item for item in executions if item.scheduled_for == FIRST_TRIGGER][0]
+    assert timed_out.status is ExecutionStatus.FAILED
+    assert timed_out.error_message is not None
+    assert "timed_out" in timed_out.error_message
+    # 超时不得触发重试：原 Run 可能还活着，重试会绕过 SKIP 并发策略再起一个。
+    assert timed_out.attempts == 1
+    assert len(await load_runs(session_factory)) >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_execution_unblocks_the_task_for_later_triggers(
+    session_factory: async_sessionmaker,
+) -> None:
+    seed = await seed_workspace(session_factory)
+    task = await add_task(session_factory, seed, concurrency_policy=ConcurrencyPolicy.SKIP)
+    await run_scheduler_tick(session_factory, now=JUST_AFTER_TRIGGER, batch_limit=50)
+    run = (await load_runs(session_factory))[0]
+    async with session_factory() as session:
+        runs = SqlAlchemyRunRepository(session)
+        stored_run = await runs.get(tenant_id=seed.tenant_id, run_id=run.id)
+        assert stored_run is not None
+        await runs.update(
+            stored_run.transition_to(RunStatus.RUNNING).transition_to(
+                RunStatus.WAITING_FOR_INPUT
+            )
+        )
+        await session.commit()
+
+    # 卡住两天：这一跳先超时结算，并按 misfire=skip 把 next_run_at 推到未来。
+    await run_scheduler_tick(
+        session_factory, now=FIRST_TRIGGER + timedelta(days=2), batch_limit=50
+    )
+    async with session_factory() as session:
+        active = await SqlAlchemyScheduledTaskExecutionRepository(
+            session
+        ).list_active_for_task(scheduled_task_id=task.id)
+    # 并发闸门已放开：任务不再被那条永不终态的执行堵死。
+    assert active == []
+
+    # 下一个触发点准时到达时能正常派发（此前 SKIP 策略下会被永久挡住）。
+    resumed = await load_task(session_factory, task)
+    assert resumed.next_run_at is not None
+    await run_scheduler_tick(
+        session_factory,
+        now=resumed.next_run_at + timedelta(seconds=5),
+        batch_limit=50,
+    )
+
+    assert len(await load_runs(session_factory)) == 2

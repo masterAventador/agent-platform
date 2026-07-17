@@ -40,7 +40,11 @@ async def test_artifact_reconciliation_waits_for_schema_without_raising(
 
     monkeypatch.setattr("agent_platform.api.app.asyncio.sleep", fake_sleep)
 
-    await _wait_for_database_ready(lambda: FlakySession(), retry_delay_seconds=0.25)
+    await _wait_for_database_ready(
+        lambda: FlakySession(),
+        log_scope="artifact_storage_reconciliation",
+        retry_delay_seconds=0.25,
+    )
 
     assert calls == 3
     assert sleeps == [0.25, 0.25]

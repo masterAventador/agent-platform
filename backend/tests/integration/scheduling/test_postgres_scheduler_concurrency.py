@@ -28,6 +28,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from agent_platform.infrastructure.database.repositories import scheduling_dispatch
 from agent_platform.infrastructure.database.repositories.audit import (
     AuditChainStateRecord,
     AuditEventRecord,
@@ -448,18 +449,39 @@ async def test_the_scheduler_loop_and_audit_sweep_coexist_on_real_postgres(
 
 
 @pytest.mark.asyncio
-async def test_a_tick_leaves_no_connection_idle_in_transaction(
+async def test_the_candidate_scan_session_is_closed_before_per_item_work(
     session_factory: async_sessionmaker,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """一跳结束后不得留下 idle-in-transaction 连接。
+    """扫候选的只读 session 必须在逐条处理**之前**关闭，不能把长事务拖过整个循环。
 
-    调度的三个阶段各自先用只读 session 扫候选、关闭后再逐条处理；只读 session 不
-    显式 commit，靠 SQLAlchemy 关闭时回滚把连接干净地还回池子。实测：块内为
-    `idle in transaction`、块退出后为 `idle`。这条用例守住该性质——一旦有人把逐条
-    处理挪进扫描 session 里，长事务就会在这里暴露。
+    采样点必须在逐条处理**进行中**：跳结束后所有 session 无论如何都已关闭，
+    那时采样恒为 0，是一条什么都不守的空门禁（本用例的前身就是如此）。
+    处理中正确实现只应有 1 条连接在事务里（逐条 session 自己）；若扫描 session
+    还开着，就会有第 2 条。
     """
 
     await seed_task(session_factory, concurrency_policy=ConcurrencyPolicy.ALLOW)
+
+    samples: list[int] = []
+    original = scheduling_dispatch.create_employee_run
+
+    async def sampling_create_employee_run(**kwargs: object) -> object:
+        async with session_factory() as probe:
+            in_transaction = await probe.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND pid <> pg_backend_pid() "
+                    "AND state = 'idle in transaction'"
+                )
+            )
+            samples.append(int(in_transaction.scalar_one()))
+        return await original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        scheduling_dispatch, "create_employee_run", sampling_create_employee_run
+    )
 
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     try:
@@ -468,15 +490,8 @@ async def test_a_tick_leaves_no_connection_idle_in_transaction(
             now=JUST_AFTER_TRIGGER,
             batch_limit=50,
         )
-        async with session_factory() as session:
-            stuck = await session.execute(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() "
-                    "AND pid <> pg_backend_pid() "
-                    "AND state = 'idle in transaction'"
-                )
-            )
-            assert int(stuck.scalar_one()) == 0
     finally:
         await engine.dispose()
+
+    # 逐条处理期间只有逐条 session 自己持有事务；扫描 session 早已归还连接。
+    assert samples == [1]

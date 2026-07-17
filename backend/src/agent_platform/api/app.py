@@ -115,15 +115,19 @@ SCHEDULER_TASK_NAME = "agent-platform-scheduler"
 async def _wait_for_database_ready(
     session_factory: SessionFactory,
     *,
+    log_scope: str,
     retry_delay_seconds: float = 1.0,
 ) -> None:
+    """等待 schema 就绪。`log_scope` 让日志报出真正的调用方——多个后台循环共用这个
+    辅助函数，硬编码某一个的名字会把排查引向错误的组件。"""
+
     waiting_logged = False
     while True:
         try:
             async with session_factory() as session:
                 await session.execute(text("SELECT 1 FROM artifact_storage_operations LIMIT 1"))
             if waiting_logged:
-                logger.info("artifact_storage_reconciliation_database_ready")
+                logger.info(f"{log_scope}_database_ready")
             return
         except asyncio.CancelledError:
             raise
@@ -131,7 +135,7 @@ async def _wait_for_database_ready(
             if not waiting_logged:
                 waiting_logged = True
                 logger.warning(
-                    "artifact_storage_reconciliation_waiting_for_schema",
+                    f"{log_scope}_waiting_for_schema",
                     extra={"error_type": type(exc).__name__},
                 )
             await asyncio.sleep(retry_delay_seconds)
@@ -200,7 +204,9 @@ def create_app(
     capability_background_workers: list[tuple[str, Callable[[], Any]]] = []
 
     async def reconcile_artifact_storage() -> None:
-        await _wait_for_database_ready(configured_session_factory)
+        await _wait_for_database_ready(
+            configured_session_factory, log_scope="artifact_storage_reconciliation"
+        )
         next_unbound_cleanup_at = 0.0
         while True:
             try:
@@ -249,7 +255,9 @@ def create_app(
             await asyncio.sleep(5)
 
     async def sweep_approval_expiry() -> None:
-        await _wait_for_database_ready(configured_session_factory)
+        await _wait_for_database_ready(
+            configured_session_factory, log_scope="approval_expiry_sweep"
+        )
         while True:
             try:
                 result = await expire_overdue_approvals(
@@ -274,7 +282,9 @@ def create_app(
             await asyncio.sleep(app_settings.approval_expiry_sweep_interval_seconds)
 
     async def sweep_audit_retention() -> None:
-        await _wait_for_database_ready(configured_session_factory)
+        await _wait_for_database_ready(
+            configured_session_factory, log_scope="audit_retention_sweep"
+        )
         while True:
             try:
                 result = await purge_expired_audit_events(
@@ -303,7 +313,7 @@ def create_app(
         """C12 调度循环：与既有清扫任务同构——配置驱动间隔、每条独立事务、
         单条失败仅计数、成功失败同节流。多副本安全由行锁 + 触发点唯一索引保证。"""
 
-        await _wait_for_database_ready(configured_session_factory)
+        await _wait_for_database_ready(configured_session_factory, log_scope="scheduler")
         next_purge_at = 0.0
         while True:
             try:
@@ -311,6 +321,9 @@ def create_app(
                     configured_session_factory,
                     now=datetime.now(UTC),
                     batch_limit=app_settings.scheduler_tick_batch_limit,
+                    execution_timeout=timedelta(
+                        seconds=app_settings.scheduled_task_execution_timeout_seconds
+                    ),
                 )
                 if result.dispatched or result.skipped or result.settled:
                     logger.info(
