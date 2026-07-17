@@ -12,6 +12,10 @@ from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.approvals import (
+    settle_run_approvals,
+    sync_run_approvals,
+)
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyFileRepository,
 )
@@ -146,6 +150,7 @@ class RunWorker:
         cancellation_poll_initial_seconds: float = 0.25,
         cancellation_poll_max_seconds: float = 2.0,
         dead_letter_service: RunDeadLetterService | None = None,
+        approval_pending_timeout_seconds: float = 86_400.0,
     ) -> None:
         if runtime_lease_duration <= timedelta(0):
             raise ValueError("runtime_lease_duration must be positive")
@@ -162,6 +167,9 @@ class RunWorker:
         self._runtime_lease_duration = runtime_lease_duration
         self._cancellation_poll_initial_seconds = cancellation_poll_initial_seconds
         self._cancellation_poll_max_seconds = cancellation_poll_max_seconds
+        if approval_pending_timeout_seconds <= 0:
+            raise ValueError("approval_pending_timeout_seconds must be positive")
+        self._approval_pending_timeout = timedelta(seconds=approval_pending_timeout_seconds)
         self._dead_letters = dead_letter_service or RunDeadLetterService(
             session_factory=session_factory
         )
@@ -606,6 +614,19 @@ class RunWorker:
             )
             events = SqlAlchemyRunEventRepository(session)
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await sync_run_approvals(
+                session,
+                run=current,
+                history=history,
+                pending_timeout=self._approval_pending_timeout,
+            )
+            if self._is_terminal(state.status):
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason=f"run_{state.status.value}",
+                )
             conversation_projection = (current, history)
             if current.status != state.status:
                 if current.status in {
@@ -855,6 +876,12 @@ class RunWorker:
             )
             await events.append(failed_event)
             conversation_projection = (run, [failed_event])
+            await settle_run_approvals(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                reason="run_failed",
+            )
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
                 run_id=run.id,
@@ -1073,6 +1100,12 @@ class RunWorker:
                     run_id=run.id,
                     approval_ids={settle_approval_id},
                 )
+            await settle_run_approvals(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                reason="run_failed",
+            )
             ownership = self._ownerships[run.id]
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
                 run_id=run.id,
@@ -1121,6 +1154,12 @@ class RunWorker:
                 history=history,
             )
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await sync_run_approvals(
+                session,
+                run=current,
+                history=history,
+                pending_timeout=self._approval_pending_timeout,
+            )
             conversation_projection = (current, history)
             stale_approval_ids = {
                 UUID(value) for value in existing_approvals if value != str(current_approval_id)
@@ -1130,6 +1169,20 @@ class RunWorker:
                     session=session,
                     run_id=run.id,
                     approval_ids=stale_approval_ids,
+                )
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason="superseded",
+                    invocation_ids=stale_approval_ids,
+                )
+            if self._is_terminal(state.status):
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason=f"run_{state.status.value}",
                 )
             if current.status != state.status:
                 if current.status in {

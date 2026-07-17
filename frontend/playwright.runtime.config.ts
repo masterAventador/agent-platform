@@ -35,7 +35,7 @@ const backendEnvironment = {
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['runtime.spec.ts', 'knowledge-runtime.spec.ts'],
+  testMatch: ['runtime.spec.ts', 'knowledge-runtime.spec.ts', 'approvals.spec.ts'],
   globalSetup: './e2e/runtime-global-setup.ts',
   globalTeardown: './e2e/runtime-global-teardown.ts',
   fullyParallel: false,
@@ -82,6 +82,8 @@ export default defineConfig({
         ...backendEnvironment,
         AGENT_PLATFORM_AUTH_REGISTER_LIMIT_PER_MINUTE: '100',
         AGENT_PLATFORM_AUTH_LOGIN_LIMIT_PER_MINUTE: '100',
+        // C13 过期用例：加快审批过期后台清扫
+        AGENT_PLATFORM_APPROVAL_EXPIRY_SWEEP_INTERVAL_SECONDS: '5',
       },
       url: `${runtimeApiUrl}/api/v1/health/live`,
       reuseExistingServer: false,

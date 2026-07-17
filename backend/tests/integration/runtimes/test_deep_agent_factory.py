@@ -208,6 +208,9 @@ async def test_deep_agent_runtime_recovers_real_human_interrupt_and_checks_appro
     assert waiting.status.value == "waiting_for_approval"
     assert len(approval_events) == 1
     approval_id = UUID(str(approval_events[0].payload["approval_id"]))
+    # C13：审批事件携带业务上下文快照，供审批中心展示工具与参数
+    assert approval_events[0].payload["tool_name"] == "approval_required_tool"
+    assert approval_events[0].payload["arguments"] == {"value": "approved value"}
 
     restored_runtime = DeepAgentRuntime(
         agent_factory=DeepAgentFactory(

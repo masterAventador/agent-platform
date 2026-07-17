@@ -459,3 +459,26 @@ def test_cli_missing_adapter_exits_two_with_sanitized_stderr(monkeypatch, capsys
     assert "postgresql" not in stderr
     assert "redis://" not in stderr
     assert "agent-platform-local" not in stderr
+
+
+@pytest.mark.asyncio
+async def test_run_worker_service_configures_audit_hashing_at_startup() -> None:
+    """Worker 进程必须在启动处装配审计 HMAC 密钥（与 API create_app 同源）。
+
+    C13 起 worker 投递路径会写审计事件（审批决策落审计）；若 worker 进程未装配
+    审计哈希器，写入会 fail-closed 抛 AuditHmacKeyNotConfiguredError，导致投递失败。
+    此处以 gateway 未配置的快速失败路径为锚，断言装配发生在启动早期、失败之前。
+    """
+    from agent_platform.platform.audit.hashing import (
+        active_audit_hasher,
+        configure_audit_hashing,
+    )
+
+    # 模拟全新 worker 进程：显式清空进程级审计哈希器（覆盖 conftest 的默认装配）。
+    configure_audit_hashing(None)
+    assert active_audit_hasher() is None
+
+    with pytest.raises(WorkerConfigurationError):
+        await run_worker_service(runtime_resolver=None)
+
+    assert active_audit_hasher() is not None

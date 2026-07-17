@@ -21,6 +21,7 @@ const summary = {
     failed: 1,
     cancelled: 1,
   },
+  pending_approvals: 3,
 }
 
 describe('workbench API', () => {
@@ -39,6 +40,7 @@ describe('workbench API', () => {
     [{ ...summary, employees: { ...summary.employees, total: -1 } }],
     [{ ...summary, runs: { ...summary.runs, failed: 0.5 } }],
     [{ ...summary, model_usage: { tokens: 10 } }],
+    [{ ...summary, pending_approvals: -1 }],
   ])('拒绝不合法或当前阶段协议外的统计字段', async (payload) => {
     vi.mocked(apiClient.get).mockResolvedValue({ data: payload })
 

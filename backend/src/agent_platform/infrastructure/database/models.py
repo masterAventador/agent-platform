@@ -1,4 +1,5 @@
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
     ArtifactStorageOperationRecord,
@@ -80,6 +81,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ArtifactRecord,
     ArtifactStorageOperationRecord,
     CapabilityEntitlementRecord,
+    ApprovalRecord,
 )
 
 

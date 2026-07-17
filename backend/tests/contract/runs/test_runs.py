@@ -314,13 +314,16 @@ async def test_member_run_access_is_owner_scoped_and_admin_can_manage_any_run(
     assert (
         await member_client.get(f"/api/v1/runs/{owner_run['id']}", headers=headers)
     ).status_code == 200
-    assert (
-        await member_client.post(
-            f"/api/v1/runs/{member_run['id']}/control",
-            headers=headers,
-            json={"action": "approve", "approval_id": str(uuid4())},
-        )
-    ).status_code == 202
+    # 提升为 admin 后通过 RBAC 门（不再是 member 的 403）；但该 run 被手动置为
+    # WAITING_FOR_APPROVAL 却无对应审批记录，C13 安全 fail-closed 返回 409（而非
+    # 静默回退老通道直发命令），证明 admin 已获授权且旁路窗口已封堵。
+    admin_approval = await member_client.post(
+        f"/api/v1/runs/{member_run['id']}/control",
+        headers=headers,
+        json={"action": "approve", "approval_id": str(uuid4())},
+    )
+    assert admin_approval.status_code == 409
+    assert admin_approval.json()["detail"]["code"] == "approval_record_missing"
 
 
 @pytest.mark.asyncio

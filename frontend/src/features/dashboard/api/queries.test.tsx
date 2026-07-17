@@ -25,6 +25,7 @@ const emptySummary = {
     failed: 0,
     cancelled: 0,
   },
+  pending_approvals: 0,
 }
 const updatedSummary = {
   ...emptySummary,

@@ -10,6 +10,7 @@ from agent_platform.bootstrap.demo_seed import (
     DEMO_ADMIN_EMAIL,
     DEMO_ADMIN_MEMBERSHIP_ID,
     DEMO_ADMIN_USER_ID,
+    DEMO_APPROVED_APPROVAL_ID,
     DEMO_ARTIFACT_CONTENT,
     DEMO_ARTIFACT_ID,
     DEMO_ATTACHMENT_ID,
@@ -26,6 +27,7 @@ from agent_platform.bootstrap.demo_seed import (
     DEMO_MEMBER_USER_ID,
     DEMO_MEMBERSHIP_ID,
     DEMO_PASSWORD,
+    DEMO_PENDING_APPROVAL_ID,
     DEMO_TENANT_ID,
     DEMO_TOOL_ID,
     DEMO_USER_ID,
@@ -36,6 +38,7 @@ from agent_platform.bootstrap.demo_seed import (
 )
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
     FileRecord,
@@ -163,6 +166,7 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert await _count(session, EmployeeVersionRecord) == 1
         assert await _count(session, RunRecord) == 2
         assert await _count(session, RunEventRecord) == 7
+        assert await _count(session, ApprovalRecord) == 2
         assert await _count(session, FileRecord) == 1
         assert await _count(session, TaskAttachmentRecord) == 1
         assert await _count(session, ArtifactRecord) == 1
@@ -266,6 +270,35 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
 
 async def _count(session: AsyncSession, model: type[Base]) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_provides_reviewable_approval_records(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """C13 验收数据：待办一条（等待审批 run + pending 审批）、历史一条（approved）。"""
+
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=MemoryArtifactStorage(),
+    )
+
+    async with session_factory() as session:
+        pending = await session.get(ApprovalRecord, DEMO_PENDING_APPROVAL_ID)
+        approved = await session.get(ApprovalRecord, DEMO_APPROVED_APPROVAL_ID)
+
+    assert pending is not None
+    assert pending.status == "pending"
+    # 演示 pending 记录不绑定非终态 run，避免被 Worker 恢复扫描当孤儿清理
+    assert pending.run_id is None
+    assert pending.tenant_id == DEMO_TENANT_ID
+    assert pending.context["tool_name"]
+    assert pending.expires_at is not None
+    assert approved is not None
+    assert approved.status == "approved"
+    assert approved.decided_by is not None
 
 
 @pytest.mark.asyncio

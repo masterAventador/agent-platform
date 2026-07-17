@@ -25,6 +25,7 @@ export default defineConfig({
     'rbac.demo-seed.spec.ts',
     'runtime.spec.ts',
     'runtime-recovery.spec.ts',
+    'approvals.spec.ts',
     'knowledge-runtime.spec.ts',
   ],
   globalSetup: './e2e/global-setup.ts',

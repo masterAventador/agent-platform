@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { ConfigProvider } from 'antd'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -28,6 +29,7 @@ const summary = {
     failed: 1,
     cancelled: 1,
   },
+  pending_approvals: 3,
 }
 
 describe('DashboardPage', () => {
@@ -42,7 +44,7 @@ describe('DashboardPage', () => {
   })
 
   it('展示真实员工、全部任务状态、失败任务和系统健康数据', () => {
-    render(<DashboardPage />)
+    render(<MemoryRouter><DashboardPage /></MemoryRouter>)
 
     expect(screen.getByRole('heading', { name: '工作台' })).toBeInTheDocument()
     expect(screen.getByLabelText('数字员工总数')).toHaveTextContent('2')
@@ -56,6 +58,11 @@ describe('DashboardPage', () => {
     expect(screen.getByLabelText('等待审批任务')).toHaveTextContent('1')
     expect(screen.getByLabelText('已完成任务')).toHaveTextContent('1')
     expect(screen.getByLabelText('已取消任务')).toHaveTextContent('1')
+    expect(screen.getByLabelText('待审批总数')).toHaveTextContent('3')
+    expect(screen.getByRole('link', { name: /前往审批中心/ })).toHaveAttribute(
+      'href',
+      '/approvals',
+    )
     expect(screen.getByText('后端服务正常')).toBeInTheDocument()
     expect(screen.queryByText(/产物|模型用量/)).not.toBeInTheDocument()
   })
@@ -69,9 +76,11 @@ describe('DashboardPage', () => {
     }
 
     render(
-      <ConfigProvider theme={{ token }}>
-        <DashboardPage />
-      </ConfigProvider>,
+      <MemoryRouter>
+        <ConfigProvider theme={{ token }}>
+          <DashboardPage />
+        </ConfigProvider>
+      </MemoryRouter>,
     )
 
     const failureStatistic = screen.getByLabelText('失败任务总数')
@@ -97,7 +106,7 @@ describe('DashboardPage', () => {
       refetch,
     } as unknown as ReturnType<typeof useWorkbenchSummary>)
 
-    render(<DashboardPage />)
+    render(<MemoryRouter><DashboardPage /></MemoryRouter>)
 
     expect(screen.getByText('工作台数据加载失败')).toBeInTheDocument()
     expect(screen.queryByLabelText('任务总数')).not.toBeInTheDocument()
@@ -113,7 +122,7 @@ describe('DashboardPage', () => {
       refetch,
     } as unknown as ReturnType<typeof useWorkbenchSummary>)
 
-    render(<DashboardPage />)
+    render(<MemoryRouter><DashboardPage /></MemoryRouter>)
 
     expect(screen.getByLabelText('正在加载工作台数据')).toBeInTheDocument()
     expect(screen.getByText('后端服务正常')).toBeInTheDocument()

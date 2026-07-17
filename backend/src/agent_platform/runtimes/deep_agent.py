@@ -171,10 +171,7 @@ class DeepAgentRuntime:
                 self._append_event(
                     request,
                     EventType.APPROVAL_REQUIRED,
-                    {
-                        "status": "waiting_for_approval",
-                        "approval_id": str(approval.approval_id),
-                    },
+                    self._approval_event_payload(approval),
                 )
                 state = RuntimeState(
                     run_id=request.run_id,
@@ -275,10 +272,7 @@ class DeepAgentRuntime:
         self._append_event(
             request,
             EventType.APPROVAL_REQUIRED,
-            {
-                "status": "waiting_for_approval",
-                "approval_id": str(approval.approval_id),
-            },
+            self._approval_event_payload(approval),
         )
         state = RuntimeState(run_id=request.run_id, status=status, data={})
         self._states[request.run_id] = state
@@ -458,10 +452,7 @@ class DeepAgentRuntime:
             self._append_event(
                 request,
                 EventType.APPROVAL_REQUIRED,
-                {
-                    "status": "waiting_for_approval",
-                    "approval_id": str(next_approval.approval_id),
-                },
+                self._approval_event_payload(next_approval),
             )
             self._states[run_id] = RuntimeState(
                 run_id=run_id,
@@ -599,6 +590,19 @@ class DeepAgentRuntime:
     def pending_approval_id(self, run_id: UUID) -> UUID | None:
         pending = self._pending_approvals.get(run_id)
         return pending.approval_id if pending is not None else None
+
+    @staticmethod
+    def _approval_event_payload(approval: PendingToolApproval) -> dict[str, JsonValue]:
+        """C13 审批协议：审批事件携带工具与参数快照，供审批中心展示。"""
+
+        return {
+            "status": "waiting_for_approval",
+            "approval_id": str(approval.approval_id),
+            "tool_name": approval.tool_name,
+            "arguments": TypeAdapter(dict[str, JsonValue]).validate_python(
+                approval.arguments
+            ),
+        }
 
     @staticmethod
     def _config(request: RuntimeStartRequest) -> dict[str, object]:

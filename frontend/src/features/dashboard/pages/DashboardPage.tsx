@@ -1,4 +1,5 @@
 import { Alert, Button, Card, Flex, Spin, Statistic, Tag, theme, Typography } from 'antd'
+import { Link } from 'react-router-dom'
 
 import type { RunStatus } from '../../runs/api/runs'
 import { runStatusLabels } from '../../runs/pages/status'
@@ -74,6 +75,16 @@ function DashboardSummary({ summary }: { summary: WorkbenchSummary }) {
               aria-label="已发布员工"
             />
             <Statistic title="草稿" value={summary.employees.draft} aria-label="草稿员工" />
+          </Flex>
+        </Card>
+        <Card>
+          <Statistic
+            title="待审批"
+            value={summary.pending_approvals}
+            aria-label="待审批总数"
+          />
+          <Flex className="dashboard-card-breakdown" gap={20} wrap>
+            <Link to="/approvals">前往审批中心</Link>
           </Flex>
         </Card>
         <Card>
