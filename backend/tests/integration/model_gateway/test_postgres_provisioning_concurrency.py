@@ -70,13 +70,16 @@ def migrated_postgres_url() -> str:
 @pytest_asyncio.fixture
 async def session_factory(migrated_postgres_url: str) -> AsyncIterator[async_sessionmaker]:
     engine = create_async_engine(migrated_postgres_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    # 用例前清理：本文件的断言按全库计数，必须不受前序测试文件残留影响。
-    await reset_database(engine)
-    yield factory
-    # 用例后清理：不把数据泄漏给后续测试文件。
-    await reset_database(engine)
-    await engine.dispose()
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # 用例前清理：本文件的断言按全库计数，必须不受前序测试文件残留影响。
+        await reset_database(engine)
+        yield factory
+        # 用例后清理：不把数据泄漏给后续测试文件。
+        await reset_database(engine)
+    finally:
+        # 收尾 reset 若抛错（如护栏拒绝、拿不到锁），engine 也必须释放。
+        await engine.dispose()
 
 
 async def _seed_tenant(factory: async_sessionmaker) -> tuple[UUID, UUID]:
