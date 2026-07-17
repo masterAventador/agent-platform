@@ -639,13 +639,31 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
-当前已知失败：**1 项**（2026-07-17 发现，主代理在 main 实测复现）。
+当前已知失败：**2 项**（2026-07-17 发现，主代理在 main 实测复现）。
+
+> **⚠️ 方法论盲区（2026-07-17 主代理定位，比这两条红线本身更重要）**
+>
+> 本节历来记录的「后端全量 X passed / Y skipped」（如 C13 的 `1399 passed, 45 skipped`、C11 的 `1536 passed, 50 skipped`、C15 的 `1596 passed, 52 skipped`）**全部是在未设 `TEST_DATABASE_URL` 的情况下采集的**——因此 `tests/integration/` 下所有真实 PostgreSQL 门禁的用例统统落入 skip 桶。**下面第 2 条红线就藏在那几十个 skipped 里**：同一个 `tests/integration/checkpoints/`，无真实 PG 时 `1 passed, 4 skipped`（失败项被跳过），有真实 PG 时 `1 failed, 4 passed`（回归现形）。
+>
+> 即：**「全量通过」这个说法在本项目历来的采集口径下并不成立，它只覆盖了不需要真实依赖的那部分**。那些 skipped 数字一直明晃晃写在台账上，但从未有人追问跳过的是什么。
+>
+> **今后要求**：凡向本节写入「全量」字样的数字，必须**同时注明采集条件**（有无 `TEST_DATABASE_URL` / Redis / MinIO / 真实 COS / 真实 RAGFlow / 真实 LiteLLM），并在条目终验时**至少跑一次带真实 PG 的全量**。只写通过数不写采集条件的记录，等同于台账失真。
+
+**红线 1**：`infra/litellm/test_config.py::LiteLlmComposeContractTest::test_local_stub_override_is_test_only_and_not_published`
 
 `infra/litellm/test_config.py::LiteLlmComposeContractTest::test_local_stub_override_is_test_only_and_not_published` 在 main 上 FAILED（`1 failed, 16 passed`）。经 C16 实现代理与 C16 规格复审**各自独立** `git checkout f5fb483` 实测，确认**早于 C12/C16 两个条目开工即已存在**，与二者无关；两者按「单个任务提交只能包含该任务改动」未夹带修复，处理正确。
 
 根因（主代理实测定位）：该用例断言 `stub["image"] == EXPECTED_IMAGE`，而 `EXPECTED_IMAGE` 是 LiteLLM 官方镜像常量 `ghcr.io/berriai/litellm-non_root:v1.86.2@sha256:511b513…`；但 `infra/litellm/compose.stub.yml` 中 `openai-stub` 服务的镜像是 `agent-platform-litellm-stub:local`。**拿 stub 服务去比 LiteLLM 镜像常量属测试自身笔误**，疑似自创建起从未通过（与 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」同型）。修复须先确认 `openai-stub` 的预期镜像语义，再改断言，**不得为了变绿而放宽 stub 的隔离契约**（该用例的职责是钉住「本地 stub override 仅供测试、不得进入发布配置」）。
 
 **本条不得以「非本轮引入」为由长期挂账**——第 6 节基线此前长期声明「当前已知失败：无」，与该红线共存，属台账失真；已按「文档与代码冲突时以可运行代码为事实」修正，并单开条目收口。
+
+**红线 2（更严重，落在已标 ✅ 的区域）**：`tests/integration/checkpoints/test_postgres_checkpointer.py::test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpoint`
+
+由 C16 阶段一的对抗性代码质量复审发现，主代理**在真实 PG 临时容器上独立复现**（`1 failed, 4 passed`；无真实 PG 时 `1 passed, 4 skipped`——见上方方法论盲区）。C16 对 `checkpoints/` 与 `memory/` **零改动**（`git diff --stat main...HEAD` 为空，主代理已核），与 C12/C16 均无关。
+
+**性质：这不是测试笔误，是生产代码路径上的真回归。** 失败为 `RuntimeControlMismatch`，抛出点 `src/agent_platform/runtimes/langgraph.py:481` 的 `_require_approval`——即 LangGraph 运行时在审批时判定「待处理的中断不是审批、或 approval_id 对不上」。`langgraph.py` 最近一次改动为 `30e64ac refactor：加固租户知识与运行时安全边界`；该测试最近一次改动为 `9c1eba7 feat: 完成运行时崩溃恢复与死信治理 [T22]`。
+
+**该路径属 C11（工作流/混合员工，LangGraph 编排内核）与 C13（审批中心）的交界，两者均已标 `✅ 已完成`。** 收口时必须先查明：是 `30e64ac` 的安全边界加固引入的回归，还是 C11/C13 合入时该用例本就未在真实 PG 下跑过（参照 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」先例）。**若确认为回归，C11 和/或 C13 的 `✅` 标记必须重新审视**——完成定义里的「人工审批、拒绝、继续和取消」若在真实 PG 的 checkpoint 恢复路径上不成立，那个 ✅ 就不成立。
 
 ## 7. 完成记录
 
