@@ -9,6 +9,13 @@ httpx 事件钩子），属侵入。因此费用由平台按 alias 声明价 × 
 **金额绝不用浮点**：价格以「nano-USD / 每百万 token」的整数表达，费用以 nano-USD 整数计算。
 alias 无定价或 token 未知时费用是「未知」（None），绝不塌缩成 0——阶段三预算会读它，
 0 与「未知」语义不同。
+
+**⚠️ 单位换算（阶段三预算比较前必读，否则差 3 个零）**：本表与用量记录用 **nano-USD**
+（本阶段刻意取比预算更细的单位，容纳单次低 token 调用的 sub-micro 精度）；而阶段一的
+租户预算 ``budget_microusd`` 用 **micro-USD**。换算关系是 **1 micro-USD = 1000 nano-USD**。
+阶段三拿用量费用（nano）与预算（micro）比较时，必须先对齐单位——直接
+``sum(cost_nanousd) 比 budget_microusd`` 会把预算当成大 1000 倍，约 $0.001 用量就误判
+预算耗尽。建议聚合后统一到 micro-USD 再比较（``sum(nano) // 1000``，量级已大、换算无损）。
 """
 
 from __future__ import annotations
