@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 from alembic import command as alembic_command
 from alembic.config import Config
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.repositories.approvals import (
@@ -31,15 +31,10 @@ from agent_platform.infrastructure.database.repositories.approvals import (
     create_approval_service,
     expire_overdue_approvals,
 )
-from agent_platform.infrastructure.database.repositories.audit import (
-    AuditChainStateRecord,
-    AuditEventRecord,
-)
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.employees import EmployeeRecord
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
-    RunEventRecord,
     SqlAlchemyRunRepository,
 )
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
@@ -55,6 +50,7 @@ from agent_platform.platform.approvals.errors import (
 )
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.tenants.memberships import TenantRole
+from tests.fixtures.postgres_reset import reset_database
 
 BACKEND_ROOT = Path(__file__).parents[3]
 
@@ -75,27 +71,16 @@ async def session_factory(
     migrated_postgres_url: str,
 ) -> AsyncIterator[async_sessionmaker]:
     engine = create_async_engine(migrated_postgres_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    # 每个用例后清理本用例写入的表数据（保留 schema），避免跨用例串染
-    async with factory() as session:
-        for table in (
-            RunCommandRecord,
-            RunEventRecord,
-            ApprovalRecord,
-            AuditEventRecord,
-            AuditChainStateRecord,
-        ):
-            await session.execute(delete(table))
-        # runs / users / tenants 有 FK，按依赖顺序清
-        from agent_platform.infrastructure.database.repositories.runs import RunRecord
-
-        await session.execute(delete(RunRecord))
-        await session.execute(delete(EmployeeRecord))
-        await session.execute(delete(UserRecord))
-        await session.execute(delete(TenantRecord))
-        await session.commit()
-    await engine.dispose()
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # 用例前清理：本文件的断言按全库计数，必须不受前序测试文件残留影响。
+        await reset_database(engine)
+        yield factory
+        # 用例后清理：不把数据泄漏给后续测试文件。
+        await reset_database(engine)
+    finally:
+        # 收尾 reset 若抛错（如护栏拒绝、拿不到锁），engine 也必须释放。
+        await engine.dispose()
 
 
 async def _seed_tenant_user(session_factory: async_sessionmaker) -> tuple[UUID, UUID, UUID]:

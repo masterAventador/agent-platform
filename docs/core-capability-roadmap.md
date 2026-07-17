@@ -737,31 +737,51 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
-当前已知失败（2026-07-17 更新，采集条件：**`TEST_DATABASE_URL=真实 PG`**）：
+**当前已知失败（2026-07-17，[T9] 合入后更新）**
 
-> **`TEST_DATABASE_URL=真实 PG` 下的后端全量 = 1850 passed / 22 skipped / 5 failed / 13 errors。**
->
-> - **3 条红线已收口**（T8，零生产改动，双复审 PASS，见下）。
-> - **余 5 failed + 13 errors 全部归属 [T9] 夹具隔离缺陷，非产品缺陷**。根因已实锤到行：`test_postgres_scheduler_concurrency.py` 的 teardown 清理清单删 `UserRecord`/`TenantRecord`，却**不含 C16 新增的 `tenant_model_gateway_policies`** → 跨文件残留触发 `ForeignKeyViolationError: ... tenant_model_gateway_policies_updated_by_fkey`。两个复审各自用**全新库单跑**验证：scheduling `8 passed`、model_gateway `5 passed`，归因成立。
-> - ⚠️ **「1850 passed」仍不是真全量**：22 skipped 全是外部依赖门禁（COS / MinIO / Redis / Docker sandbox / RAGFlow），本轮未覆盖。
->
-> **⛔ 订正（2026-07-17，由 T9 规格复审实测抓出，原文由主代理写于 T8 合并提交）**：此处原写「22 skipped **无一条与 PG 相关**——即本轮 PG 门禁确已全部执行」，**实测不成立**。22 条里有 **4 条是 PG + Redis 双门禁**（`test_real_runs`、`test_dispatcher_process_integration`、`test_real_employee_definitions`、`test_real_auth_dependencies`，skip 原因均为「需要 `TEST_DATABASE_URL` **和** `TEST_REDIS_URL`」）——它们**碰真实 PG，却因缺 Redis 被跳过**。加真实 Redis 后 22 → 9、13 条补跑，恰好解释 1858 → 1871。
->
-> **这是本节自己警告的「别让数字变成下一个盲区」的同型错误，且是在同一段里犯的**：我一边要求「写全量必须注明采集条件」，一边把「无 PG 相关 skip」当成了「PG 门禁已全跑」。**教训：skip 原因是复合条件时，不能只看其中一个依赖就宣称该依赖的门禁已全部执行。**
+**采集条件必须与数字同行——本节此前的失真全部源于省略它。**
 
-**已登记跟踪（非阻断，T8 双复审发现）**：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** docstring 都写着「没有审批记录时返回 False/None，调用方走原有流程」，但调用方自 `b319bc2` 起就是 409 fail-closed，「原有流程」在代码中已死。规格复审用三重论证确认**无 fail-open 旁路**（调用链唯一收敛到 409；approve/reject 的 `approval_id` 恒非 None 故 raw 命令路径不可达；变异实测反证该 raise 是唯一出口），属注释腐烂，单开 docs-only 提交订正。
+| 采集条件 | 后端全量结果 |
+| --- | --- |
+| `TEST_DATABASE_URL=真实 PG`，**无** `TEST_REDIS_URL` | **1860 passed / 22 skipped / 0 failed / 0 errors** |
+| `TEST_DATABASE_URL=真实 PG` **+** `TEST_REDIS_URL=真实 Redis` | **1873 passed / 9 skipped / 0 failed / 0 errors** |
+| 真实 PG，仅 `tests/integration` | **326 passed / 22 skipped**；**同一未重置库连跑 4 轮恒定 326**（证明跨文件顺序/残留已稳定） |
 
-**❌ 本节禁止再写「当前已知失败：无 / 0」**——除非每一条都有归零证据。第 6 节此前长期声明「无」而与 3 条红线共存，已被认定为台账失真；T8 收口后若把 [T9] 的 5 failed / 13 errors 一并写成 0，即为**同一错误第二次发生**。（本条由 T8 规格复审在主代理准备「清零」时当场拦下并强制写入。）
+以上由 [T9] 二轮规格复审在一次性 PG/Redis 容器（随机端口、只绑 127.0.0.1、验后销毁）**独立复跑复现**，非转述。
 
-三条红线同一病根：**真实 PG / 真实构建门禁被跳过后，旧契约测试无人更新——全部是回归，全部不是产品缺陷。**
+**T8 三条红线 + [T9] 的 5 failed / 13 errors 均已归零，证据如下（按本节规矩，不得只写 0）：**
 
-> **⚠️ 方法论盲区（2026-07-17 主代理定位，比这两条红线本身更重要）**
+- **两个来源，不是一个。** 台账原写「根因＝`test_postgres_scheduler_concurrency.py` teardown 清单漏 `tenant_model_gateway_policies`」**不完整**，经 T9 实现代理与 T9 规格复审**各自独立实测订正**：
+  - **13 errors = teardown 漏表**：清单删 `UserRecord`/`TenantRecord` 却不含 C16 新增表 → `ForeignKeyViolationError: tenant_model_gateway_policies_updated_by_fkey`。**这 13 条是 teardown 错，用例本身已通过并已计入原 1850**——由账目对账反证：`1850 + 5(failed→passed) + 5(新增门禁用例) = 1860`，与实测吻合；若为 setup 错则应为 1873，与实测差 13。
+  - **5 failed = before 态残留**：`tests/integration/runs/` **完全无清理**（实测跑完留下 `runs=5 users=5 tenants=5`），而 `runs/` 排在 `scheduling/` 之前，scheduling 的 `count(RunRecord) == 1` 是**无过滤全库计数** → 读到残留（`assert 19 == 1`）。**只补 teardown 对这 5 条无效**（规格复审构造「只补 teardown」变体实跑，仍剩 1 red），故实现必须是 before + after 双清理。
+- 修复方式：`tests/fixtures/postgres_reset.py` 从 `Base.metadata` 自动推导表清单，单条 `TRUNCATE ... RESTART IDENTITY CASCADE`；零生产改动、未加 skip、未放宽断言。
+- **门禁非假绿**（两个复审各自独立变异验证）：清单漏掉两张孤岛表 → 红且点名 `run_dead_letters`/`tool_audit_events`；拆掉 Demo Seed 护栏 → `DID NOT RAISE`；把护栏挪到 TRUNCATE 之后 → 根本不 raise（demo 用户已被删光，正面证明「先删再报错等于没护栏」被测到）；还原 → 5 passed。
+
+> **一轮质量复审 FAIL 抓到的要害（记录备查）**：门禁 ① 声称「metadata 注册的所有表都空了」，实际**只锁到 CASCADE 可达子集**。`run_dead_letters` / `tool_audit_events` 的 `tenant_id`/`user_id` 是**裸 uuid 列、无 FK 约束**，CASCADE 永远够不到；而门禁只种了 CASCADE 可达的表 → **「退回手工清单」变异照样全绿**。即：T9 要根治的那类缺陷（清单漏表 → 静默残留）能从 T9 自己的门禁下原样溜过去。**实现一直是对的**（两张表在 metadata 里、被直接列进 TRUNCATE），瞎的是门禁。
 >
-> 本节历来记录的「后端全量 X passed / Y skipped」（如 C13 的 `1399 passed, 45 skipped`、C11 的 `1536 passed, 50 skipped`、C15 的 `1596 passed, 52 skipped`）**全部是在未设 `TEST_DATABASE_URL` 的情况下采集的**——因此 `tests/integration/` 下所有真实 PostgreSQL 门禁的用例统统落入 skip 桶。**下面第 2 条红线就藏在那几十个 skipped 里**：同一个 `tests/integration/checkpoints/`，无真实 PG 时 `1 passed, 4 skipped`（失败项被跳过），有真实 PG 时 `1 failed, 4 passed`（回归现形）。
->
-> 即：**「全量通过」这个说法在本项目历来的采集口径下并不成立，它只覆盖了不需要真实依赖的那部分**。那些 skipped 数字一直明晃晃写在台账上，但从未有人追问跳过的是什么。
->
-> **今后要求**：凡向本节写入「全量」字样的数字，必须**同时注明采集条件**（有无 `TEST_DATABASE_URL` / Redis / MinIO / 真实 COS / 真实 RAGFlow / 真实 LiteLLM），并在条目终验时**至少跑一次带真实 PG 的全量**。只写通过数不写采集条件的记录，等同于台账失真。
+> **修复副作用也被同轮抓住**：TRUNCATE 要 ACCESS EXCLUSIVE，旧的 DELETE 只取行锁。持锁连接在场时 reset **永久挂住无诊断**（实测 30s 超时兜底才死）。已加 `SET LOCAL lock_timeout = '5s'` + `55P03` → `DatabaseResetLockTimeout`，约 5s 快失败并点名「有用例泄漏了未关闭的 session/事务」。
+
+**⚠️ skipped 是什么、哪些是盲区——如实登记：**
+
+- **9 skipped（PG+Redis 齐备时的真实底线盲区）**：真实腾讯云 COS 5 项、真实 MinIO 2 项、破坏性本地 Docker 沙箱 1 项、真实 RAGFlow 1 项。**这 9 条是当前无法用本机一次性容器覆盖的外部依赖，属已知盲区。**
+- **22 skipped = 上述 9 + 13 条 Redis 门禁**。其中 **4 条是 PG+Redis 双门禁**（`test_real_runs`、`test_dispatcher_process_integration`、`test_real_employee_definitions`、`test_real_auth_dependencies`）——**它们碰真实 PG，却因缺 Redis 被跳过**。因此**「无 PG 相关 skip」≠「PG 门禁已全跑」**；`22 − 9 = 13` 与 `1873 − 1860 = 13` 双向自洽。
+- **教训（保留）：skip 原因是复合条件时，不能只看其中一个依赖就宣称该依赖的门禁已全部执行。** 该失真由主代理写于 T8 合并提交，经 T9 规格复审实测抓出。
+
+**[T10] 结构性残余（已登记，本轮不做，非阻断）**
+
+21 个使用 `TEST_DATABASE_URL` 的测试文件中**只有 4 个**调用共享清理（实测：`grep -rl` 22 命中减去 fixture 自身 = 21，调用方 = approvals / scheduling / model_gateway / test_postgres_reset），其余 **17 个仍会把数据留在共享库**。当前状态严格优于修复前且有证据（4 轮恒定 326）；这 17 个文件的行为**未被 [T9] 改变**（改前泄漏、改后照样泄漏），其断言按 uuid/租户收窄故不红。
+
+**裁决（主代理）：不在 [T9] 内扩大范围。** autouse 清理下沉到 conftest 会改变 17 个文件的行为、令 40 张表的 TRUNCATE 乘以每个用例、并使 Demo Seed 护栏在每个用例触发，属需单独测性能的独立风险面。
+
+**[T10] 的具体触发条件（不得开放式挂账）：这 17 个文件的「良性」完全依赖其断言保持 uuid/租户收窄，无任何机制强制。一旦其中任一文件新增全库计数/全库存在性断言，即会静默依赖执行顺序——届时 [T10] 必须立即启动。**
+
+**已登记跟踪（LOW，不阻断，两个复审各自提出）**
+
+- **护栏残留会让 PG 套件「变砖」且不可自愈**：`test_postgres_reset.py` 是全仓唯一往真实 PG 写 `DEMO_EMAIL` 的测试，`finally` 兜住异常但**兜不住 SIGKILL/超时**。残留后果实测：`77 passed, 21 errors`——夹具的 setup reset 也被自己的护栏挡下，**重跑救不了自己**，只能人工一条 SQL 删。且报错信息只说「指向了常驻开发栈」，在这个场景是**误诊**。概率低（推荐工作流本就是一次性容器）、恢复成本一条 SQL，但诊断会绕远路。修法：报错信息补第三种成因，或让门禁用例改走可回滚路径。
+- **`test-mvp-profile.sh` 的约束只活在 docstring 里**：该脚本在同一个库上 `:212` 跑 demo_seed、`:439` 跑 PG 集成测试。那 3 个并发文件按**无过滤全库计数**断言、要求整库清理，**与已 seed 的栈根本不兼容**——只因今天 `:439` 只跑 `test_artifact_repository.py` 的 2 个用例（不在 4 个调用方里）才没炸。**该不兼容在 T9 之前就成立**（旧代码 `delete(UserRecord)` 一样清光 demo seed），T9 的护栏把「静默毁掉用户验收数据」变成「当场拒绝并指名道姓」，方向正确。将来有人往 `:439` 加用例**会炸——而这正是想要的**，它炸的是一个本来就不成立的组合。建议在 `:439` 就地加注释登记该约束。
+**❌ 本节禁止再写「当前已知失败：无 / 0」**——除非每一条都有归零证据。第 6 节此前长期声明「无」而与 3 条红线共存，已被认定为台账失真。（T8 规格复审在主代理准备「清零」时当场拦下并强制写入；[T9] 合入时保留。归零必须像上面那样逐条附证据与采集条件，而不是一个数字。）
+
+**已登记跟踪（LOW，T8 双复审发现）**：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** docstring 都写着「没有审批记录时返回 False/None，调用方走原有流程」，但调用方自 `b319bc2` 起就是 409 fail-closed，「原有流程」在代码中已死。规格复审用三重论证确认**无 fail-open 旁路**（调用链唯一收敛到 409；approve/reject 的 `approval_id` 恒非 None 故 raw 命令路径不可达；变异实测反证该 raise 是唯一出口），属注释腐烂，单开 docs-only 提交订正。
 
 **红线 1**：`infra/litellm/test_config.py::LiteLlmComposeContractTest::test_local_stub_override_is_test_only_and_not_published`
 

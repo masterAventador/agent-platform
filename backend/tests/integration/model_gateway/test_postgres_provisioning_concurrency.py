@@ -24,7 +24,7 @@ import pytest
 import pytest_asyncio
 from alembic import command as alembic_command
 from alembic.config import Config
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
@@ -32,7 +32,6 @@ from agent_platform.infrastructure.database.repositories.model_gateway import (
     ModelGatewayProvisioningCommandRecord,
     SqlAlchemyModelGatewayCommandStore,
     SqlAlchemyModelGatewayPolicyRepository,
-    TenantModelGatewayKeyRecord,
     TenantModelGatewayPolicyRecord,
 )
 from agent_platform.infrastructure.database.repositories.tenants import TenantRecord
@@ -46,6 +45,7 @@ from agent_platform.platform.model_gateway.ports import (
     ProvisioningCommandStatus,
     ReconcileOutcome,
 )
+from tests.fixtures.postgres_reset import reset_database
 
 BACKEND_ROOT = Path(__file__).parents[3]
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -70,19 +70,16 @@ def migrated_postgres_url() -> str:
 @pytest_asyncio.fixture
 async def session_factory(migrated_postgres_url: str) -> AsyncIterator[async_sessionmaker]:
     engine = create_async_engine(migrated_postgres_url)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    async with factory() as session:
-        for table in (
-            ModelGatewayProvisioningCommandRecord,
-            TenantModelGatewayKeyRecord,
-            TenantModelGatewayPolicyRecord,
-            UserRecord,
-            TenantRecord,
-        ):
-            await session.execute(delete(table))
-        await session.commit()
-    await engine.dispose()
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        # 用例前清理：本文件的断言按全库计数，必须不受前序测试文件残留影响。
+        await reset_database(engine)
+        yield factory
+        # 用例后清理：不把数据泄漏给后续测试文件。
+        await reset_database(engine)
+    finally:
+        # 收尾 reset 若抛错（如护栏拒绝、拿不到锁），engine 也必须释放。
+        await engine.dispose()
 
 
 async def _seed_tenant(factory: async_sessionmaker) -> tuple[UUID, UUID]:
