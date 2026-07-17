@@ -48,6 +48,10 @@ from agent_platform.infrastructure.database.repositories.runtime_ownership impor
     RuntimeOwnershipRecord,
 )
 from agent_platform.infrastructure.database.repositories.sandbox import SandboxLeaseRecord
+from agent_platform.infrastructure.database.repositories.scheduling import (
+    ScheduledTaskExecutionRecord,
+    ScheduledTaskRecord,
+)
 from agent_platform.infrastructure.database.repositories.skills import (
     SkillRecord,
     SkillVersionRecord,
@@ -98,6 +102,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     AccountTokenRecord,
     WorkflowRecord,
     WorkflowVersionRecord,
+    ScheduledTaskRecord,
+    ScheduledTaskExecutionRecord,
 )
 
 

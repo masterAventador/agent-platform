@@ -316,6 +316,10 @@ async def test_api_lifespan_runs_configuration_driven_audit_retention_sweep() ->
             auth_cookie_secure=False,
             audit_retention_days=1,
             audit_retention_sweep_interval_seconds=3600,
+            # 本用例只验证审计清扫。内存 SQLite 的所有 session 共享同一条连接
+            # （StaticPool），并发的后台循环会互相干扰；真实 PostgreSQL 下每个
+            # session 独占连接，两者并存已验证正常。关掉无关的调度循环保持隔离。
+            scheduler_enabled=False,
         ),
         session_factory=sessions,
         auth_rate_limiter=AllowAllRateLimiter(),

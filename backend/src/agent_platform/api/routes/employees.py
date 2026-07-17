@@ -61,7 +61,8 @@ class ModelSettings(GatewayModelReference):
 
 class EmployeeCapabilities(BaseModel):
     conversation: bool = True
-    scheduled_tasks: Literal[False] = False
+    # C12 起可真实开启：开启后该员工可被定时/预约任务调度。
+    scheduled_tasks: bool = False
     file_upload: bool = False
     memory: bool = False
 

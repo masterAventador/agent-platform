@@ -35,6 +35,7 @@ dependencies = [
     "uvicorn[standard]>=0.51.0",
     "docker==7.1.0",
     "qcloud-python-sts==3.1.6",
+    "cronsim>=2.6",
 ]
 
 [build-system]

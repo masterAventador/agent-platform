@@ -310,9 +310,10 @@ async def test_employee_is_not_visible_across_tenants(
 @pytest.mark.parametrize(
     ("work_mode", "scheduled_tasks", "file_upload"),
     [
+        # C12 起 autonomous + scheduled_tasks=True 是合法配置，不再列为不可运行；
+        # 流程/混合员工仍必须引用已注册工作流。
         ("workflow", False, False),
         ("hybrid", False, False),
-        ("autonomous", True, False),
     ],
 )
 @pytest.mark.asyncio
@@ -342,9 +343,10 @@ async def test_create_rejects_configuration_not_currently_runnable(
 @pytest.mark.parametrize(
     ("work_mode", "scheduled_tasks", "file_upload"),
     [
+        # C12 起 autonomous + scheduled_tasks=True 是合法配置，不再列为不可运行；
+        # 流程/混合员工仍必须引用已注册工作流。
         ("workflow", False, False),
         ("hybrid", False, False),
-        ("autonomous", True, False),
     ],
 )
 @pytest.mark.asyncio
@@ -387,7 +389,8 @@ def test_openapi_exposes_current_employee_write_contract(
     capabilities = schema["components"]["schemas"][capabilities_ref.rsplit("/", 1)[-1]]
 
     assert definition["properties"]["work_mode"]["const"] == "autonomous"
-    assert capabilities["properties"]["scheduled_tasks"]["const"] is False
+    # C12 起定时能力可真实开启，写契约不再把它钉死为 false。
+    assert capabilities["properties"]["scheduled_tasks"]["type"] == "boolean"
     assert capabilities["properties"]["file_upload"]["type"] == "boolean"
     assert capabilities["properties"]["conversation"]["type"] == "boolean"
 

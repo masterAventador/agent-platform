@@ -16,6 +16,7 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "cos-python-sdk-v5" },
+    { name = "cronsim" },
     { name = "deepagents" },
     { name = "docker" },
     { name = "email-validator" },
@@ -61,6 +62,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.18.5" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "cos-python-sdk-v5", specifier = ">=1.9.38" },
+    { name = "cronsim", specifier = ">=2.6" },
     { name = "deepagents", specifier = "==0.6.7" },
     { name = "docker", specifier = "==7.1.0" },
     { name = "email-validator", specifier = ">=2.3.0" },
@@ -522,6 +524,14 @@ name = "crcmod"
 version = "1.7"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6b/b0/e595ce2a2527e169c3bcd6c33d2473c1918e0b7f6826a043ca1245dd4e5b/crcmod-1.7.tar.gz", hash = "sha256:dc7051a0db5f2bd48665a990d3ec1cc305a466a77358ca4492826f41f283601e", size = 89670, upload-time = "2010-06-27T14:35:29.538Z" }
+
+[[package]]
+name = "cronsim"
+version = "2.7"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/1a/02f105147f7f2e06ed4f734ff5a6439590bb275a53dd91fc73df6312298a/cronsim-2.7-py3-none-any.whl", hash = "sha256:1e1431fa08c51dc7f72e67e571c7c7a09af26420169b607badd4ca9677ffad1e", size = 14213, upload-time = "2025-10-21T16:38:20.431Z" },
+]
 
 [[package]]
 name = "cryptography"
