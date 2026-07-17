@@ -109,11 +109,12 @@ def readiness() -> None:
 def chat() -> None:
     factory = LiteLLMChatModelFactory(
         base_url=SecretStr(BASE_URL),
-        api_key=SecretStr(API_KEY),
         timeout_seconds=20,
         max_retries=2,
     )
-    response = factory("general-purpose").invoke("ping")
+    # C16：凭据按调用传入（生产由 TenantGatewayCredentialResolver 按租户解析）。
+    # 本探针验证的是 ChatOpenAI -> LiteLLM -> stub 这条传输链路本身。
+    response = factory("general-purpose", SecretStr(API_KEY)).invoke("ping")
     if response.content != "local stub completion":
         raise SystemExit(f"unexpected ChatOpenAI response: {response.content!r}")
     print("Production worker ChatOpenAI -> LiteLLM -> stub passed")

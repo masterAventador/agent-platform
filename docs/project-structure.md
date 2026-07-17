@@ -116,7 +116,8 @@ backend/
 │       │   └── secrets/
 │       ├── observability/         # OpenTelemetry、日志和指标
 │       └── workers/               # Agent Worker 入口和任务消费
-│           └── main.py
+│           ├── main.py
+│           └── model_gateway_controller.py  # 模型网关 provisioning 对账进程
 ├── migrations/                    # Alembic 数据库迁移
 ├── tests/
 │   ├── unit/                      # 纯业务和组件单元测试
@@ -162,11 +163,11 @@ capabilities ──────┤
 - `infrastructure/` 实现数据库、缓存、存储、队列和密钥等技术接口，不能承载业务决策；
 - API 和 Worker 共用同一个 Python 包与数据库模型，不拆成两套仓库或复制两套领域模型；
 - 数字员工只保存 provider-neutral 模型 alias；供应商模型和密钥只进入独立 LiteLLM 配置，Worker 通过 `infrastructure/llm/` 访问网关。
-- 租户模型网关策略位于 `platform/model_gateway/`，SQLAlchemy policy/outbox 位于 `infrastructure/database/`；后续独立 Controller 通过公开接口消费 outbox 并对账 LiteLLM，本阶段不在 API 进程内伪装 Controller 行为。
+- 租户模型网关策略、Key 生命周期、对账决策与凭据派生位于 `platform/model_gateway/`，SQLAlchemy policy/key/outbox 位于 `infrastructure/database/`，LiteLLM 管理适配位于 `infrastructure/llm/provisioner.py`；独立 Controller 进程 `workers/model_gateway_controller.py` 通过公开接口消费 outbox 并对账 LiteLLM，API 进程内不做任何对账。
 
 ### 3.2 后端进程
 
-同一份 `backend/` 代码至少生成两个进程：
+同一份 `backend/` 代码至少生成以下进程：
 
 ```text
 API 进程
@@ -174,9 +175,13 @@ API 进程
 
 Worker 进程
 └── agent_platform.workers.main
+
+模型网关 Provisioning Controller 进程
+└── agent_platform.workers.model_gateway_controller
 ```
 
-二者独立构建镜像、独立配置副本数量，但使用相同版本的后端代码。
+各进程共享同一镜像与同一版本后端代码，但独立配置副本数量与生命周期。
+Controller 独立于 API 请求路径运行，是唯一持有 LiteLLM master key 的平台进程。
 
 ## 4. 前端工程结构
 

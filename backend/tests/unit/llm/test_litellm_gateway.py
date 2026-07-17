@@ -15,45 +15,57 @@ from agent_platform.infrastructure.llm.litellm import (
 def test_gateway_factory_builds_only_an_internal_openai_compatible_client() -> None:
     factory = LiteLLMChatModelFactory(
         base_url=SecretStr("http://litellm:4000/v1"),
-        api_key=SecretStr("internal-gateway-secret"),
         timeout_seconds=90,
         max_retries=3,
     )
 
-    model = factory("general-purpose")
+    # C16：凭据按租户传入，工厂本身不再持有任何共享 Key。
+    model = factory("general-purpose", SecretStr("sk-tenant-scoped-secret"))
 
     assert isinstance(model, ChatOpenAI)
     assert model.model_name == "general-purpose"
     assert model.openai_api_base == "http://litellm:4000/v1"
     assert model.openai_api_key is not None
-    assert model.openai_api_key.get_secret_value() == "internal-gateway-secret"
+    assert model.openai_api_key.get_secret_value() == "sk-tenant-scoped-secret"
     assert model.request_timeout == 90
     assert model.max_retries == 3
 
 
+def test_gateway_factory_issues_a_distinct_client_per_tenant_credential() -> None:
+    factory = LiteLLMChatModelFactory(
+        base_url=SecretStr("http://litellm:4000/v1"),
+        timeout_seconds=90,
+        max_retries=3,
+    )
+
+    first = factory("general-purpose", SecretStr("sk-tenant-one"))
+    second = factory("general-purpose", SecretStr("sk-tenant-two"))
+
+    assert first.openai_api_key is not None and second.openai_api_key is not None
+    assert first.openai_api_key.get_secret_value() == "sk-tenant-one"
+    assert second.openai_api_key.get_secret_value() == "sk-tenant-two"
+
+
 def test_gateway_factory_fails_closed_without_leaking_configuration() -> None:
-    secret = "gateway-secret-must-not-leak"
     with pytest.raises(ModelGatewayConfigurationError) as captured:
         LiteLLMChatModelFactory(
             base_url=SecretStr(
                 "https://user:password@litellm.example/v1?token=leak"
             ),
-            api_key=SecretStr(secret),
             timeout_seconds=90,
             max_retries=2,
         )
 
-    assert secret not in repr(captured.value)
     assert "password" not in repr(captured.value)
     assert "token" not in repr(captured.value)
 
+    factory = LiteLLMChatModelFactory(
+        base_url=SecretStr("http://litellm:4000/v1"),
+        timeout_seconds=90,
+        max_retries=2,
+    )
     with pytest.raises(ModelGatewayConfigurationError, match="gateway key"):
-        LiteLLMChatModelFactory(
-            base_url=SecretStr("http://litellm:4000/v1"),
-            api_key=SecretStr(""),
-            timeout_seconds=90,
-            max_retries=2,
-        )
+        factory("general-purpose", SecretStr(""))
 
 
 @pytest.mark.parametrize(

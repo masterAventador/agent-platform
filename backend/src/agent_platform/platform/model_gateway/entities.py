@@ -4,7 +4,11 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from agent_platform.platform.model_gateway.errors import InvalidModelGatewayPolicy
+from agent_platform.platform.model_gateway.errors import (
+    InvalidModelGatewayKey,
+    InvalidModelGatewayPolicy,
+    ModelGatewayKeyRotationInProgress,
+)
 from agent_platform.platform.models import DEFAULT_MODEL_ALIASES
 
 MAX_BUDGET_MICROUSD = 2**53 - 1
@@ -230,3 +234,128 @@ class TenantModelGatewayPolicy:
     def _validate_timestamp(value: datetime) -> None:
         if value.tzinfo is None or value.utcoffset() is None:
             raise InvalidModelGatewayPolicy("timestamps must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class TenantModelGatewayKey:
+    """租户虚拟 Key 的可归因/可撤销生命周期状态。
+
+    只保存版本号：Key 明文与其 SHA256 摘要都由 ``credentials`` 按
+    (服务端密钥, tenant_id, key_version) 现场派生，因此数据库里不存在任何由 Key 派生的
+    材料，只有持有服务端密钥的进程（Controller、Worker）才能得到凭据本身。
+
+    两个版本号承担**不同语义**，不可混用：
+
+    - ``key_version`` 是 desired：平台希望网关上存在的版本；
+    - ``provisioned_key_version`` 是 observed：Controller 已在真实网关确认存在且未被阻断的
+      版本，``None`` 表示网关侧当前没有可用 Key。**Worker 必须用它派生凭据**，因为它是
+      「网关侧真实存在」的唯一真相源；用 desired 派生会在对账窗口里拿到网关上还不存在的 Key。
+      它只能由真实对账的真实副作用写入，因此不可能被 Seed 或测试伪造成终态。
+
+    ``retired_key_version`` 是待 Controller 在真实网关删除的上一版本，未回收前禁止再次
+    轮换，避免旧版本 Key 在 LiteLLM 侧成为无人回收的孤儿。
+    """
+
+    tenant_id: UUID
+    key_version: int
+    retired_key_version: int | None
+    provisioned_key_version: int | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def issue(cls, *, tenant_id: UUID, now: datetime) -> "TenantModelGatewayKey":
+        return cls.restore(
+            tenant_id=tenant_id,
+            key_version=1,
+            retired_key_version=None,
+            # 尚未对账：网关侧还没有任何 Key。
+            provisioned_key_version=None,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def rotate(self, *, now: datetime) -> "TenantModelGatewayKey":
+        if self.retired_key_version is not None:
+            raise ModelGatewayKeyRotationInProgress
+        if self.key_version >= MAX_SIGNED_INT32:
+            raise InvalidModelGatewayKey("key version exhausted")
+        return TenantModelGatewayKey.restore(
+            tenant_id=self.tenant_id,
+            key_version=self.key_version + 1,
+            retired_key_version=self.key_version,
+            # 轮换只改 desired：新版本在网关上真实建立前，observed 必须保持不变，
+            # 否则轮换落库到对账完成之间会出现一个凭据真空期。
+            provisioned_key_version=self.provisioned_key_version,
+            created_at=self.created_at,
+            updated_at=now,
+        )
+
+    def reconciled(
+        self,
+        *,
+        provisioned: bool,
+        clear_retirement: bool,
+        now: datetime,
+    ) -> "TenantModelGatewayKey":
+        """记录一次真实对账的观测结果。
+
+        ``provisioned=False``（策略停用对账完成）必须清空 observed：此刻网关侧的 Key 已被
+        阻断，若继续声称可用，再启用的窗口里 Worker 会拿着 blocked Key 去撞 401。
+        """
+        return TenantModelGatewayKey.restore(
+            tenant_id=self.tenant_id,
+            key_version=self.key_version,
+            retired_key_version=None if clear_retirement else self.retired_key_version,
+            provisioned_key_version=self.key_version if provisioned else None,
+            created_at=self.created_at,
+            updated_at=now,
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        tenant_id: UUID,
+        key_version: int,
+        retired_key_version: int | None,
+        provisioned_key_version: int | None,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> "TenantModelGatewayKey":
+        if not isinstance(tenant_id, UUID):
+            raise InvalidModelGatewayKey("tenant_id must be a UUID")
+        checked_version = cls._validate_version(key_version)
+        checked_retired = (
+            None if retired_key_version is None else cls._validate_version(retired_key_version)
+        )
+        checked_provisioned = (
+            None
+            if provisioned_key_version is None
+            else cls._validate_version(provisioned_key_version)
+        )
+        if checked_retired is not None and checked_retired >= checked_version:
+            raise InvalidModelGatewayKey("retired key version must precede the active one")
+        if checked_provisioned is not None and checked_provisioned > checked_version:
+            raise InvalidModelGatewayKey(
+                "provisioned key version must not exceed the desired one"
+            )
+        for value in (created_at, updated_at):
+            if not isinstance(value, datetime) or value.tzinfo is None:
+                raise InvalidModelGatewayKey("timestamps must be timezone-aware")
+        if updated_at < created_at:
+            raise InvalidModelGatewayKey("updated_at must not precede created_at")
+        return cls(
+            tenant_id=tenant_id,
+            key_version=checked_version,
+            retired_key_version=checked_retired,
+            provisioned_key_version=checked_provisioned,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _validate_version(value: int) -> int:
+        if type(value) is not int or value <= 0 or value > MAX_SIGNED_INT32:
+            raise InvalidModelGatewayKey("key version must be a positive signed int32 value")
+        return value

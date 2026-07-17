@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.base import Base
@@ -22,6 +23,12 @@ from agent_platform.platform.knowledge.retrieval import (
     KnowledgeMetadataCondition,
     KnowledgeMetadataFilterCondition,
     KnowledgeRetrievalConfig,
+)
+from agent_platform.platform.model_gateway.errors import (
+    CorruptModelGatewayPolicy,
+    ModelGatewayCredentialNotReady,
+    ModelGatewayCredentialUnavailable,
+    ModelGatewayPolicyPersistenceError,
 )
 from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
@@ -415,32 +422,44 @@ def test_all_invalid_published_fields_are_permanent_preparation_errors(
         PublishedRuntimeCapabilities.from_definition(definition)
 
 
-def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_supports_provider_neutral_host_side_injection() -> None:
     fake_model = GenericFakeChatModel(messages=iter(["ok"]))
     resolver = PlatformModelResolver(injected_models={"general-purpose": fake_model})
 
     assert (
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
         is fake_model
     )
 
 
-def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_fails_fast_without_a_gateway_factory() -> None:
     resolver = PlatformModelResolver()
 
     with pytest.raises(ModelGatewayUnavailable, match="gateway"):
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="general-purpose"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
 
 
-def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
+@pytest.mark.asyncio
+async def test_model_resolver_rejects_an_alias_outside_the_platform_allowlist() -> None:
     factory_calls: list[str] = []
     model = GenericFakeChatModel(messages=iter(["ok"]))
     resolver = PlatformModelResolver(
-        model_factory=lambda alias: factory_calls.append(alias) or model
+        model_factory=lambda alias, api_key: factory_calls.append(alias) or model
     )
 
     with pytest.raises(ModelGatewayUnavailable, match="allowlist"):
-        resolver.resolve(PublishedModel(kind="gateway_alias", alias="unconfigured-alias"))
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="unconfigured-alias"),
+            tenant_id=uuid4(),
+        )
 
     assert factory_calls == []
 
@@ -1386,4 +1405,165 @@ async def test_deleted_tool_reference_still_fails_closed(session_factory) -> Non
         await resolver.resolve(
             run,
             autonomous_definition(tool_ids=[str(uuid4())]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_uses_the_tenant_attributable_key_not_a_shared_one() -> None:
+    """C16：Worker 必须按租户解析凭据，网关调用因此可归因到企业。"""
+    issued: list[tuple[str, str]] = []
+    model = GenericFakeChatModel(messages=iter(["ok"]))
+
+    class FakeCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            return SecretStr(f"sk-tenant-{tenant_id}")
+
+    def factory(alias: str, api_key: SecretStr) -> GenericFakeChatModel:
+        issued.append((alias, api_key.get_secret_value()))
+        return model
+
+    resolver = PlatformModelResolver(
+        model_factory=factory,
+        tenant_credentials=FakeCredentials(),
+    )
+    tenant_id = uuid4()
+
+    resolved = await resolver.resolve(
+        PublishedModel(kind="gateway_alias", alias="general-purpose"),
+        tenant_id=tenant_id,
+    )
+
+    assert resolved is model
+    assert issued == [("general-purpose", f"sk-tenant-{tenant_id}")]
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_fails_closed_when_the_tenant_has_no_credential() -> None:
+    """撤销/未对账的租户：绝不回退共享 Key，必须是永久性的受控准备失败。"""
+    factory_calls: list[str] = []
+
+    class RevokedCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayCredentialUnavailable("model_gateway_disabled")
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: factory_calls.append(alias),
+        tenant_credentials=RevokedCredentials(),
+    )
+
+    with pytest.raises(ModelGatewayUnavailable) as captured:
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+    assert isinstance(captured.value, PermanentRuntimePreparationError)
+    assert factory_calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_resolver_requires_tenant_credentials_in_production_assembly() -> None:
+    """没有装配租户凭据解析器时必须失败关闭，不得静默退回无归因调用。"""
+    resolver = PlatformModelResolver(model_factory=lambda alias, api_key: None)
+
+    with pytest.raises(ModelGatewayUnavailable):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_provisioning_in_progress_is_transient_not_a_permanent_definition_error() -> None:
+    """S2：pending 是秒级自愈的瞬态，必须交队列重投。
+
+    断言归类而不只是异常类型——只断言 `raises(ModelGatewayUnavailable)` 抓不到
+    「它 IS-A Permanent 因而让 Run 永久失败」这个真实缺陷。
+    """
+
+    class NotReadyCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayCredentialNotReady("model_gateway_provisioning_in_progress")
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=NotReadyCredentials(),
+    )
+
+    with pytest.raises(TransientRuntimePreparationError) as captured:
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+    assert not isinstance(captured.value, PermanentRuntimePreparationError)
+
+
+@pytest.mark.asyncio
+async def test_configuration_defects_stay_permanent_and_are_not_retried_forever() -> None:
+    """撤销/越权/对账确定失败属配置缺陷：重投永远不会好，必须永久失败。"""
+    for code in (
+        "model_gateway_disabled",
+        "model_gateway_alias_not_allowed",
+        "model_gateway_policy_not_provisioned",
+        "model_gateway_provisioning_failed",
+    ):
+
+        class RejectingCredentials:
+            def __init__(self, rejection: str) -> None:
+                self._rejection = rejection
+
+            async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+                raise ModelGatewayCredentialUnavailable(self._rejection)
+
+        resolver = PlatformModelResolver(
+            model_factory=lambda alias, api_key: None,
+            tenant_credentials=RejectingCredentials(code),
+        )
+
+        with pytest.raises(PermanentRuntimePreparationError) as captured:
+            await resolver.resolve(
+                PublishedModel(kind="gateway_alias", alias="general-purpose"),
+                tenant_id=uuid4(),
+            )
+        assert captured.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_database_jitter_during_credential_resolution_is_transient() -> None:
+    """M1：凭据解析的 DB 抖动此前裸逃逸出模型解析层，既非瞬态也非永久。"""
+
+    class FlakyCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayPolicyPersistenceError()
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=FlakyCredentials(),
+    )
+
+    with pytest.raises(TransientRuntimePreparationError):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_corrupt_persisted_policy_is_permanent_not_retried() -> None:
+    """数据损坏重投永远不会好：必须与 DB 抖动区分开。"""
+
+    class CorruptCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise CorruptModelGatewayPolicy()
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=CorruptCredentials(),
+    )
+
+    with pytest.raises(PermanentRuntimePreparationError):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
         )

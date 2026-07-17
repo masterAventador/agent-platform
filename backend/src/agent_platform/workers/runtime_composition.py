@@ -14,7 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue, SecretStr, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agent_platform.infrastructure.database.repositories.artifacts import (
@@ -68,6 +68,12 @@ from agent_platform.platform.knowledge.retrieval import (
     validate_knowledge_retrieval_config,
 )
 from agent_platform.platform.memory.entities import Memory, MemoryScope, MemorySource
+from agent_platform.platform.model_gateway.errors import (
+    CorruptModelGatewayPolicy,
+    ModelGatewayCredentialNotReady,
+    ModelGatewayCredentialUnavailable,
+    ModelGatewayPolicyPersistenceError,
+)
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -175,9 +181,19 @@ class UntrustedRuntimeDefinition(PermanentRuntimePreparationError):
 
 
 class ModelGatewayUnavailable(PermanentRuntimePreparationError):
-    """宿主进程没有可用的内部模型网关客户端。"""
+    """宿主进程或租户没有可用的模型网关凭据，且重投不会改变结果。
+
+    ``code`` 可覆盖为更精确的稳定原因码（已撤销 / alias 越权 / 对账确定失败等），它会随 Run
+    持久化：只报一个笼统的 model_gateway_unavailable 会让用户无从区分该找谁修。
+    这些码都是稳定标识，不含任何凭据材料。
+    """
 
     code = "model_gateway_unavailable"
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message or code or "")
+        if code is not None:
+            self.code = code
 
 
 class InvalidKnowledgeRuntimeResponse(PermanentRuntimePreparationError):
@@ -200,6 +216,18 @@ class KnowledgeRuntimeNotConfigured(PermanentRuntimePreparationError):
 
 class TransientRuntimePreparationError(RuntimeError):
     """运行时准备依赖暂时不可用；由队列重投递重试，消息不携带底层连接细节。"""
+
+
+class ModelGatewayProvisioningInProgress(TransientRuntimePreparationError):
+    """租户网关凭据正在对账中：Controller 秒级收敛，交队列重投。
+
+    这是**瞬态**而非永久：``policy.status`` 只是对账进度，不代表凭据不可用。任何一次策略
+    变更（哪怕只是改 rpm_limit）都会短暂进入 pending，判成永久会打死窗口内的每个 Run。
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class PublishedModel(GatewayModelReference):
@@ -354,21 +382,31 @@ class PublishedRuntimeCapabilities:
             raise UntrustedRuntimeDefinition("invalid published runtime definition") from None
 
 
+class TenantGatewayCredentials(Protocol):
+    async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr: ...
+
+
 class PlatformModelResolver:
-    """只解析 provider-neutral alias；凭据与路由留在宿主进程。"""
+    """只解析 provider-neutral alias；凭据按租户解析，路由留在宿主进程。
+
+    C16：网关凭据从应用级共享 Key 升级为租户专属虚拟 Key，因此解析需要 tenant_id。
+    宿主侧注入的测试模型（``injected_models``）不经过凭据解析——它们根本不触达网关。
+    """
 
     def __init__(
         self,
         *,
         injected_models: Mapping[str, BaseChatModel] | None = None,
-        model_factory: Callable[[str], BaseChatModel] | None = None,
+        model_factory: Callable[[str, SecretStr], BaseChatModel] | None = None,
+        tenant_credentials: TenantGatewayCredentials | None = None,
         allowed_aliases: frozenset[str] = DEFAULT_MODEL_ALIASES,
     ) -> None:
         self._injected_models = dict(injected_models or {})
         self._model_factory = model_factory
+        self._tenant_credentials = tenant_credentials
         self._allowed_aliases = allowed_aliases | self._injected_models.keys()
 
-    def resolve(self, model: PublishedModel) -> ResolvedModel:
+    async def resolve(self, model: PublishedModel, *, tenant_id: UUID) -> ResolvedModel:
         if model.alias not in self._allowed_aliases:
             raise ModelGatewayUnavailable("model alias is outside the platform allowlist")
         injected = self._injected_models.get(model.alias)
@@ -376,7 +414,28 @@ class PlatformModelResolver:
             return injected
         if self._model_factory is None:
             raise ModelGatewayUnavailable("model gateway factory is unavailable")
-        return self._model_factory(model.alias)
+        if self._tenant_credentials is None:
+            # 缺凭据解析器时宁可失败关闭：静默放行等于恢复不可归因的共享 Key 调用。
+            raise ModelGatewayUnavailable("tenant gateway credentials are unavailable")
+        try:
+            api_key = await self._tenant_credentials.resolve(
+                tenant_id=tenant_id, alias=model.alias
+            )
+        except ModelGatewayCredentialNotReady as error:
+            # 对账进行中：Controller 秒级收敛，交队列重投。判成永久会让「管理员改了个
+            # rpm_limit」这种事在对账窗口内打死每一个并发 Run。
+            raise ModelGatewayProvisioningInProgress(error.code) from None
+        except CorruptModelGatewayPolicy:
+            # 数据损坏：重投永远不会好。必须排在 PersistenceError 之前——它是其子类。
+            raise ModelGatewayUnavailable(code="corrupt_model_gateway_policy") from None
+        except ModelGatewayPolicyPersistenceError:
+            # 数据库瞬时抖动：不是配置缺陷，交队列重投。
+            raise TransientRuntimePreparationError(
+                "model gateway credential lookup is temporarily unavailable"
+            ) from None
+        except ModelGatewayCredentialUnavailable as error:
+            raise ModelGatewayUnavailable(code=error.code) from None
+        return self._model_factory(model.alias, api_key)
 
 
 AutonomousRuntimeFactory = Callable[
@@ -616,7 +675,9 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = self._model_resolver.resolve(capabilities.model)
+        model = await self._model_resolver.resolve(
+            capabilities.model, tenant_id=run.tenant_id
+        )
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,
@@ -658,7 +719,9 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = self._model_resolver.resolve(capabilities.model)
+        model = await self._model_resolver.resolve(
+            capabilities.model, tenant_id=run.tenant_id
+        )
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,

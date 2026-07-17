@@ -52,6 +52,11 @@ from agent_platform.infrastructure.database.repositories.employees import (
     EmployeeVersionRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    ModelGatewayProvisioningCommandRecord,
+    TenantModelGatewayKeyRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.skills import SkillRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
@@ -443,6 +448,108 @@ async def test_demo_seed_provides_representative_memories_idempotently(
     assert all(record.status == "active" for record in memories)
     contents = {record.content for record in memories}
     assert len(contents) == len(memories)
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_writes_desired_state_and_enqueues_a_real_reconcile_command(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """S1：Seed 只能写 desired，绝不能伪造 Controller 从未产生的终态。
+
+    此前 Seed 直接写 status=active + Key 行却从不入队命令 → Controller 永不对账 →
+    该 Key 在 LiteLLM 侧根本不存在 → 每个 Demo 员工 Run 必然 401。Seed 必须走真实
+    desired 写入路径，由真实 Controller 对账产生真实网关副作用。
+    """
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=MemoryArtifactStorage(),
+    )
+
+    async with session_factory() as session:
+        policy = await session.get(TenantModelGatewayPolicyRecord, DEMO_TENANT_ID)
+        key = await session.get(TenantModelGatewayKeyRecord, DEMO_TENANT_ID)
+        commands = (
+            (
+                await session.execute(
+                    select(ModelGatewayProvisioningCommandRecord).where(
+                        ModelGatewayProvisioningCommandRecord.tenant_id == DEMO_TENANT_ID
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert policy is not None
+    assert policy.enabled is True
+    assert policy.allowed_aliases == ["general-purpose"]
+    # 状态只能由 Controller 真实对账推进：Seed 不得写终态
+    assert policy.status == "pending"
+    # 必须有一条真实待对账命令，否则 Controller 永不被触发
+    assert len(commands) == 1
+    assert commands[0].status == "pending"
+    assert commands[0].desired_revision == policy.revision
+    assert commands[0].action == "reconcile"
+    # Key 行由 Controller 首次认领时创建；Seed 不得代劳、更不得伪造 provisioned
+    assert key is None
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_gateway_policy_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = MemoryArtifactStorage()
+    for _ in range(2):
+        await seed_demo_data(
+            session_factory=session_factory,
+            database_url=ALLOWED_DEMO_DATABASE_URL,
+            environment="development",
+            artifact_storage=storage,
+        )
+
+    async with session_factory() as session:
+        policies = (
+            (await session.execute(select(TenantModelGatewayPolicyRecord))).scalars().all()
+        )
+        keys = (
+            (await session.execute(select(TenantModelGatewayKeyRecord))).scalars().all()
+        )
+    assert len(policies) == 1
+    assert len(keys) == 0
+    assert policies[0].revision == 1
+    async with session_factory() as session:
+        commands = (
+            (await session.execute(select(ModelGatewayProvisioningCommandRecord)))
+            .scalars()
+            .all()
+        )
+    # 重放 Seed 不得重复入队命令
+    assert len(commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_demo_seed_never_marks_a_gateway_key_provisioned(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """provisioned_key_version 是「网关侧真实存在」的唯一真相源。
+
+    它只能由真实对账的真实副作用写入。Seed 若能伪造它，S1 就会以另一种形式复发。
+    """
+    await seed_demo_data(
+        session_factory=session_factory,
+        database_url=ALLOWED_DEMO_DATABASE_URL,
+        environment="development",
+        artifact_storage=MemoryArtifactStorage(),
+    )
+
+    async with session_factory() as session:
+        keys = (
+            (await session.execute(select(TenantModelGatewayKeyRecord))).scalars().all()
+        )
+
+    assert [key.provisioned_key_version for key in keys] == []
 
 
 @pytest.mark.asyncio

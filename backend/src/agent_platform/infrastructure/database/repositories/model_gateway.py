@@ -13,23 +13,37 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    delete,
+    or_,
     select,
+    tuple_,
     update,
 )
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Mapped, aliased, mapped_column
 
 from agent_platform.infrastructure.database.base import Base
-from agent_platform.platform.model_gateway.entities import TenantModelGatewayPolicy
+from agent_platform.platform.model_gateway.entities import (
+    TenantModelGatewayKey,
+    TenantModelGatewayPolicy,
+)
 from agent_platform.platform.model_gateway.errors import (
     CorruptModelGatewayPolicy,
+    InvalidModelGatewayKey,
     InvalidModelGatewayPolicy,
+    ModelGatewayKeyRotationInProgress,
     ModelGatewayPolicyPersistenceError,
     ModelGatewayPolicyRevisionConflict,
 )
-from agent_platform.platform.model_gateway.ports import ModelGatewayProvisioningAction
+from agent_platform.platform.model_gateway.ports import (
+    ClaimedProvisioningCommand,
+    ModelGatewayProvisioningAction,
+    ProvisioningCommandStatus,
+    ProvisioningHandler,
+    ReconcileOutcome,
+)
 
 
 class TenantModelGatewayPolicyRecord(Base):
@@ -85,13 +99,302 @@ class ModelGatewayProvisioningCommandRecord(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         UniqueConstraint("tenant_id", "desired_revision", "action"),
         CheckConstraint("action = 'reconcile'"),
-        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed')"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="ck_model_gateway_provisioning_commands_status",
+        ),
         CheckConstraint("desired_revision > 0"),
         CheckConstraint("attempts >= 0"),
     )
+
+
+class TenantModelGatewayKeyRecord(Base):
+    __tablename__ = "tenant_model_gateway_keys"
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    key_version: Mapped[int] = mapped_column(Integer)
+    retired_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 网关侧真实存在且可用的版本（observed）；NULL = 网关上当前没有可用 Key。
+    provisioned_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("key_version > 0"),
+        CheckConstraint(
+            "retired_key_version IS NULL OR "
+            "(retired_key_version > 0 AND retired_key_version < key_version)"
+        ),
+        CheckConstraint(
+            "provisioned_key_version IS NULL OR "
+            "(provisioned_key_version > 0 AND provisioned_key_version <= key_version)",
+            name="ck_tenant_model_gateway_keys_provisioned_version",
+        ),
+    )
+
+
+class SqlAlchemyModelGatewayKeyRepository:
+    """租户 Key 版本的只读访问（Worker 用它派生本租户凭据）。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, tenant_id: UUID) -> TenantModelGatewayKey | None:
+        try:
+            record = await self._session.get(TenantModelGatewayKeyRecord, tenant_id)
+        except SQLAlchemyError:
+            raise ModelGatewayPolicyPersistenceError from None
+        if record is None:
+            return None
+        try:
+            return SqlAlchemyModelGatewayCommandStore._key_to_entity(record)
+        except InvalidModelGatewayKey:
+            raise CorruptModelGatewayPolicy from None
+
+
+class SqlAlchemyModelGatewayCommandStore:
+    """按租户串行、跨副本独占的 provisioning outbox 认领与结算。
+
+    认领事务横跨真实网关调用：崩溃/断连时行锁自动释放、命令仍为 pending，由任意副本
+    自然重入，因此不需要额外的 processing 租约与超时回收。对账调用本身有超时上限，
+    锁持有时间因此有界。
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def process_next(self, handler: ProvisioningHandler, *, now: datetime) -> bool:
+        async with self._session_factory() as session:
+            try:
+                record = await self._claim(session, now=now)
+                if record is None:
+                    return False
+                key_record = await self._ensure_key(session, tenant_id=record.tenant_id, now=now)
+                policy = await self._load_policy(session, tenant_id=record.tenant_id)
+                if policy is None:
+                    # 策略行随租户级联删除，命令是孤儿：直接结算，不做任何网关调用。
+                    record.status = ProvisioningCommandStatus.FAILED.value
+                    record.last_error_code = "model_gateway_policy_not_found"
+                    record.processed_at = now
+                    await session.commit()
+                    return True
+                claimed = ClaimedProvisioningCommand(
+                    command_id=record.id,
+                    tenant_id=record.tenant_id,
+                    desired_revision=record.desired_revision,
+                    action=ModelGatewayProvisioningAction(record.action),
+                    attempts=record.attempts,
+                    policy=policy,
+                    key=self._key_to_entity(key_record),
+                )
+                outcome = await handler(claimed)
+                await self._apply(
+                    session,
+                    record=record,
+                    key_record=key_record,
+                    claimed=claimed,
+                    outcome=outcome,
+                    now=now,
+                )
+                await session.commit()
+                return True
+            except SQLAlchemyError:
+                await session.rollback()
+                raise ModelGatewayPolicyPersistenceError from None
+            except BaseException:
+                # 含取消：不留半提交状态，命令保持 pending 待重入。
+                await session.rollback()
+                raise
+
+    async def prune_settled(self, *, older_than: datetime, limit: int) -> int:
+        if limit <= 0:
+            return 0
+        async with self._session_factory() as session:
+            try:
+                stale = (
+                    (
+                        await session.execute(
+                            select(ModelGatewayProvisioningCommandRecord.id)
+                            .where(
+                                ModelGatewayProvisioningCommandRecord.status.in_(
+                                    (
+                                        ProvisioningCommandStatus.COMPLETED.value,
+                                        ProvisioningCommandStatus.FAILED.value,
+                                    )
+                                ),
+                                ModelGatewayProvisioningCommandRecord.processed_at.is_not(None),
+                                ModelGatewayProvisioningCommandRecord.processed_at < older_than,
+                            )
+                            .limit(limit)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not stale:
+                    return 0
+                result = cast(
+                    CursorResult[tuple[object, ...]],
+                    await session.execute(
+                        delete(ModelGatewayProvisioningCommandRecord).where(
+                            ModelGatewayProvisioningCommandRecord.id.in_(stale)
+                        )
+                    ),
+                )
+                await session.commit()
+                return result.rowcount
+            except SQLAlchemyError:
+                await session.rollback()
+                raise ModelGatewayPolicyPersistenceError from None
+
+    @staticmethod
+    async def _claim(
+        session: AsyncSession,
+        *,
+        now: datetime,
+    ) -> ModelGatewayProvisioningCommandRecord | None:
+        earlier = aliased(ModelGatewayProvisioningCommandRecord)
+        # 按租户串行：只认领本租户最早的一条 pending 命令。否则 rev1(enabled)/rev2(disabled)
+        # 可能被两个副本并发对账，网关终态取决于调用交错。
+        # 租户内以 desired_revision 定序而不是 id：同一毫秒写入的两个 revision 有相同的
+        # created_at，用随机 uuid 兜底会让 rev2 抢在 rev1 前对账。
+        blocked_by_earlier = (
+            select(earlier.id)
+            .where(
+                earlier.tenant_id == ModelGatewayProvisioningCommandRecord.tenant_id,
+                earlier.status == ProvisioningCommandStatus.PENDING.value,
+                tuple_(earlier.created_at, earlier.desired_revision)
+                < tuple_(
+                    ModelGatewayProvisioningCommandRecord.created_at,
+                    ModelGatewayProvisioningCommandRecord.desired_revision,
+                ),
+            )
+            .exists()
+        )
+        result = await session.execute(
+            select(ModelGatewayProvisioningCommandRecord)
+            .where(
+                ModelGatewayProvisioningCommandRecord.status
+                == ProvisioningCommandStatus.PENDING.value,
+                or_(
+                    ModelGatewayProvisioningCommandRecord.next_attempt_at.is_(None),
+                    ModelGatewayProvisioningCommandRecord.next_attempt_at <= now,
+                ),
+                ~blocked_by_earlier,
+            )
+            .order_by(
+                ModelGatewayProvisioningCommandRecord.created_at,
+                ModelGatewayProvisioningCommandRecord.desired_revision,
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def _ensure_key(
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+        now: datetime,
+    ) -> TenantModelGatewayKeyRecord:
+        record = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+        if record is not None:
+            return record
+        issued = TenantModelGatewayKey.issue(tenant_id=tenant_id, now=now)
+        record = TenantModelGatewayKeyRecord(
+            tenant_id=issued.tenant_id,
+            key_version=issued.key_version,
+            retired_key_version=issued.retired_key_version,
+            provisioned_key_version=issued.provisioned_key_version,
+            created_at=issued.created_at,
+            updated_at=issued.updated_at,
+        )
+        session.add(record)
+        await session.flush()
+        return record
+
+    @staticmethod
+    async def _load_policy(
+        session: AsyncSession,
+        *,
+        tenant_id: UUID,
+    ) -> TenantModelGatewayPolicy | None:
+        record = await session.get(TenantModelGatewayPolicyRecord, tenant_id)
+        try:
+            return SqlAlchemyModelGatewayPolicyRepository._to_entity(record)
+        except InvalidModelGatewayPolicy:
+            raise CorruptModelGatewayPolicy from None
+
+    @staticmethod
+    async def _apply(
+        session: AsyncSession,
+        *,
+        record: ModelGatewayProvisioningCommandRecord,
+        key_record: TenantModelGatewayKeyRecord,
+        claimed: ClaimedProvisioningCommand,
+        outcome: ReconcileOutcome,
+        now: datetime,
+    ) -> None:
+        record.attempts += 1
+        record.last_error_code = outcome.error_code
+        record.status = outcome.command_status.value
+        if outcome.command_status is ProvisioningCommandStatus.PENDING:
+            record.next_attempt_at = outcome.next_attempt_at
+            return
+        record.next_attempt_at = None
+        record.processed_at = now
+        if outcome.key_provisioned is not None:
+            # 只有真实对账观测到网关状态时才更新 observed 版本。
+            #
+            # 这里刻意用 claimed.key（本次实际对账的那个快照）而不是可能已被并发轮换改写的
+            # key_record：写入的是「我们在网关上观测到了什么」，因此不受 desired 的 revision
+            # CAS 约束——观测是事实，不是结论。同理，只有当我们对账的那个快照本身带着待回收
+            # 版本时才清空它；若并发轮换在对账期间新写入了 retired，那属于下一条命令的职责，
+            # 抹掉它会让旧版本 Key 在网关侧永远无人回收。
+            settled = claimed.key.reconciled(
+                provisioned=outcome.key_provisioned,
+                clear_retirement=outcome.clear_key_retirement,
+                now=now,
+            )
+            key_record.provisioned_key_version = settled.provisioned_key_version
+            if outcome.clear_key_retirement and claimed.key.retired_key_version is not None:
+                key_record.retired_key_version = settled.retired_key_version
+            key_record.updated_at = settled.updated_at
+        if outcome.policy_status is None:
+            return
+        # revision CAS：对账期间 desired 若已前进，旧结论必须整体丢弃，绝不能把旧
+        # revision 的对账结果写成新 desired 的状态（否则 disabled 会被写成 active）。
+        await session.execute(
+            update(TenantModelGatewayPolicyRecord)
+            .where(
+                TenantModelGatewayPolicyRecord.tenant_id == claimed.tenant_id,
+                TenantModelGatewayPolicyRecord.revision == claimed.desired_revision,
+            )
+            .values(status=outcome.policy_status.value)
+        )
+
+    @staticmethod
+    def _key_to_entity(record: TenantModelGatewayKeyRecord) -> TenantModelGatewayKey:
+        return TenantModelGatewayKey.restore(
+            tenant_id=record.tenant_id,
+            key_version=record.key_version,
+            retired_key_version=record.retired_key_version,
+            provisioned_key_version=record.provisioned_key_version,
+            created_at=SqlAlchemyModelGatewayPolicyRepository._as_utc(record.created_at),
+            updated_at=SqlAlchemyModelGatewayPolicyRepository._as_utc(record.updated_at),
+        )
 
 
 class SqlAlchemyModelGatewayPolicyRepository:
@@ -170,6 +473,51 @@ class SqlAlchemyModelGatewayPolicyRepository:
             except SQLAlchemyError:
                 raise ModelGatewayPolicyPersistenceError from None
             raise ModelGatewayPolicyPersistenceError from None
+        except SQLAlchemyError:
+            await self._session.rollback()
+            raise ModelGatewayPolicyPersistenceError from None
+
+    async def get_key(self, tenant_id: UUID) -> TenantModelGatewayKey | None:
+        return await SqlAlchemyModelGatewayKeyRepository(self._session).get(tenant_id)
+
+    async def save_rotated_key(
+        self,
+        policy: TenantModelGatewayPolicy,
+        *,
+        key: TenantModelGatewayKey,
+        expected_revision: int,
+        action: ModelGatewayProvisioningAction,
+    ) -> None:
+        """同一事务内递增 Key 版本 + 推进 desired revision + 入队对账命令。
+
+        三者必须原子：只写其中一部分会让网关侧与 desired 永久不一致（例如版本已递增
+        但没有命令去创建新 Key，租户会一直用不存在的凭据）。
+        """
+        try:
+            result = cast(
+                CursorResult[tuple[object, ...]],
+                await self._session.execute(
+                    update(TenantModelGatewayKeyRecord)
+                    .where(
+                        TenantModelGatewayKeyRecord.tenant_id == key.tenant_id,
+                        TenantModelGatewayKeyRecord.key_version == key.key_version - 1,
+                        TenantModelGatewayKeyRecord.retired_key_version.is_(None),
+                    )
+                    .values(
+                        key_version=key.key_version,
+                        retired_key_version=key.retired_key_version,
+                        updated_at=key.updated_at,
+                    )
+                ),
+            )
+            if result.rowcount != 1:
+                await self._session.rollback()
+                raise ModelGatewayKeyRotationInProgress
+            await self.save_desired(
+                policy,
+                expected_revision=expected_revision,
+                action=action,
+            )
         except SQLAlchemyError:
             await self._session.rollback()
             raise ModelGatewayPolicyPersistenceError from None

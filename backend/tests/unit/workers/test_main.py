@@ -10,9 +10,14 @@ from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.base import Base
 from agent_platform.infrastructure.database.models import load_database_models
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    TenantModelGatewayKeyRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runtime_ownership import (
     RuntimeOwnershipBusy,
 )
+from agent_platform.platform.model_gateway.credentials import derive_tenant_gateway_key
 from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
 from agent_platform.workers import main as worker_main_module
@@ -28,7 +33,9 @@ from agent_platform.workers.main import (
 )
 from agent_platform.workers.run_worker import WorkerFenced
 from agent_platform.workers.runtime_composition import (
+    ModelGatewayUnavailable,
     PermanentRuntimePreparationError,
+    PublishedModel,
     TransientRuntimePreparationError,
 )
 
@@ -308,6 +315,38 @@ def test_worker_configuration_error_never_leaks_the_gateway_url() -> None:
     assert "gateway-url-secret" not in rendered_error
 
 
+def _seed_active_gateway_state(session, *, tenant_id, user_id) -> None:
+    now = datetime.now(UTC)
+    session.add(
+        TenantModelGatewayPolicyRecord(
+            tenant_id=tenant_id,
+            enabled=True,
+            allowed_aliases=["general-purpose"],
+            budget_microusd=1_000_000,
+            budget_period="monthly",
+            rpm_limit=60,
+            tpm_limit=100_000,
+            max_parallel_requests=4,
+            revision=1,
+            status="active",
+            created_at=now,
+            updated_at=now,
+            updated_by=user_id,
+        )
+    )
+    session.add(
+        TenantModelGatewayKeyRecord(
+            tenant_id=tenant_id,
+            key_version=1,
+            retired_key_version=None,
+            # 模拟 Controller 已完成一次真实对账：网关侧 v1 存在且可用
+            provisioned_key_version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
 @pytest.mark.asyncio
 async def test_production_worker_assembly_wires_knowledge_runtime_for_bound_employees() -> None:
     """生产装配路径必须注入知识 Provider：RAGFlow 不可达时是瞬态失败，而非永久定义错误。"""
@@ -344,6 +383,9 @@ async def test_production_worker_assembly_wires_knowledge_runtime_for_bound_empl
                 created_at=datetime.now(UTC),
             )
         )
+        # C16：Worker 对没有已对账网关策略的租户失败关闭，此处补齐 desired 状态，
+        # 让用例仍然验证知识 Provider 装配而不是被网关门禁提前拦下。
+        _seed_active_gateway_state(session, tenant_id=run.tenant_id, user_id=run.created_by)
         await session.commit()
 
     try:
@@ -482,3 +524,51 @@ async def test_run_worker_service_configures_audit_hashing_at_startup() -> None:
         await run_worker_service(runtime_resolver=None)
 
     assert active_audit_hasher() is not None
+
+
+@pytest.mark.asyncio
+async def test_production_worker_assembly_wires_tenant_attributable_gateway_credentials() -> None:
+    """C16：生产 Worker 装配路径必须按租户解析网关凭据，绝不回退应用级共享 Key。
+
+    C07（knowledge_provider_registry 从未注入）与 C13（worker 从未装配审计 HMAC）都是
+    生产装配缺口，本用例直接背书 _build_runtime_resolver 的真实装配。
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    load_database_models()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    settings = AppSettings(
+        sandbox_controller_secret="sandbox-secret-16chars",
+        model_gateway_key_secret="a-strong-model-gateway-key-secret-000001",
+    )
+    resolver = _build_runtime_resolver(settings=settings, session_factory=session_factory)
+    tenant_id, user_id = uuid4(), uuid4()
+    async with session_factory() as session:
+        _seed_active_gateway_state(session, tenant_id=tenant_id, user_id=user_id)
+        await session.commit()
+
+    try:
+        model_resolver = resolver._model_resolver
+        resolved = await model_resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=tenant_id,
+        )
+        assert resolved.openai_api_key is not None
+        # 该 Key 必须与 Controller 用同一派生函数得到的租户 Key 完全一致（跨进程一致性）
+        assert resolved.openai_api_key.get_secret_value() == derive_tenant_gateway_key(
+            secret=settings.model_gateway_key_secret,
+            tenant_id=tenant_id,
+            key_version=1,
+        ).get_secret_value()
+
+        # 没有策略的租户：生产装配必须失败关闭，而不是退回共享 Key
+        with pytest.raises(ModelGatewayUnavailable) as captured:
+            await model_resolver.resolve(
+                PublishedModel(kind="gateway_alias", alias="general-purpose"),
+                tenant_id=uuid4(),
+            )
+        assert captured.value.code == "model_gateway_policy_not_provisioned"
+    finally:
+        await resolver.aclose()
+        await engine.dispose()

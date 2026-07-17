@@ -27,6 +27,12 @@ x-backend-environment: &backend-environment
   AGENT_PLATFORM_COS_SECRET_ID: ${TEST_COS_SECRET_ID:-}
   AGENT_PLATFORM_COS_SECRET_KEY: ${TEST_COS_SECRET_KEY:-}
 
+# C16 租户网关 Key 派生密钥：能签发任意租户的虚拟 Key，因此按最小权限只发给真正需要它的
+# 两个进程——Controller（签发/轮换/撤销）与 Worker（派生本租户 Key 发起推理）。
+# api / dispatcher / sandbox-janitor 都不需要它，绝不放进共享 backend environment 锚点。
+x-model-gateway-key-secret: &model-gateway-key-secret
+  AGENT_PLATFORM_MODEL_GATEWAY_KEY_SECRET: ${MODEL_GATEWAY_KEY_SECRET:-agent-platform-insecure-dev-model-gateway-key-secret}
+
 x-host-gateway: &host-gateway
   - host.docker.internal:host-gateway
 
@@ -96,7 +102,7 @@ services:
     image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
     command: ["python", "-m", "agent_platform.workers.main"]
     environment:
-      <<: *backend-environment
+      <<: [*backend-environment, *model-gateway-key-secret]
       AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-worker
       AGENT_PLATFORM_WORKER_REPLICAS: "1"
       AGENT_PLATFORM_QUEUE_PENDING_MIN_IDLE_MS: ${AGENT_PLATFORM_QUEUE_PENDING_MIN_IDLE_MS:-1000}
@@ -119,6 +125,34 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "test", "-f", "/tmp/agent-platform-worker-ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    restart: "no"
+
+  # C16 模型网关 Provisioning Controller：独立于 API 请求路径的常驻对账进程。
+  # 它是唯一持有 LiteLLM master key 的平台进程（API/Worker 都不持有）。
+  model-gateway-controller:
+    profiles: ["worker"]
+    build: *backend-build
+    image: ${PLATFORM_BACKEND_IMAGE:-agent-platform-backend:local}
+    command: ["python", "-m", "agent_platform.workers.model_gateway_controller"]
+    environment:
+      <<: [*backend-environment, *model-gateway-key-secret]
+      AGENT_PLATFORM_OTEL_SERVICE_NAME: agent-platform-model-gateway-controller
+      AGENT_PLATFORM_MODEL_GATEWAY_CONTROLLER_REPLICAS: "1"
+      AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_URL: ${AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_URL:-http://litellm:4000}
+      AGENT_PLATFORM_MODEL_GATEWAY_ADMIN_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      AGENT_PLATFORM_MODEL_GATEWAY_CONTROLLER_INTERVAL_SECONDS: ${MODEL_GATEWAY_CONTROLLER_INTERVAL_SECONDS:-2}
+      AGENT_PLATFORM_MODEL_GATEWAY_COMMAND_RETENTION_DAYS: ${MODEL_GATEWAY_COMMAND_RETENTION_DAYS:-7}
+    extra_hosts: *host-gateway
+    networks: [core, llm]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/agent-platform-model-gateway-controller-ready"]
       interval: 5s
       timeout: 2s
       retries: 10

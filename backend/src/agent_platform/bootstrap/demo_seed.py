@@ -9,10 +9,12 @@ from hashlib import sha256
 from typing import cast
 from uuid import UUID, uuid5
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Mapper
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
@@ -35,6 +37,10 @@ from agent_platform.infrastructure.database.repositories.invitations import (
     TenantInvitationRecord,
 )
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
+from agent_platform.infrastructure.database.repositories.model_gateway import (
+    ModelGatewayProvisioningCommandRecord,
+    TenantModelGatewayPolicyRecord,
+)
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.scheduling import (
     ScheduledTaskExecutionRecord,
@@ -114,6 +120,12 @@ DEMO_ONCE_SCHEDULED_TASK_ID = uuid5(_DEMO_NAMESPACE, "scheduled-task-once")
 DEMO_SCHEDULED_EXECUTION_ID = uuid5(_DEMO_NAMESPACE, "scheduled-task-execution")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 DEMO_VIDEO_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "video-studio-entitlement")
+# C16 模型网关：Demo 租户的 desired 策略与已签发 Key 版本（Key 明文不落库，由派生得到）。
+DEMO_GATEWAY_BUDGET_MICROUSD = 50_000_000
+DEMO_GATEWAY_RPM_LIMIT = 60
+DEMO_GATEWAY_TPM_LIMIT = 200_000
+DEMO_GATEWAY_MAX_PARALLEL_REQUESTS = 4
+DEMO_GATEWAY_COMMAND_ID = uuid5(_DEMO_NAMESPACE, "model-gateway-reconcile-command")
 DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
 DEMO_APPROVED_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "approved-approval")
 DEMO_APPROVED_APPROVAL_INVOCATION_ID = uuid5(_DEMO_NAMESPACE, "approved-approval-invocation")
@@ -213,6 +225,8 @@ type DemoRecord = (
     | MemoryRecord
     | WorkflowRecord
     | WorkflowVersionRecord
+    | TenantModelGatewayPolicyRecord
+    | ModelGatewayProvisioningCommandRecord
 )
 
 
@@ -311,8 +325,13 @@ async def _upsert_record(
     desired: DemoRecord,
     mutable_fields: tuple[str, ...],
 ) -> tuple[bool, bool]:
-    identity = desired.event_id if isinstance(desired, RunEventRecord) else desired.id
-    existing = cast(DemoRecord | None, await session.get(type(desired), identity))
+    # 主键名逐表不同（id / event_id / tenant_id），统一从 mapper 取，避免逐个特判。
+    mapper = cast(Mapper[DemoRecord], sa_inspect(type(desired)))
+    identity = mapper.primary_key_from_instance(desired)
+    existing = cast(
+        DemoRecord | None,
+        await session.get(type(desired), identity[0] if len(identity) == 1 else tuple(identity)),
+    )
     if existing is None and isinstance(desired, ToolVersionRecord):
         # 迁移回填可能已用随机 id 建立了同 (tool_id, version) 的行；
         # Seed 必须按业务唯一键收编该行，避免撞 uq_tool_versions_number。
@@ -437,6 +456,52 @@ def _demo_records(
                 created_at=_DEMO_CREATED_AT,
             ),
             ("name", "slug"),
+        ),
+        (
+            TenantModelGatewayPolicyRecord(
+                tenant_id=DEMO_TENANT_ID,
+                enabled=True,
+                allowed_aliases=["general-purpose"],
+                budget_microusd=DEMO_GATEWAY_BUDGET_MICROUSD,
+                budget_period="monthly",
+                rpm_limit=DEMO_GATEWAY_RPM_LIMIT,
+                tpm_limit=DEMO_GATEWAY_TPM_LIMIT,
+                max_parallel_requests=DEMO_GATEWAY_MAX_PARALLEL_REQUESTS,
+                revision=1,
+                # Seed 只声明 desired。status 与 Key 行都由真实 Controller 对账产生：
+                # 伪造终态会得到一个网关侧根本不存在的 Key，每个 Demo Run 必然 401。
+                status="pending",
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+                updated_by=DEMO_USER_ID,
+            ),
+            # status 不可变：它归 Controller 独占，重放 Seed 不得把已对账的状态推回 pending。
+            (
+                "enabled",
+                "allowed_aliases",
+                "budget_microusd",
+                "budget_period",
+                "rpm_limit",
+                "tpm_limit",
+                "max_parallel_requests",
+            ),
+        ),
+        (
+            # 与策略同事务入队的真实对账命令——没有它 Controller 永远不会被触发。
+            ModelGatewayProvisioningCommandRecord(
+                id=DEMO_GATEWAY_COMMAND_ID,
+                tenant_id=DEMO_TENANT_ID,
+                desired_revision=1,
+                action="reconcile",
+                status="pending",
+                attempts=0,
+                last_error_code=None,
+                created_at=_DEMO_CREATED_AT,
+                processed_at=None,
+                next_attempt_at=None,
+            ),
+            # 全部字段归 Controller：重放 Seed 不得把已结算的命令重置回 pending。
+            (),
         ),
         (
             CapabilityEntitlementRecord(

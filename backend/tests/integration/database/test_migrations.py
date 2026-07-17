@@ -373,13 +373,15 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "last_error_code",
         "created_at",
         "processed_at",
+        "next_attempt_at",
     } == provisioning_columns
     assert ("tenants", "tenant_id", "id", "CASCADE") in policy_foreign_keys
     assert ("users", "updated_by", "id", "RESTRICT") in policy_foreign_keys
     assert ("tenants", "tenant_id", "id", "CASCADE") in provisioning_foreign_keys
     assert provisioning_unique_columns == ("tenant_id", "desired_revision", "action")
     assert "action = 'reconcile'" in provisioning_table_sql
-    assert "status IN ('pending', 'processing', 'completed', 'failed')" in provisioning_table_sql
+    # 'processing' 属已废弃方案的残留口子（枚举里从来没有），0037 已移除
+    assert "status IN ('pending', 'completed', 'failed')" in provisioning_table_sql
     assert {
         "id",
         "tenant_id",
@@ -743,9 +745,64 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     # 合入后单头，链：…0030(审批)→0031(video)→0032(crc64)→0033(workflow)
-    # →0034(account)→0035(定时任务)。
+    # →0034(account)→0035(定时任务)→0036(网关 Key)→0037(provisioned)。
+    # C12 先合入保留 0035；C16 的 0036 由主代理合并时从 0034 重链至 0035。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0035"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0037"
+
+
+def test_model_gateway_key_migration_creates_and_removes_the_credential_table(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "model-gateway-keys.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(tenant_model_gateway_keys)"
+            ).fetchall()
+        }
+        command_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+    assert columns == {
+        "tenant_id",
+        "key_version",
+        "retired_key_version",
+        # 网关侧真实存在性的唯一真相源：只由 Controller 真实对账写入
+        "provisioned_key_version",
+        "created_at",
+        "updated_at",
+    }
+    # Key 明文与摘要都绝不落库：本表只有版本号，不含任何由凭据派生的列。
+    assert not {"key", "raw_key", "secret", "api_key", "key_digest"} & columns
+    # 有界退避需要持久化下次可尝试时间，否则网关宕机时会变成热轮询。
+    assert "next_attempt_at" in command_columns
+
+    # 重链后 0036 接 0035（C12 定时任务），故降级目标随之从 0034 改为 0035。
+    command.downgrade(config, "20260716_0035")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'tenant_model_gateway_keys'"
+        ).fetchall()
+        after_downgrade = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(model_gateway_provisioning_commands)"
+            ).fetchall()
+        }
+    assert remaining == []
+    assert "next_attempt_at" not in after_downgrade
 
 
 def test_workflow_migration_creates_and_removes_tables(tmp_path: Path) -> None:
@@ -1579,3 +1636,22 @@ def test_audit_hmac_migration_backfills_chain_head_seal(
         }
     assert "hash_algorithm" not in event_columns
     assert {"head_seal", "head_seal_algorithm"}.isdisjoint(state_columns)
+
+
+def test_provisioning_command_status_check_rejects_the_removed_processing_state(
+    tmp_path: Path,
+) -> None:
+    """L3：processing 是已废弃方案的残留口子，枚举里根本没有，DB 也不该允许。"""
+    database_path = tmp_path / "provisioning-status.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'model_gateway_provisioning_commands'"
+        ).fetchone()[0]
+    assert "processing" not in sql
+    assert "'pending'" in sql and "'completed'" in sql and "'failed'" in sql
