@@ -51,6 +51,26 @@ def test_production_auth_transport_accepts_secure_cross_site_cookie() -> None:
     assert settings.auth_cookie_same_site == "none"
 
 
+def test_dev_account_token_channel_defaults_open_but_forced_closed_in_production() -> None:
+    assert AppSettings().expose_dev_account_tokens is True
+
+    forced = AppSettings(
+        app_environment="production",
+        auth_cookie_secure=True,
+        auth_cookie_same_site="none",
+        audit_hmac_key="an-explicit-production-audit-hmac-key-0001",
+        expose_dev_account_tokens=True,
+    )
+    assert forced.expose_dev_account_tokens is False
+
+    staging = AppSettings(
+        app_environment="staging",
+        audit_hmac_key="an-explicit-staging-audit-hmac-key-000001",
+        expose_dev_account_tokens=True,
+    )
+    assert staging.expose_dev_account_tokens is False
+
+
 @pytest.mark.parametrize(
     "audit_hmac_key",
     [

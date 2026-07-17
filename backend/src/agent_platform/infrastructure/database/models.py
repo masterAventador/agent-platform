@@ -1,4 +1,7 @@
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.account_tokens import (
+    AccountTokenRecord,
+)
 from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
@@ -26,6 +29,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
 )
 from agent_platform.infrastructure.database.repositories.entitlements import (
     CapabilityEntitlementRecord,
+)
+from agent_platform.infrastructure.database.repositories.invitations import (
+    TenantInvitationRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
@@ -84,6 +90,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ArtifactStorageOperationRecord,
     CapabilityEntitlementRecord,
     ApprovalRecord,
+    TenantInvitationRecord,
+    AccountTokenRecord,
 )
 
 

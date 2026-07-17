@@ -13,9 +13,17 @@ class AuthSession:
     created_at: datetime
     expires_at: datetime
     revoked_at: datetime | None = None
+    user_agent: str | None = None
 
     @classmethod
-    def issue(cls, *, user_id: UUID, token_digest: str, ttl_seconds: int) -> "AuthSession":
+    def issue(
+        cls,
+        *,
+        user_id: UUID,
+        token_digest: str,
+        ttl_seconds: int,
+        user_agent: str | None = None,
+    ) -> "AuthSession":
         created_at = datetime.now(UTC)
         return cls(
             id=uuid4(),
@@ -23,8 +31,18 @@ class AuthSession:
             token_digest=token_digest,
             created_at=created_at,
             expires_at=created_at + timedelta(seconds=ttl_seconds),
+            user_agent=_normalize_user_agent(user_agent),
         )
 
     def is_active(self, *, now: datetime | None = None) -> bool:
         current_time = now or datetime.now(UTC)
         return self.revoked_at is None and self.expires_at > current_time
+
+
+def _normalize_user_agent(user_agent: str | None) -> str | None:
+    if user_agent is None:
+        return None
+    stripped = user_agent.strip()
+    if not stripped:
+        return None
+    return stripped[:200]

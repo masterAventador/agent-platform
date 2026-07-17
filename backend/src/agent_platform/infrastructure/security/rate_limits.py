@@ -12,13 +12,18 @@ class RedisAuthRateLimiter:
         *,
         register_limit: int,
         login_limit: int,
+        password_reset_limit: int | None = None,
     ) -> None:
         self._redis = redis
+        # 找回密码限流缺省回退到登录限流额度，保证既有调用方无需改造即可注册该 scope。
+        reset_limit = login_limit if password_reset_limit is None else password_reset_limit
         self._limits = {
             "register": register_limit,
             "register_ip": register_limit,
             "login": login_limit,
             "login_ip": login_limit,
+            "password_reset": reset_limit,
+            "password_reset_ip": reset_limit,
         }
 
     async def ensure_allowed(self, *, scope: str, key: str) -> None:

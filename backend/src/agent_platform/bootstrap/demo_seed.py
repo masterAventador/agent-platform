@@ -31,6 +31,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
 from agent_platform.infrastructure.database.repositories.entitlements import (
     CapabilityEntitlementRecord,
 )
+from agent_platform.infrastructure.database.repositories.invitations import (
+    TenantInvitationRecord,
+)
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
@@ -54,6 +57,7 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import EventType
+from agent_platform.platform.tenants.invitations import InvitationStatus
 from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tools.entities import McpTransport, ToolRiskLevel
 
@@ -68,6 +72,9 @@ DEMO_USER_ID = uuid5(_DEMO_NAMESPACE, "user")
 DEMO_ADMIN_USER_ID = uuid5(_DEMO_NAMESPACE, "admin-user")
 DEMO_MEMBER_USER_ID = uuid5(_DEMO_NAMESPACE, "member-user")
 DEMO_TENANT_ID = uuid5(_DEMO_NAMESPACE, "tenant")
+DEMO_INVITATION_ID = uuid5(_DEMO_NAMESPACE, "pending-invitation")
+DEMO_INVITATION_EMAIL = "demo.invitee@example.com"
+DEMO_INVITATION_TOKEN_DIGEST = uuid5(_DEMO_NAMESPACE, "pending-invitation-token").hex
 DEMO_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "membership")
 DEMO_ADMIN_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "admin-membership")
 DEMO_MEMBER_MEMBERSHIP_ID = uuid5(_DEMO_NAMESPACE, "member-membership")
@@ -131,6 +138,7 @@ type DemoRecord = (
     | CapabilityEntitlementRecord
     | TenantRecord
     | TenantMembershipRecord
+    | TenantInvitationRecord
     | EmployeeRecord
     | EmployeeVersionRecord
     | RunRecord
@@ -384,6 +392,22 @@ def _demo_records(
                 created_at=_DEMO_CREATED_AT,
             ),
             ("tenant_id", "user_id", "role"),
+        ),
+        (
+            TenantInvitationRecord(
+                id=DEMO_INVITATION_ID,
+                tenant_id=DEMO_TENANT_ID,
+                email=DEMO_INVITATION_EMAIL,
+                role=TenantRole.MEMBER.value,
+                token_digest=DEMO_INVITATION_TOKEN_DIGEST,
+                status=InvitationStatus.PENDING.value,
+                invited_by=DEMO_USER_ID,
+                created_at=_DEMO_CREATED_AT,
+                expires_at=datetime(2032, 1, 1, tzinfo=UTC),
+                responded_at=None,
+                accepted_by=None,
+            ),
+            ("email", "role", "status", "expires_at"),
         ),
         (
             EmployeeRecord(

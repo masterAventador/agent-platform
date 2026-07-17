@@ -29,6 +29,11 @@ const RegisterPage = lazy(() =>
     default: module.RegisterPage,
   })),
 )
+const ForgotPasswordPage = lazy(() =>
+  import('../features/account/pages/ForgotPasswordPage').then((module) => ({
+    default: module.ForgotPasswordPage,
+  })),
+)
 const DashboardPage = lazy(() =>
   import('../features/dashboard/pages/DashboardPage').then((module) => ({
     default: module.DashboardPage,
@@ -112,12 +117,23 @@ const AuditObservabilityPage = lazy(() =>
     default: module.AuditObservabilityPage,
   })),
 )
+const MembersPage = lazy(() =>
+  import('../features/members/pages/MembersPage').then((module) => ({
+    default: module.MembersPage,
+  })),
+)
+const AccountSettingsPage = lazy(() =>
+  import('../features/account/pages/AccountSettingsPage').then((module) => ({
+    default: module.AccountSettingsPage,
+  })),
+)
 export function App() {
   return (
     <Suspense fallback={<RouteLoading />}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route
           path="*"
           element={
@@ -281,6 +297,8 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 <Link to="/operations/audit-observability">审计与观测</Link>
               </>
             )}
+            {capabilities.canManageWorkspace && <Link to="/tenant/members">企业成员</Link>}
+            <Link to="/account">账号设置</Link>
             {availableModules.flatMap(({ descriptor }) => descriptor.navigation).map((entry) => (
               <Link key={entry.path} to={entry.path}>{entry.label}</Link>
             ))}
@@ -483,6 +501,19 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
               </WorkspaceCapabilityGate>
             )}
           />
+          <Route
+            path="/tenant/members"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.workspaceManage}
+                title="无权管理企业成员"
+              >
+                <MembersPage currentUserId={user.id} tenantName={activeWorkspace.name} />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route path="/account" element={<AccountSettingsPage />} />
           {capabilityModules.flatMap(({ access, descriptor, module }) => (
             descriptor?.routePaths.map((path) => {
               const Page = module?.routes.find((route) => route.path === path)?.Page
