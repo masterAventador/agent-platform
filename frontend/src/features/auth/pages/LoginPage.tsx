@@ -116,6 +116,9 @@ export function LoginPage() {
         <Typography.Paragraph className="auth-switch" type="secondary">
           还没有账号？ <Link to="/register">注册账号</Link>
         </Typography.Paragraph>
+        <Typography.Paragraph className="auth-switch" type="secondary">
+          <Link to="/forgot-password">忘记密码？</Link>
+        </Typography.Paragraph>
       </Card>
     </main>
   )

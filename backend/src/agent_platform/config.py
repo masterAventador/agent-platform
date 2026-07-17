@@ -104,6 +104,15 @@ class AppSettings(BaseSettings):
     auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
     auth_register_limit_per_minute: int = 5
     auth_login_limit_per_minute: int = 10
+    auth_reset_request_limit_per_minute: int = 5
+    account_invitation_ttl_seconds: int = Field(default=60 * 60 * 24 * 7, ge=300, le=2_592_000)
+    account_email_verification_ttl_seconds: int = Field(
+        default=60 * 60 * 24, ge=300, le=2_592_000
+    )
+    account_reset_token_ttl_seconds: int = Field(default=60 * 60, ge=300, le=86_400)
+    # Demo/开发受控通道：找回密码/邮箱验证不真发信时，允许通过专用开发端点读取
+    # token 明文。生产/预发必须关闭，公共请求端点始终保持防用户枚举。
+    expose_dev_account_tokens: bool = True
     installed_capabilities: tuple[str, ...] = ("social-operations",)
     # video-studio 素材直传桶：配置后（连同 cos_region/cos_secret_id/cos_secret_key）
     # 生产装配注入真实腾讯 CAM/STS 签发器；缺省时素材上传凭证端点保持 503 失败关闭。
@@ -155,6 +164,10 @@ class AppSettings(BaseSettings):
             raise ValueError("production auth cookies must be Secure and SameSite=None for Tauri")
         if "*" in self.cors_allowed_origins:
             raise ValueError("credentialed CORS must use exact origins")
+        if self.app_environment in ("staging", "production"):
+            # 账号 token 开发通道属安全边界：staging/production 一律强制关闭
+            # （fail-closed），明文重置/验证 token 永不通过该通道暴露或落库。
+            self.expose_dev_account_tokens = False
         audit_key = self.audit_hmac_key.get_secret_value()
         if self.app_environment in ("staging", "production"):
             if (

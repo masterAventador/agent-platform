@@ -59,7 +59,13 @@ class AuthService:
         await self._workspaces.provision_owner_workspace(user)
         return user
 
-    async def login(self, *, email: str, password: str) -> IssuedSession:
+    async def login(
+        self,
+        *,
+        email: str,
+        password: str,
+        user_agent: str | None = None,
+    ) -> IssuedSession:
         normalized_email = email.strip().lower()
         await self._rate_limiter.ensure_allowed(scope="login", key=normalized_email)
         user = await self._users.get_by_email(normalized_email)
@@ -78,6 +84,7 @@ class AuthService:
                 user_id=user.id,
                 token_digest=token_digest,
                 ttl_seconds=self._session_ttl_seconds,
+                user_agent=user_agent,
             )
         )
         return IssuedSession(user=user, raw_token=raw_token)

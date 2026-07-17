@@ -182,6 +182,7 @@ async def login(payload: CredentialsRequest, request: Request, response: Respons
             issued_session = await build_auth_service(request, database_session).login(
                 email=str(payload.email),
                 password=payload.password,
+                user_agent=request.headers.get("user-agent"),
             )
             workspaces = await SqlAlchemyWorkspaceRepository(database_session).list_for_user(
                 issued_session.user.id

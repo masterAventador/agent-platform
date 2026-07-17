@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, Uuid, select
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, Uuid, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -85,6 +85,29 @@ class SqlAlchemyTenantRepository:
             slug=record.slug,
             created_at=created_at,
         )
+
+    async def get_by_id(self, tenant_id: UUID) -> Tenant | None:
+        record = await self._session.get(TenantRecord, tenant_id)
+        if record is None:
+            return None
+        return Tenant(
+            id=record.id,
+            name=record.name,
+            slug=record.slug,
+            created_at=(
+                record.created_at
+                if record.created_at.tzinfo is not None
+                else record.created_at.replace(tzinfo=UTC)
+            ),
+        )
+
+    async def rename(self, *, tenant_id: UUID, name: str) -> None:
+        await self._session.execute(
+            update(TenantRecord)
+            .where(TenantRecord.id == tenant_id)
+            .values(name=name.strip())
+        )
+        await self._session.flush()
 
 
 class SqlAlchemyWorkspaceRepository:

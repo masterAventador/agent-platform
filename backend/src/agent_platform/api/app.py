@@ -21,6 +21,7 @@ from agent_platform.api.dependencies.capabilities import (
 from agent_platform.api.middleware.request_body_limit import (
     FileUploadRequestBodyLimitMiddleware,
 )
+from agent_platform.api.routes.account import router as account_router
 from agent_platform.api.routes.approvals import router as approvals_router
 from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.audit import router as audit_router
@@ -30,6 +31,10 @@ from agent_platform.api.routes.conversations import router as conversations_rout
 from agent_platform.api.routes.dead_letters import router as dead_letters_router
 from agent_platform.api.routes.employees import router as employees_router
 from agent_platform.api.routes.knowledge import router as knowledge_router
+from agent_platform.api.routes.members import (
+    invitation_router as invitations_router,
+)
+from agent_platform.api.routes.members import router as members_router
 from agent_platform.api.routes.memories import router as memories_router
 from agent_platform.api.routes.model_gateway import router as model_gateway_router
 from agent_platform.api.routes.observability import router as observability_router
@@ -154,6 +159,7 @@ def create_app(
             owned_redis,
             register_limit=app_settings.auth_register_limit_per_minute,
             login_limit=app_settings.auth_login_limit_per_minute,
+            password_reset_limit=app_settings.auth_reset_request_limit_per_minute,
             extra_limits={
                 "video_sts_issue": app_settings.video_sts_issue_limit_per_minute,
             },
@@ -381,6 +387,9 @@ def create_app(
     app.state.tool_credential_store = tool_credential_store
     app.state.tool_credential_resolver = tool_credential_resolver
     app.include_router(auth_router)
+    app.include_router(members_router)
+    app.include_router(invitations_router)
+    app.include_router(account_router)
     app.include_router(audit_router)
     app.include_router(employees_router)
     app.include_router(workflows_router)

@@ -204,6 +204,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "password_hash",
         "email_verified",
         "created_at",
+        "display_name",
     }
     assert session_columns == {
         "id",
@@ -212,6 +213,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "created_at",
         "expires_at",
         "revoked_at",
+        "user_agent",
     }
     assert membership_columns == {"id", "tenant_id", "user_id", "role", "created_at"}
     assert {"id", "tenant_id", "name", "runtime_type", "status"} <= employee_columns
@@ -740,9 +742,9 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
-    # C11 迁移 20260716_0032（工作流注册表）；down_revision 暂指 0030，主代理合并时重链。
+    # 合入后单头，链：…0030(审批)→0031(video)→0032(crc64)→0033(workflow)→0034(account)。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0033"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0034"
 
 
 def test_workflow_migration_creates_and_removes_tables(tmp_path: Path) -> None:
@@ -901,6 +903,73 @@ def test_approval_migration_creates_and_removes_table(tmp_path: Path) -> None:
     } == columns
     assert "uq_approvals_tenant_request_key" in indexes
     assert "ix_approvals_status_expires_at" in indexes
+
+
+def test_account_and_membership_migration_creates_and_removes_tables(tmp_path: Path) -> None:
+    database_path = tmp_path / "account-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        invitation_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(tenant_invitations)").fetchall()
+        }
+        account_token_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(account_tokens)").fetchall()
+        }
+        user_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        session_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
+        }
+    assert {
+        "id",
+        "tenant_id",
+        "email",
+        "role",
+        "token_digest",
+        "status",
+        "invited_by",
+        "created_at",
+        "expires_at",
+        "responded_at",
+        "accepted_by",
+    } == invitation_columns
+    assert {
+        "id",
+        "user_id",
+        "purpose",
+        "token_digest",
+        "created_at",
+        "expires_at",
+        "consumed_at",
+        "dev_plaintext",
+    } == account_token_columns
+    assert "display_name" in user_columns
+    assert "user_agent" in session_columns
+
+    command.downgrade(config, "20260716_0030")
+    with sqlite3.connect(database_path) as connection:
+        remaining_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        user_columns_after = {
+            row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        session_columns_after = {
+            row[1] for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()
+        }
+    assert "tenant_invitations" not in remaining_tables
+    assert "account_tokens" not in remaining_tables
+    assert "display_name" not in user_columns_after
+    assert "user_agent" not in session_columns_after
 
     command.downgrade(config, "20260716_0028")
 
