@@ -69,7 +69,10 @@ from agent_platform.platform.knowledge.retrieval import (
 )
 from agent_platform.platform.memory.entities import Memory, MemoryScope, MemorySource
 from agent_platform.platform.model_gateway.errors import (
+    CorruptModelGatewayPolicy,
+    ModelGatewayCredentialNotReady,
     ModelGatewayCredentialUnavailable,
+    ModelGatewayPolicyPersistenceError,
 )
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
@@ -178,9 +181,19 @@ class UntrustedRuntimeDefinition(PermanentRuntimePreparationError):
 
 
 class ModelGatewayUnavailable(PermanentRuntimePreparationError):
-    """宿主进程没有可用的内部模型网关客户端。"""
+    """宿主进程或租户没有可用的模型网关凭据，且重投不会改变结果。
+
+    ``code`` 可覆盖为更精确的稳定原因码（已撤销 / alias 越权 / 对账确定失败等），它会随 Run
+    持久化：只报一个笼统的 model_gateway_unavailable 会让用户无从区分该找谁修。
+    这些码都是稳定标识，不含任何凭据材料。
+    """
 
     code = "model_gateway_unavailable"
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message or code or "")
+        if code is not None:
+            self.code = code
 
 
 class InvalidKnowledgeRuntimeResponse(PermanentRuntimePreparationError):
@@ -203,6 +216,18 @@ class KnowledgeRuntimeNotConfigured(PermanentRuntimePreparationError):
 
 class TransientRuntimePreparationError(RuntimeError):
     """运行时准备依赖暂时不可用；由队列重投递重试，消息不携带底层连接细节。"""
+
+
+class ModelGatewayProvisioningInProgress(TransientRuntimePreparationError):
+    """租户网关凭据正在对账中：Controller 秒级收敛，交队列重投。
+
+    这是**瞬态**而非永久：``policy.status`` 只是对账进度，不代表凭据不可用。任何一次策略
+    变更（哪怕只是改 rpm_limit）都会短暂进入 pending，判成永久会打死窗口内的每个 Run。
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class PublishedModel(GatewayModelReference):
@@ -396,8 +421,20 @@ class PlatformModelResolver:
             api_key = await self._tenant_credentials.resolve(
                 tenant_id=tenant_id, alias=model.alias
             )
+        except ModelGatewayCredentialNotReady as error:
+            # 对账进行中：Controller 秒级收敛，交队列重投。判成永久会让「管理员改了个
+            # rpm_limit」这种事在对账窗口内打死每一个并发 Run。
+            raise ModelGatewayProvisioningInProgress(error.code) from None
+        except CorruptModelGatewayPolicy:
+            # 数据损坏：重投永远不会好。必须排在 PersistenceError 之前——它是其子类。
+            raise ModelGatewayUnavailable(code="corrupt_model_gateway_policy") from None
+        except ModelGatewayPolicyPersistenceError:
+            # 数据库瞬时抖动：不是配置缺陷，交队列重投。
+            raise TransientRuntimePreparationError(
+                "model gateway credential lookup is temporarily unavailable"
+            ) from None
         except ModelGatewayCredentialUnavailable as error:
-            raise ModelGatewayUnavailable(error.code) from None
+            raise ModelGatewayUnavailable(code=error.code) from None
         return self._model_factory(model.alias, api_key)
 
 

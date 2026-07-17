@@ -211,6 +211,7 @@ write_environment() {
 
   local postgres_password redis_password minio_password
   local litellm_master_key litellm_worker_key litellm_db_password sandbox_secret
+  local model_gateway_key_secret
   postgres_password="$(random_secret)"
   redis_password="$(random_secret)"
   minio_password="$(random_secret)"
@@ -218,6 +219,7 @@ write_environment() {
   litellm_worker_key="sk-$(random_secret)"
   litellm_db_password="$(random_secret)"
   sandbox_secret="$(random_secret)"
+  model_gateway_key_secret="$(random_secret)"
   {
     printf 'POSTGRES_PASSWORD=%s\n' "${postgres_password}"
     printf 'REDIS_PASSWORD=%s\n' "${redis_password}"
@@ -226,6 +228,7 @@ write_environment() {
     printf 'LITELLM_WORKER_API_KEY=%s\n' "${litellm_worker_key}"
     printf 'LITELLM_DB_PASSWORD=%s\n' "${litellm_db_password}"
     printf 'SANDBOX_CONTROLLER_BEARER_SECRET=%s\n' "${sandbox_secret}"
+    printf 'MODEL_GATEWAY_KEY_SECRET=%s\n' "${model_gateway_key_secret}"
   } >"${SECRETS_ENV_FILE}"
 
   {
@@ -265,6 +268,10 @@ write_environment() {
     printf 'AUDIT_HMAC_KEY=agent-platform-insecure-dev-audit-hmac-key\n'
     printf 'AGENT_PLATFORM_LLM_GATEWAY_URL=http://litellm:4000/v1\n'
     printf 'AGENT_PLATFORM_LLM_GATEWAY_API_KEY=%s\n' "${litellm_worker_key}"
+    # C16：Controller 用 master key 对账网关；Worker/Controller 用派生密钥得到租户 Key。
+    # 二者在 platform.yml 里只发给需要它们的服务，不进共享 backend environment 锚点。
+    printf 'LITELLM_MASTER_KEY=%s\n' "${litellm_master_key}"
+    printf 'MODEL_GATEWAY_KEY_SECRET=%s\n' "${model_gateway_key_secret}"
     printf 'SANDBOX_CONTROLLER_BEARER_SECRET=%s\n' "${sandbox_secret}"
     printf 'SANDBOX_CONTROLLER_IMAGE=python:3.12.13-slim-bookworm@sha256:8a7e7cc04fd3e2bd787f7f24e22d5d119aa590d429b50c95dfe12b3abe52f48b\n'
     printf 'DOCKER_SOCKET_PATH=/var/run/docker.sock\n'
@@ -290,12 +297,14 @@ dotenv_key_is_allowed() {
     secrets:POSTGRES_PASSWORD|secrets:REDIS_PASSWORD|secrets:MINIO_ROOT_PASSWORD|\
       secrets:LITELLM_MASTER_KEY|secrets:LITELLM_WORKER_API_KEY|\
       secrets:LITELLM_DB_PASSWORD|secrets:SANDBOX_CONTROLLER_BEARER_SECRET|\
+      secrets:MODEL_GATEWAY_KEY_SECRET|\
       core:POSTGRES_DB|core:POSTGRES_USER|core:POSTGRES_PASSWORD|core:POSTGRES_PORT|\
       core:REDIS_PASSWORD|core:REDIS_PORT|core:MINIO_ROOT_USER|\
       core:MINIO_ROOT_PASSWORD|core:MINIO_API_PORT|core:MINIO_CONSOLE_PORT|\
       litellm:LITELLM_MASTER_KEY|litellm:LITELLM_WORKER_API_KEY|litellm:LITELLM_PORT|\
       litellm:LITELLM_DB_NAME|litellm:LITELLM_DB_USER|litellm:LITELLM_DB_PASSWORD|\
       litellm:LITELLM_UPSTREAM_MODEL|litellm:LITELLM_NETWORK_NAME|\
+      platform:LITELLM_MASTER_KEY|platform:MODEL_GATEWAY_KEY_SECRET|\
       platform:POSTGRES_DB|platform:POSTGRES_USER|platform:POSTGRES_PASSWORD|\
       platform:REDIS_PASSWORD|platform:MINIO_ROOT_USER|platform:MINIO_ROOT_PASSWORD|\
       platform:PLATFORM_API_PORT|platform:PLATFORM_WEB_PORT|platform:OTEL_ENABLED|\
@@ -794,7 +803,8 @@ health_profile() {
   for service in litellm-db openai-stub litellm; do
     assert_service_healthy litellm "${service}"
   done
-  for service in api dispatcher sandbox-controller sandbox-janitor worker frontend; do
+  for service in api dispatcher sandbox-controller sandbox-janitor worker \
+    model-gateway-controller frontend; do
     assert_service_healthy app "${service}"
   done
   PLATFORM_API_PORT="${PLATFORM_API_PORT}" PLATFORM_WEB_PORT="${PLATFORM_WEB_PORT}" \
@@ -833,11 +843,13 @@ start_profile() {
       PLATFORM_WEB_PORT "${PLATFORM_WEB_PORT}"
   fi
   if app_compose up --detach --wait --wait-timeout 300 --no-build \
-    migrate api dispatcher sandbox-controller sandbox-janitor worker frontend; then
+    migrate api dispatcher sandbox-controller sandbox-janitor worker \
+    model-gateway-controller frontend; then
     app_start_status=0
   else
     app_start_status=$?
-    if ! app_compose logs --no-color --tail 80 worker sandbox-controller; then
+    if ! app_compose logs --no-color --tail 80 worker sandbox-controller \
+      model-gateway-controller; then
       printf 'failed to collect MVP worker diagnostics\n' >&2
     fi
     cleanup_failed_start "${app_start_status}"

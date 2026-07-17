@@ -339,6 +339,8 @@ def _seed_active_gateway_state(session, *, tenant_id, user_id) -> None:
             tenant_id=tenant_id,
             key_version=1,
             retired_key_version=None,
+            # 模拟 Controller 已完成一次真实对账：网关侧 v1 存在且可用
+            provisioned_key_version=1,
             created_at=now,
             updated_at=now,
         )
@@ -561,11 +563,12 @@ async def test_production_worker_assembly_wires_tenant_attributable_gateway_cred
         ).get_secret_value()
 
         # 没有策略的租户：生产装配必须失败关闭，而不是退回共享 Key
-        with pytest.raises(ModelGatewayUnavailable):
+        with pytest.raises(ModelGatewayUnavailable) as captured:
             await model_resolver.resolve(
                 PublishedModel(kind="gateway_alias", alias="general-purpose"),
                 tenant_id=uuid4(),
             )
+        assert captured.value.code == "model_gateway_policy_not_provisioned"
     finally:
         await resolver.aclose()
         await engine.dispose()

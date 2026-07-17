@@ -119,7 +119,17 @@ def _raise_policy_error(error: Exception) -> None:
     if isinstance(error, ModelGatewayKeyRotationInProgress):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"code": error.code, "message": "上一版本凭据尚未回收，无法再次轮换"},
+            detail={
+                "code": error.code,
+                # 逃生舱必须写在运维现场看得到的地方：上一次轮换若永久失败，命令已结算，
+                # 不会有任何东西自动重试；重新 PUT 策略会产生新 revision 与新对账命令。
+                "message": (
+                    "上一版本凭据尚未在网关回收，无法再次轮换。"
+                    "若上次对账已失败（策略状态为 error），请重新提交一次模型网关策略"
+                    "（PUT /api/v1/model-gateway/policy）以重新入队对账；"
+                    "当前租户仍在使用上一个已生效的凭据版本，服务不受影响。"
+                ),
+            },
         ) from error
     if isinstance(error, ModelGatewayPolicyNotFound):
         raise HTTPException(
@@ -249,6 +259,11 @@ async def rotate_model_gateway_key(
     在途 Run 的语义：Run 在启动时已解析并持有旧版本 Key，Controller 完成对账后旧 Key
     会在网关侧被删除，这些 Run 的后续模型调用会失败（不静默降级）。轮换是安全操作，
     优先保证撤销的即时性，不为在途 Run 保留旧凭据。
+
+    「版本先落库再触达网关」的代价：若随后的对账**永久失败**，DB 已停在新版本而网关侧只有
+    旧版本，此时 ``retired_key_version`` 不会被清空，再次轮换会持续 409，直到重新 PUT 策略
+    产生新的对账命令。这不影响服务——凭据解析用的是 observed 版本，租户继续使用网关侧真实
+    可用的旧版本。选择这个代价是因为反过来（先动网关再落库）会在崩溃时留下无人回收的孤儿 Key。
     """
     async with request.app.state.session_factory() as session:
         user, access = await resolve_workspace(

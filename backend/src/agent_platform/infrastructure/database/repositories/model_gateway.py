@@ -106,7 +106,10 @@ class ModelGatewayProvisioningCommandRecord(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "desired_revision", "action"),
         CheckConstraint("action = 'reconcile'"),
-        CheckConstraint("status IN ('pending', 'processing', 'completed', 'failed')"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="ck_model_gateway_provisioning_commands_status",
+        ),
         CheckConstraint("desired_revision > 0"),
         CheckConstraint("attempts >= 0"),
     )
@@ -122,6 +125,8 @@ class TenantModelGatewayKeyRecord(Base):
     )
     key_version: Mapped[int] = mapped_column(Integer)
     retired_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 网关侧真实存在且可用的版本（observed）；NULL = 网关上当前没有可用 Key。
+    provisioned_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -130,6 +135,11 @@ class TenantModelGatewayKeyRecord(Base):
         CheckConstraint(
             "retired_key_version IS NULL OR "
             "(retired_key_version > 0 AND retired_key_version < key_version)"
+        ),
+        CheckConstraint(
+            "provisioned_key_version IS NULL OR "
+            "(provisioned_key_version > 0 AND provisioned_key_version <= key_version)",
+            name="ck_tenant_model_gateway_keys_provisioned_version",
         ),
     )
 
@@ -307,6 +317,7 @@ class SqlAlchemyModelGatewayCommandStore:
             tenant_id=issued.tenant_id,
             key_version=issued.key_version,
             retired_key_version=issued.retired_key_version,
+            provisioned_key_version=issued.provisioned_key_version,
             created_at=issued.created_at,
             updated_at=issued.updated_at,
         )
@@ -344,11 +355,22 @@ class SqlAlchemyModelGatewayCommandStore:
             return
         record.next_attempt_at = None
         record.processed_at = now
-        if outcome.clear_key_retirement and key_record.retired_key_version is not None:
-            settled = SqlAlchemyModelGatewayCommandStore._key_to_entity(
-                key_record
-            ).retirement_settled(now=now)
-            key_record.retired_key_version = settled.retired_key_version
+        if outcome.key_provisioned is not None:
+            # 只有真实对账观测到网关状态时才更新 observed 版本。
+            #
+            # 这里刻意用 claimed.key（本次实际对账的那个快照）而不是可能已被并发轮换改写的
+            # key_record：写入的是「我们在网关上观测到了什么」，因此不受 desired 的 revision
+            # CAS 约束——观测是事实，不是结论。同理，只有当我们对账的那个快照本身带着待回收
+            # 版本时才清空它；若并发轮换在对账期间新写入了 retired，那属于下一条命令的职责，
+            # 抹掉它会让旧版本 Key 在网关侧永远无人回收。
+            settled = claimed.key.reconciled(
+                provisioned=outcome.key_provisioned,
+                clear_retirement=outcome.clear_key_retirement,
+                now=now,
+            )
+            key_record.provisioned_key_version = settled.provisioned_key_version
+            if outcome.clear_key_retirement and claimed.key.retired_key_version is not None:
+                key_record.retired_key_version = settled.retired_key_version
             key_record.updated_at = settled.updated_at
         if outcome.policy_status is None:
             return
@@ -369,6 +391,7 @@ class SqlAlchemyModelGatewayCommandStore:
             tenant_id=record.tenant_id,
             key_version=record.key_version,
             retired_key_version=record.retired_key_version,
+            provisioned_key_version=record.provisioned_key_version,
             created_at=SqlAlchemyModelGatewayPolicyRepository._as_utc(record.created_at),
             updated_at=SqlAlchemyModelGatewayPolicyRepository._as_utc(record.updated_at),
         )

@@ -25,7 +25,10 @@ from agent_platform.platform.knowledge.retrieval import (
     KnowledgeRetrievalConfig,
 )
 from agent_platform.platform.model_gateway.errors import (
+    CorruptModelGatewayPolicy,
+    ModelGatewayCredentialNotReady,
     ModelGatewayCredentialUnavailable,
+    ModelGatewayPolicyPersistenceError,
 )
 from agent_platform.platform.runs.entities import Run
 from agent_platform.runtimes.recovery import RuntimeRecoveryTransient
@@ -1464,6 +1467,102 @@ async def test_model_resolver_requires_tenant_credentials_in_production_assembly
     resolver = PlatformModelResolver(model_factory=lambda alias, api_key: None)
 
     with pytest.raises(ModelGatewayUnavailable):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_provisioning_in_progress_is_transient_not_a_permanent_definition_error() -> None:
+    """S2：pending 是秒级自愈的瞬态，必须交队列重投。
+
+    断言归类而不只是异常类型——只断言 `raises(ModelGatewayUnavailable)` 抓不到
+    「它 IS-A Permanent 因而让 Run 永久失败」这个真实缺陷。
+    """
+
+    class NotReadyCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayCredentialNotReady("model_gateway_provisioning_in_progress")
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=NotReadyCredentials(),
+    )
+
+    with pytest.raises(TransientRuntimePreparationError) as captured:
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+    assert not isinstance(captured.value, PermanentRuntimePreparationError)
+
+
+@pytest.mark.asyncio
+async def test_configuration_defects_stay_permanent_and_are_not_retried_forever() -> None:
+    """撤销/越权/对账确定失败属配置缺陷：重投永远不会好，必须永久失败。"""
+    for code in (
+        "model_gateway_disabled",
+        "model_gateway_alias_not_allowed",
+        "model_gateway_policy_not_provisioned",
+        "model_gateway_provisioning_failed",
+    ):
+
+        class RejectingCredentials:
+            def __init__(self, rejection: str) -> None:
+                self._rejection = rejection
+
+            async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+                raise ModelGatewayCredentialUnavailable(self._rejection)
+
+        resolver = PlatformModelResolver(
+            model_factory=lambda alias, api_key: None,
+            tenant_credentials=RejectingCredentials(code),
+        )
+
+        with pytest.raises(PermanentRuntimePreparationError) as captured:
+            await resolver.resolve(
+                PublishedModel(kind="gateway_alias", alias="general-purpose"),
+                tenant_id=uuid4(),
+            )
+        assert captured.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_database_jitter_during_credential_resolution_is_transient() -> None:
+    """M1：凭据解析的 DB 抖动此前裸逃逸出模型解析层，既非瞬态也非永久。"""
+
+    class FlakyCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise ModelGatewayPolicyPersistenceError()
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=FlakyCredentials(),
+    )
+
+    with pytest.raises(TransientRuntimePreparationError):
+        await resolver.resolve(
+            PublishedModel(kind="gateway_alias", alias="general-purpose"),
+            tenant_id=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_corrupt_persisted_policy_is_permanent_not_retried() -> None:
+    """数据损坏重投永远不会好：必须与 DB 抖动区分开。"""
+
+    class CorruptCredentials:
+        async def resolve(self, *, tenant_id: UUID, alias: str) -> SecretStr:
+            raise CorruptModelGatewayPolicy()
+
+    resolver = PlatformModelResolver(
+        model_factory=lambda alias, api_key: None,
+        tenant_credentials=CorruptCredentials(),
+    )
+
+    with pytest.raises(PermanentRuntimePreparationError):
         await resolver.resolve(
             PublishedModel(kind="gateway_alias", alias="general-purpose"),
             tenant_id=uuid4(),

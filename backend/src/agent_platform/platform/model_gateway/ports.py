@@ -39,12 +39,17 @@ class ClaimedProvisioningCommand:
 
 @dataclass(frozen=True, slots=True)
 class ReconcileOutcome:
-    """对账决策结果；由 store 在同一事务内落库。"""
+    """对账决策结果；由 store 在同一事务内落库。
+
+    ``key_provisioned`` 是本次对账对「网关侧是否存在可用 Key」的观测：``True`` 已建立、
+    ``False`` 已阻断、``None`` 本次未能观测（失败/重试）因此保持既有观测不变。
+    """
 
     command_status: ProvisioningCommandStatus
     policy_status: ModelGatewayPolicyStatus | None = None
     error_code: str | None = None
     next_attempt_at: datetime | None = None
+    key_provisioned: bool | None = None
     clear_key_retirement: bool = False
 
 

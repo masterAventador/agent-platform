@@ -200,7 +200,9 @@ class PlatformContainerContractTest(unittest.TestCase):
         self,
     ) -> None:
         compose = self.read("infra/compose/platform.yml")
-        worker = compose.split("\n  worker:\n", 1)[1].split("\n  sandbox-janitor:\n", 1)[0]
+        # 切片必须止于 worker 服务自身的末尾：model-gateway-controller 现在排在
+        # worker 与 sandbox-janitor 之间，且它是唯一合法持有 master key 的服务。
+        worker = compose.split("\n  worker:\n", 1)[1].split("\n  # C16 模型网关", 1)[0]
         self.assertNotIn("ANTHROPIC_API_KEY", worker)
         self.assertNotIn("OPENAI_API_KEY", worker)
         self.assertIn(
@@ -215,6 +217,32 @@ class PlatformContainerContractTest(unittest.TestCase):
         )
         self.assertIn("networks: [core, sandbox-control, llm]", worker)
         self.assertNotIn("LITELLM_MASTER_KEY", worker)
+
+    def test_mvp_profile_provisions_the_model_gateway_controller_secrets(self) -> None:
+        """C16：Controller 需要 master key，Worker/Controller 需要派生密钥。
+
+        缺任何一个都会让 app compose 直接渲染失败或 Controller 启动即退出——
+        对账因此永不发生，租户 Key 在网关侧永远不存在，每个 Run 都会 401。
+        """
+        script = self.read("infra/platform/mvp-profile.sh")
+        # 两个密钥必须写进 platform.env，否则 controller 服务的 :? 插值会让整个 app 项目失败
+        self.assertIn("printf 'LITELLM_MASTER_KEY=%s\\n' \"${litellm_master_key}\"", script)
+        self.assertIn("MODEL_GATEWAY_KEY_SECRET=%s", script)
+        # dotenv 白名单必须放行它们，否则 mvp-profile 自己的校验会拒绝启动
+        self.assertIn("platform:LITELLM_MASTER_KEY", script)
+        self.assertIn("platform:MODEL_GATEWAY_KEY_SECRET", script)
+        # 启动清单与健康门禁都必须覆盖 Controller：它不启动/不健康时对账不会发生，
+        # 而 Run 只会在真正跑起来之后才以 401/瞬态重投的形式暴露，代价远高于启动即失败。
+        self.assertIn(
+            "migrate api dispatcher sandbox-controller sandbox-janitor worker \\\n"
+            "    model-gateway-controller frontend",
+            script,
+        )
+        self.assertIn(
+            "for service in api dispatcher sandbox-controller sandbox-janitor worker \\\n"
+            "    model-gateway-controller frontend; do",
+            script,
+        )
 
     def test_mvp_profile_is_stub_only_ragflow_free_and_failure_safe(self) -> None:
         script = self.read("infra/platform/mvp-profile.sh")
@@ -256,7 +284,9 @@ class PlatformContainerContractTest(unittest.TestCase):
         self.assertIn("app_compose build", script)
         self.assertIn("--no-build", script)
         self.assertIn("image: ${PLATFORM_BACKEND_IMAGE", compose)
-        self.assertEqual(compose.count("image: ${PLATFORM_BACKEND_IMAGE"), 6)
+        # migrate / api / dispatcher / worker / model-gateway-controller /
+        # sandbox-janitor / sandbox-controller
+        self.assertEqual(compose.count("image: ${PLATFORM_BACKEND_IMAGE"), 7)
         self.assertIn("image: ${PLATFORM_FRONTEND_IMAGE", compose)
 
     def test_mvp_profile_supports_isolated_compose_projects_and_networks(self) -> None:

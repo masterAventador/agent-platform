@@ -38,7 +38,7 @@ from agent_platform.infrastructure.database.repositories.invitations import (
 )
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.model_gateway import (
-    TenantModelGatewayKeyRecord,
+    ModelGatewayProvisioningCommandRecord,
     TenantModelGatewayPolicyRecord,
 )
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
@@ -109,6 +109,7 @@ DEMO_GATEWAY_BUDGET_MICROUSD = 50_000_000
 DEMO_GATEWAY_RPM_LIMIT = 60
 DEMO_GATEWAY_TPM_LIMIT = 200_000
 DEMO_GATEWAY_MAX_PARALLEL_REQUESTS = 4
+DEMO_GATEWAY_COMMAND_ID = uuid5(_DEMO_NAMESPACE, "model-gateway-reconcile-command")
 DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
 DEMO_APPROVED_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "approved-approval")
 DEMO_APPROVED_APPROVAL_INVOCATION_ID = uuid5(_DEMO_NAMESPACE, "approved-approval-invocation")
@@ -207,7 +208,7 @@ type DemoRecord = (
     | WorkflowRecord
     | WorkflowVersionRecord
     | TenantModelGatewayPolicyRecord
-    | TenantModelGatewayKeyRecord
+    | ModelGatewayProvisioningCommandRecord
 )
 
 
@@ -447,14 +448,14 @@ def _demo_records(
                 tpm_limit=DEMO_GATEWAY_TPM_LIMIT,
                 max_parallel_requests=DEMO_GATEWAY_MAX_PARALLEL_REQUESTS,
                 revision=1,
-                # 直接标 active + 预置 Key 版本：Worker 在 C16 后对无策略/未对账租户失败关闭，
-                # 常驻开发栈的 Demo 员工不应等 Controller 首轮对账才能跑。Controller 之后
-                # 对同一 revision 的对账是幂等的，会把网关状态收敛到这里声明的 desired。
-                status="active",
+                # Seed 只声明 desired。status 与 Key 行都由真实 Controller 对账产生：
+                # 伪造终态会得到一个网关侧根本不存在的 Key，每个 Demo Run 必然 401。
+                status="pending",
                 created_at=_DEMO_CREATED_AT,
                 updated_at=_DEMO_CREATED_AT,
                 updated_by=DEMO_USER_ID,
             ),
+            # status 不可变：它归 Controller 独占，重放 Seed 不得把已对账的状态推回 pending。
             (
                 "enabled",
                 "allowed_aliases",
@@ -463,18 +464,24 @@ def _demo_records(
                 "rpm_limit",
                 "tpm_limit",
                 "max_parallel_requests",
-                "status",
             ),
         ),
         (
-            TenantModelGatewayKeyRecord(
+            # 与策略同事务入队的真实对账命令——没有它 Controller 永远不会被触发。
+            ModelGatewayProvisioningCommandRecord(
+                id=DEMO_GATEWAY_COMMAND_ID,
                 tenant_id=DEMO_TENANT_ID,
-                key_version=1,
-                retired_key_version=None,
+                desired_revision=1,
+                action="reconcile",
+                status="pending",
+                attempts=0,
+                last_error_code=None,
                 created_at=_DEMO_CREATED_AT,
-                updated_at=_DEMO_CREATED_AT,
+                processed_at=None,
+                next_attempt_at=None,
             ),
-            ("key_version", "retired_key_version"),
+            # 全部字段归 Controller：重放 Seed 不得把已结算的命令重置回 pending。
+            (),
         ),
         (
             CapabilityEntitlementRecord(

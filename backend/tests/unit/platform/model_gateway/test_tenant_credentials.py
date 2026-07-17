@@ -18,7 +18,10 @@ from agent_platform.platform.model_gateway.entities import (
     TenantModelGatewayKey,
     TenantModelGatewayPolicy,
 )
-from agent_platform.platform.model_gateway.errors import ModelGatewayCredentialUnavailable
+from agent_platform.platform.model_gateway.errors import (
+    ModelGatewayCredentialNotReady,
+    ModelGatewayCredentialUnavailable,
+)
 from agent_platform.platform.model_gateway.tenant_credentials import (
     TenantGatewayCredentialResolver,
 )
@@ -51,11 +54,19 @@ def _policy(
     )
 
 
-def _key(tenant_id: UUID, *, version: int = 1) -> TenantModelGatewayKey:
+def _key(
+    tenant_id: UUID,
+    *,
+    version: int = 1,
+    provisioned: int | None = -1,
+    retired: int | None = None,
+) -> TenantModelGatewayKey:
     return TenantModelGatewayKey.restore(
         tenant_id=tenant_id,
         key_version=version,
-        retired_key_version=None,
+        retired_key_version=retired,
+        # 默认 provisioned 与 desired 同版本；传 None 表示网关侧尚无可用 Key
+        provisioned_key_version=version if provisioned == -1 else provisioned,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -141,36 +152,116 @@ async def test_a_disabled_policy_is_rejected_immediately() -> None:
     assert captured.value.code == "model_gateway_disabled"
 
 
-@pytest.mark.parametrize(
-    "status",
-    [
-        ModelGatewayPolicyStatus.PENDING,
-        ModelGatewayPolicyStatus.ERROR,
-    ],
-)
 @pytest.mark.asyncio
-async def test_a_policy_that_is_not_reconciled_yet_is_rejected(
-    status: ModelGatewayPolicyStatus,
-) -> None:
-    """尚未对账/对账失败的策略：网关侧未必存在可用 Key，绝不能乐观放行。"""
+async def test_a_pending_policy_keeps_using_the_already_provisioned_key() -> None:
+    """S2 根因：对账进度 != 凭据可用性。
+
+    管理员把 rpm_limit 60 改成 61 → revision+1、status=pending。网关侧 v1 依然真实
+    可用，此刻启动的 Run 必须照常跑，不能因为「对账进度未完成」被判死。
+    """
     tenant_id = uuid4()
-    resolver = _resolver(policy=_policy(tenant_id, status=status), key=_key(tenant_id))
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.PENDING),
+        key=_key(tenant_id, version=1, provisioned=1),
+    )
+
+    credential = await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
+
+    assert credential.get_secret_value() == derive_tenant_gateway_key(
+        secret=SECRET, tenant_id=tenant_id, key_version=1
+    ).get_secret_value()
+
+
+@pytest.mark.asyncio
+async def test_a_rotation_in_flight_keeps_using_the_last_provisioned_version() -> None:
+    """轮换已落库但尚未对账：网关侧只有 v1 存在，必须用 v1 而不是尚不存在的 v2。"""
+    tenant_id = uuid4()
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.PENDING),
+        key=_key(tenant_id, version=2, provisioned=1, retired=1),
+    )
+
+    credential = await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
+
+    assert credential.get_secret_value() == derive_tenant_gateway_key(
+        secret=SECRET, tenant_id=tenant_id, key_version=1
+    ).get_secret_value()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rotation_still_serves_the_working_previous_key() -> None:
+    """M2：轮换永久失败时网关侧 v1 仍完全可用，租户绝不能因此全线不可用。"""
+    tenant_id = uuid4()
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.ERROR),
+        key=_key(tenant_id, version=2, provisioned=1, retired=1),
+    )
+
+    credential = await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
+
+    assert credential.get_secret_value() == derive_tenant_gateway_key(
+        secret=SECRET, tenant_id=tenant_id, key_version=1
+    ).get_secret_value()
+
+
+@pytest.mark.asyncio
+async def test_an_unprovisioned_key_is_transient_because_the_controller_self_heals() -> None:
+    """尚未对账 = 秒级自愈的瞬态，必须交队列重投，不得判为永久定义错误。"""
+    tenant_id = uuid4()
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.PENDING),
+        key=_key(tenant_id, provisioned=None),
+    )
+
+    with pytest.raises(ModelGatewayCredentialNotReady) as captured:
+        await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
+
+    assert captured.value.code == "model_gateway_provisioning_in_progress"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_key_row_before_the_first_reconcile_is_transient() -> None:
+    tenant_id = uuid4()
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.PENDING), key=None
+    )
+
+    with pytest.raises(ModelGatewayCredentialNotReady):
+        await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
+
+
+@pytest.mark.asyncio
+async def test_a_definitively_failed_provisioning_is_permanent_not_transient() -> None:
+    """对账确定失败且网关侧无可用 Key：重投永远不会好，必须永久失败。"""
+    tenant_id = uuid4()
+    resolver = _resolver(
+        policy=_policy(tenant_id, status=ModelGatewayPolicyStatus.ERROR),
+        key=_key(tenant_id, provisioned=None),
+    )
 
     with pytest.raises(ModelGatewayCredentialUnavailable) as captured:
         await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
 
-    assert captured.value.code == "model_gateway_not_active"
+    assert not isinstance(captured.value, ModelGatewayCredentialNotReady)
+    assert captured.value.code == "model_gateway_provisioning_failed"
 
 
 @pytest.mark.asyncio
-async def test_an_active_policy_without_a_provisioned_key_fails_closed() -> None:
+async def test_a_revoked_policy_is_rejected_even_while_a_key_is_still_provisioned() -> None:
+    """撤销是管理员的明确动作：即使网关侧 Key 尚未被阻断也必须立即拒绝。"""
     tenant_id = uuid4()
-    resolver = _resolver(policy=_policy(tenant_id), key=None)
+    resolver = _resolver(
+        policy=_policy(
+            tenant_id, enabled=False, status=ModelGatewayPolicyStatus.PENDING
+        ),
+        key=_key(tenant_id, provisioned=1),
+    )
 
     with pytest.raises(ModelGatewayCredentialUnavailable) as captured:
         await resolver.resolve(tenant_id=tenant_id, alias="general-purpose")
 
-    assert captured.value.code == "model_gateway_key_not_provisioned"
+    assert not isinstance(captured.value, ModelGatewayCredentialNotReady)
+    assert captured.value.code == "model_gateway_disabled"
 
 
 @pytest.mark.asyncio

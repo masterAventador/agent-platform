@@ -120,6 +120,7 @@ class _Recorder:
 _COMPLETED = ReconcileOutcome(
     command_status=ProvisioningCommandStatus.COMPLETED,
     policy_status=ModelGatewayPolicyStatus.ACTIVE,
+    key_provisioned=True,
     clear_key_retirement=True,
 )
 
@@ -372,3 +373,193 @@ async def test_key_repository_reads_the_provisioned_version_for_the_worker(
     assert key.retired_key_version is None
     # 租户隔离：未签发租户不得读到别人的 Key 版本
     assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_a_completed_enabled_reconcile_marks_the_key_provisioned(
+    session_factory: async_sessionmaker,
+) -> None:
+    """provisioned_key_version 只由真实对账成功写入——它是网关侧存在性的唯一真相源。"""
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+    store = SqlAlchemyModelGatewayCommandStore(session_factory)
+
+    async with session_factory() as session:
+        before = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert before is None
+
+    await store.process_next(_Recorder(_COMPLETED), now=NOW)
+
+    async with session_factory() as session:
+        key = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert key is not None
+    assert key.provisioned_key_version == 1
+
+
+@pytest.mark.asyncio
+async def test_the_claim_hands_over_an_unprovisioned_key_on_the_first_reconcile(
+    session_factory: async_sessionmaker,
+) -> None:
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+    handler = _Recorder(_COMPLETED)
+
+    await SqlAlchemyModelGatewayCommandStore(session_factory).process_next(handler, now=NOW)
+
+    assert handler.claims[0].key.provisioned_key_version is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reconcile_never_marks_the_key_provisioned(
+    session_factory: async_sessionmaker,
+) -> None:
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+    failed = ReconcileOutcome(
+        command_status=ProvisioningCommandStatus.FAILED,
+        policy_status=ModelGatewayPolicyStatus.ERROR,
+        error_code="provisioning_rejected",
+    )
+
+    await SqlAlchemyModelGatewayCommandStore(session_factory).process_next(
+        _Recorder(failed), now=NOW
+    )
+
+    async with session_factory() as session:
+        key = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert key is not None
+    assert key.provisioned_key_version is None
+
+
+@pytest.mark.asyncio
+async def test_a_completed_disabled_reconcile_clears_the_provisioned_version(
+    session_factory: async_sessionmaker,
+) -> None:
+    """撤销对账完成后网关侧 Key 已被阻断。
+
+    若不清空 provisioned，再启用的窗口里 Worker 会拿一个 blocked Key 去撞 401。
+    """
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+    store = SqlAlchemyModelGatewayCommandStore(session_factory)
+    await store.process_next(_Recorder(_COMPLETED), now=NOW)
+    await _put_desired(
+        session_factory,
+        _policy(tenant_id, user_id, revision=2, enabled=False),
+        expected_revision=1,
+    )
+
+    await store.process_next(
+        _Recorder(
+            ReconcileOutcome(
+                command_status=ProvisioningCommandStatus.COMPLETED,
+                policy_status=ModelGatewayPolicyStatus.DISABLED,
+                key_provisioned=False,
+                clear_key_retirement=True,
+            )
+        ),
+        now=NOW,
+    )
+
+    async with session_factory() as session:
+        key = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert key is not None
+    assert key.provisioned_key_version is None
+
+
+@pytest.mark.asyncio
+async def test_rotation_preserves_the_provisioned_version_until_reconcile(
+    session_factory: async_sessionmaker,
+) -> None:
+    """轮换只改 desired：observed 必须原地不动。
+
+    否则轮换落库到对账完成之间会出现凭据真空期——网关上 v2 还不存在、v1 却已被声称不可用。
+    """
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+    await SqlAlchemyModelGatewayCommandStore(session_factory).process_next(
+        _Recorder(_COMPLETED), now=NOW
+    )
+
+    async with session_factory() as session:
+        repository = SqlAlchemyModelGatewayPolicyRepository(session)
+        current = await repository.get(tenant_id)
+        key = await repository.get_key(tenant_id)
+        assert current is not None and key is not None
+        rotated = key.rotate(now=NOW)
+        await repository.save_rotated_key(
+            current.revise_desired(
+                enabled=current.enabled,
+                allowed_aliases=current.allowed_aliases,
+                budget_microusd=current.budget_microusd,
+                budget_period=current.budget_period,
+                rpm_limit=current.rpm_limit,
+                tpm_limit=current.tpm_limit,
+                max_parallel_requests=current.max_parallel_requests,
+                updated_by=user_id,
+                now=NOW,
+            ),
+            key=rotated,
+            expected_revision=current.revision,
+            action=ModelGatewayProvisioningAction.RECONCILE,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        stored = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert stored is not None
+    assert stored.key_version == 2
+    assert stored.retired_key_version == 1
+    # 网关上仍然只有 v1 真实存在：observed 必须保持 1
+    assert stored.provisioned_key_version == 1
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_rotation_during_reconcile_is_not_clobbered(
+    session_factory: async_sessionmaker,
+) -> None:
+    """对账期间发生轮换：本次对账只能落它**实际观测到**的版本，不得抹掉新的待回收记录。
+
+    Controller 对账的是 v1；若期间 API 轮换到 v2/retired=1，本次的「已清空待回收」结论只
+    适用于它自己那个快照（retired=None），绝不能把 API 刚写下的 retired=1 抹掉——抹掉
+    等于 v1 在网关侧永远无人回收（孤儿 Key）。
+    """
+    tenant_id, user_id = await _seed_tenant(session_factory)
+    await _put_desired(session_factory, _policy(tenant_id, user_id), expected_revision=0)
+
+    async def handler(claimed: ClaimedProvisioningCommand) -> ReconcileOutcome:
+        # 模拟对账进行中 API 完成了一次轮换（v1 → v2，v1 待回收）
+        async with session_factory() as session:
+            repository = SqlAlchemyModelGatewayPolicyRepository(session)
+            current = await repository.get(tenant_id)
+            key = await repository.get_key(tenant_id)
+            assert current is not None and key is not None
+            await repository.save_rotated_key(
+                current.revise_desired(
+                    enabled=current.enabled,
+                    allowed_aliases=current.allowed_aliases,
+                    budget_microusd=current.budget_microusd,
+                    budget_period=current.budget_period,
+                    rpm_limit=current.rpm_limit,
+                    tpm_limit=current.tpm_limit,
+                    max_parallel_requests=current.max_parallel_requests,
+                    updated_by=user_id,
+                    now=NOW,
+                ),
+                key=key.rotate(now=NOW),
+                expected_revision=current.revision,
+                action=ModelGatewayProvisioningAction.RECONCILE,
+            )
+            await session.commit()
+        return _COMPLETED
+
+    await SqlAlchemyModelGatewayCommandStore(session_factory).process_next(handler, now=NOW)
+
+    async with session_factory() as session:
+        key = await session.get(TenantModelGatewayKeyRecord, tenant_id)
+    assert key is not None
+    assert key.key_version == 2
+    # API 写下的待回收记录必须原样保留，否则 v1 在网关侧成为孤儿
+    assert key.retired_key_version == 1
+    # 本次对账真实观测到的是 v1 已可用
+    assert key.provisioned_key_version == 1

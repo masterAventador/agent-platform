@@ -2,11 +2,12 @@
 
 Key 明文既不落数据库、也不进接口/日志/审计：Controller 与 Worker 都用本模块从
 服务端密钥（``AGENT_PLATFORM_MODEL_GATEWAY_KEY_SECRET``）+ tenant_id + key_version
-重新派生同一个值。数据库只保存 ``key_version`` 与 SHA256 摘要（与 C15 account token
-一致的摘要模式），摘要不足以还原明文。
+重新派生同一个值。数据库**只保存版本号**，连 SHA256 摘要都不存——摘要同样可现场派生，
+不存它就等于数据库里不存在任何由凭据派生的材料，API 也因此完全不需要持有派生密钥。
 
 轮换等价于递增 ``key_version``；撤销由 LiteLLM 侧 block/delete 完成。派生密钥本身的
-加密存储、KMS 托管与轮换属 C18 生产凭据体系。
+加密存储、KMS 托管与轮换属 C18 生产凭据体系；它的 fail-closed 校验归 ``config.AppSettings``
+统一负责，本模块不重复实现一套环境判定。
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from pydantic import SecretStr
 INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET = "agent-platform-insecure-dev-model-gateway-key-secret"
 
 _DERIVATION_PURPOSE = "model-gateway-tenant-key.v1"
-_DEV_ENVIRONMENTS = frozenset({"local", "development", "test"})
 _KEY_ALIAS_PREFIX = "agent-platform-tenant"
 
 
@@ -33,16 +33,6 @@ class ModelGatewayKeySecretNotConfiguredError(RuntimeError):
         super().__init__(
             "model gateway key secret is not configured; refusing to derive tenant keys"
         )
-
-
-def resolve_model_gateway_key_secret(*, environment: str, configured_secret: str) -> str:
-    """解析派生密钥：非开发环境缺密钥必须 fail-closed。"""
-
-    if configured_secret:
-        return configured_secret
-    if environment in _DEV_ENVIRONMENTS:
-        return INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET
-    raise ModelGatewayKeySecretNotConfiguredError()
 
 
 def derive_tenant_gateway_key(

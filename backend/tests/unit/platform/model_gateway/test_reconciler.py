@@ -54,11 +54,17 @@ def _policy(*, tenant_id: UUID, enabled: bool = True) -> TenantModelGatewayPolic
     )
 
 
-def _key(*, tenant_id: UUID, retired: int | None = None) -> TenantModelGatewayKey:
+def _key(
+    *,
+    tenant_id: UUID,
+    retired: int | None = None,
+    provisioned: int | None = None,
+) -> TenantModelGatewayKey:
     return TenantModelGatewayKey.restore(
         tenant_id=tenant_id,
         key_version=2 if retired else 1,
         retired_key_version=retired,
+        provisioned_key_version=provisioned,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -159,6 +165,8 @@ async def test_enabled_policy_reconciles_to_active_and_clears_retirement() -> No
     assert outcome.command_status is ProvisioningCommandStatus.COMPLETED
     assert outcome.policy_status is ModelGatewayPolicyStatus.ACTIVE
     assert outcome.clear_key_retirement is True
+    # 只有真实对账成功才把网关侧观测为「已建立」
+    assert outcome.key_provisioned is True
     assert outcome.error_code is None
     assert provisioner.enabled_calls == [(tenant_id, 1)]
     assert provisioner.disabled_calls == []
@@ -179,6 +187,8 @@ async def test_disabled_policy_reconciles_to_disabled_and_blocks_the_key() -> No
 
     assert outcome.command_status is ProvisioningCommandStatus.COMPLETED
     assert outcome.policy_status is ModelGatewayPolicyStatus.DISABLED
+    # 网关侧 Key 已阻断：观测必须随之失效，否则再启用窗口会拿 blocked Key 撞 401
+    assert outcome.key_provisioned is False
     assert provisioner.disabled_calls == [(tenant_id, 1)]
     assert provisioner.enabled_calls == []
 
@@ -242,6 +252,7 @@ async def test_transient_retries_are_bounded_and_end_in_a_controlled_error() -> 
     assert outcome.policy_status is ModelGatewayPolicyStatus.ERROR
     assert outcome.error_code == "provisioning_retry_exhausted"
     assert outcome.next_attempt_at is None
+    assert outcome.key_provisioned is None
 
 
 @pytest.mark.asyncio
@@ -259,6 +270,8 @@ async def test_permanent_failures_stop_burning_retries_immediately() -> None:
     assert outcome.command_status is ProvisioningCommandStatus.FAILED
     assert outcome.policy_status is ModelGatewayPolicyStatus.ERROR
     assert outcome.error_code == "provisioning_rejected"
+    # 本次未观测到网关状态：既有观测保持不变，网关侧仍可用的租户不因此下线
+    assert outcome.key_provisioned is None
 
 
 @pytest.mark.asyncio
@@ -277,6 +290,7 @@ async def test_unknown_outcomes_are_never_auto_replayed() -> None:
     assert outcome.error_code == "provisioning_outcome_unknown"
     assert outcome.next_attempt_at is None
     assert outcome.clear_key_retirement is False
+    assert outcome.key_provisioned is None
 
 
 @pytest.mark.asyncio

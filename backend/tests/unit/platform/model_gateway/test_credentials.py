@@ -13,10 +13,8 @@ import pytest
 from pydantic import SecretStr
 
 from agent_platform.platform.model_gateway.credentials import (
-    INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET,
     ModelGatewayKeySecretNotConfiguredError,
     derive_tenant_gateway_key,
-    resolve_model_gateway_key_secret,
     tenant_gateway_key_alias,
 )
 
@@ -77,14 +75,3 @@ def test_key_alias_is_tenant_attributable_and_matches_the_admin_contract() -> No
     assert str(_TENANT) in alias
     assert alias != tenant_gateway_key_alias(tenant_id=_TENANT, key_version=8)
 
-
-def test_dev_environments_fall_back_to_the_published_weak_secret() -> None:
-    resolved = resolve_model_gateway_key_secret(environment="development", configured_secret="")
-
-    assert resolved == INSECURE_DEV_MODEL_GATEWAY_KEY_SECRET
-
-
-def test_staging_and_production_fail_closed_without_an_explicit_secret() -> None:
-    for environment in ("staging", "production"):
-        with pytest.raises(ModelGatewayKeySecretNotConfiguredError):
-            resolve_model_gateway_key_secret(environment=environment, configured_secret="")

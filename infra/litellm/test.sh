@@ -20,7 +20,7 @@ export LITELLM_NETWORK_NAME
 MIN_DOCKER_COMPOSE_VERSION="2.20.0"
 
 usage() {
-  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix|tenant-key-reconcile|real-provider}" >&2
+  echo "Usage: bash infra/litellm/test.sh {config|image-platform|start-health|stub-completion|worker-readiness|worker-chat|stub-matrix|tenant-key-reconcile|tenant-key-inference|real-provider}" >&2
 }
 
 if [[ $# -ne 1 ]]; then
@@ -321,6 +321,20 @@ PY
       LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
       uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
         python "${ROOT_DIR}/infra/litellm/tenant_key_probe.py"
+    ;;
+  tenant-key-inference)
+    # C16 覆盖缺口：admin 侧有 Key 记录 ≠ 该 Key 能完成推理。这条门禁走真实 LiteLLM 的
+    # OpenAI-compatible 推理路径，证明 Controller 对账产出的凭据真的可用，
+    # 且未对账租户的派生 Key 会被真实拒绝（S1 当时命中的正是后者）。
+    install_cleanup_trap
+    prepare_runtime
+    compose_stub up -d --wait --wait-timeout 240 litellm openai-stub
+    MODEL_GATEWAY_KEY_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+      LITELLM_ADMIN_URL="http://127.0.0.1:${LITELLM_PORT}" \
+      LITELLM_GATEWAY_URL="http://127.0.0.1:${LITELLM_PORT}/v1" \
+      LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
+      uv run --project "${ROOT_DIR}/backend" --frozen --no-dev \
+        python "${ROOT_DIR}/infra/litellm/tenant_key_probe.py" inference
     ;;
   worker-readiness|worker-chat|stub-matrix)
     install_cleanup_trap

@@ -75,6 +75,7 @@ def _key(*, version: int = 1, retired_version: int | None = None) -> TenantModel
         tenant_id=TENANT_ID,
         key_version=version,
         retired_key_version=retired_version,
+        provisioned_key_version=retired_version,
         created_at=NOW,
         updated_at=NOW,
     )

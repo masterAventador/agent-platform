@@ -35,7 +35,10 @@ class ModelGatewayKeyNotProvisioned(ModelGatewayPolicyError):
 
 
 class ModelGatewayCredentialUnavailable(ModelGatewayPolicyError):
-    """当前租户没有可用的可归因网关凭据；消息只含稳定 code，绝不含密钥材料。"""
+    """当前租户没有可用的可归因网关凭据，且重投不会改变结果（配置性缺陷）。
+
+    消息只含稳定 code，绝不含密钥材料。
+    """
 
     code = "model_gateway_credential_unavailable"
 
@@ -43,6 +46,12 @@ class ModelGatewayCredentialUnavailable(ModelGatewayPolicyError):
         if code is not None:
             self.code = code
         super().__init__(self.code)
+
+
+class ModelGatewayCredentialNotReady(ModelGatewayCredentialUnavailable):
+    """凭据尚在对账中——秒级自愈的瞬态，必须交队列重投，不得判为永久定义错误。"""
+
+    code = "model_gateway_provisioning_in_progress"
 
 
 class ModelGatewayProvisioningError(Exception):

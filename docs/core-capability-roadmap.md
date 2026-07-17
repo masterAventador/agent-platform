@@ -469,23 +469,48 @@
 
 - 阶段一（本轮）：Controller 对账 LiteLLM + 租户可归因/可撤销凭据 —— 对应完成定义第 1 条（Controller 侧）与第 2 条；
 - 阶段二：用量/成本记录（模型、Token、延迟、错误、费用、任务归属）—— 第 3 条；
-- 阶段三：预算/配额执行、限流与用量告警 —— 第 4 条；含 C12 调度入口的配额门禁接入；
+- 阶段三：预算/配额执行、限流与用量告警 —— 第 4 条；含 C12 调度入口的配额门禁接入。**同时承接完成定义第 1 条中「供应商、可用模型、fallback、超时和重试」的平台管理，以及第 8 条的「供应商故障 / fallback」测试**——此前四阶段划分没有任何阶段承接它们，属台账断链（见下方「fallback 承接归属」）；
 - 阶段四：固定数据集回归评测、人工反馈、版本对比与客户端模型/用量/成本/预算/评测页面 —— 第 5、6 条。
+
+**fallback 承接归属（阶段三）**：完成定义第 1 条的「平台管理供应商、模型别名、可用模型、fallback、超时和重试」在阶段一只落了「模型别名 / 可用模型」（provider-neutral alias 与租户 allowed_aliases）。实测 `infra/litellm/config.yaml`（真实配置）**没有** `fallbacks` / `num_retries`，只有 `config.stub.yaml` 有；平台侧目前完全没有 fallback 管理对象。归入阶段三的理由：① fallback、超时、重试与限流、配额同属「调用时刻的 guardrail」，共用同一套 desired-policy + Controller 对账机制，放在一起可复用而不是各造一套；② 阶段二是纯观测（记录用量/成本），不应新增控制面；③ 完成定义第 8 条把「供应商故障、配额耗尽、fallback」并列，配额耗尽本就在阶段三，三者同阶段验证才能覆盖它们的交互（如 fallback 时的配额与账单归因）。阶段三实施时需一并决定 LiteLLM router 配置（config.yaml 的 `fallbacks`/`num_retries`/`timeout`）由平台以受版本管理的配置产物统一维护，而不是手工编辑。
+
+**复审修复记录（2026-07-17，双复审 FAIL 后集中修复，本任务提交）**：
+
+- **根因解耦（S1+S2 同源）**：`policy.status` 此前同时承担「对账进度」与「凭据可用性」。新增 `tenant_model_gateway_keys.provisioned_key_version`（迁移 `20260716_0037`）作为「网关侧真实存在且未被阻断的 Key 版本」的唯一真相源，只由 Controller 在真实网关确认后写入；`policy.status` 退回纯进度账本，仅用于在凭据不可用时区分瞬态/永久。Worker 改用 observed 版本派生凭据；
+- **S1**（Demo Seed 写 `status=active` 却零 reconcile 命令 → Demo 员工必然 401）：Seed 改为只写 desired（`status=pending`）并与策略同事务入队真实 pending RECONCILE 命令，Key 行与 `provisioned_key_version` 全部交由真实 Controller 对账产生。解耦后该缺陷**结构性不可复发**：Seed 无法伪造 observed 版本。三处宣称相反事实的注释/文档（路线图、`demo_seed.py`、`test_demo_seed.py`）已订正；测试补齐「Seed 必须入队命令」「Seed 绝不标记 provisioned」两条断言；
+- **S2**（`pending` 被判 Permanent → 每次策略变更打死窗口内并发 Run）：新增 `ModelGatewayProvisioningInProgress(TransientRuntimePreparationError)`，对账进行中交队列重投；已有 observed 版本时 `pending` **根本不再失败**（改 rpm_limit 的失败窗口从 2 秒降为零）。测试改为断言**归类**（瞬态/永久）而非仅异常类型——这正是原测试抓不到该缺陷的原因。同时把具体原因码（已撤销 / alias 越权 / 对账确定失败）保留到 Run 的 `error_code`，此前全部塌缩为笼统的 `model_gateway_unavailable`；
+- **M1**（DB 抖动裸逃逸）：`ModelGatewayPolicyPersistenceError` → 瞬态重投，`CorruptModelGatewayPolicy`（其子类，必须先捕获）→ 永久；补 DB 故障注入用例；
+- **M2**（轮换永久失败锁死租户）：解耦后租户继续使用 observed 的旧版本，**不再是服务影响**；409 文案补上可操作的逃生舱（重新 PUT 策略入队新对账），docstring 如实声明「先落库再触达网关」的代价而不只讲好处；
+- **M3**（派生密钥未做最小权限）：从共享 `x-backend-environment` 锚点移出，只注入 `worker` 与 `model-gateway-controller`；新增 `infra/compose/test_platform_secrets.py` 对 `docker compose config` 的**最终渲染结果**门禁（反向验证：放回共享锚点立即 2 项 RED）；
+- **L1**：`test_skip_locked_lets_other_tenants_proceed_in_parallel` 原本只断言两副本都成功、拿到不同租户，不含时序断言，因此**剥离 `skip_locked` 仍全绿**；已改为断言两次持锁对账的时间区间真实重叠；
+- **L2**：删除死代码 `resolve_model_gateway_key_secret` 与 `_DEV_ENVIRONMENTS`（零生产调用点，且与 `config.py` 的 fail-closed 策略不一致——测试对着没人调用的安全控制断言属虚假信心）；派生密钥的 fail-closed 唯一真相源为 `config.AppSettings`；
+- **L3**：删除 `model_gateway_provisioning_commands.status` CHECK 中已废弃的 `'processing'`（枚举本就没有），迁移用 `batch_alter_table(copy_from=..., recreate="always")` 整表重建以摘掉匿名 CHECK，并给新约束命名；
+- **L4**：订正 `credentials.py` docstring 中「数据库保存 SHA256 摘要」的早期方案残留——实际连摘要都不存；
+- **覆盖缺口**：新增 `infra/litellm/test.sh tenant-key-inference` 门禁——对真实 LiteLLM 断言「派生租户 Key → `/chat/completions` → 200」，并断言未对账租户的派生 Key 被真实拒绝（**S1 当时命中的正是后者**）。此前的门禁只断言 admin 侧有记录，这正是 S1 能带着全绿测试出厂的原因；
+- **`platform/models.py` 锚点**：遗留项③ 的提示写到真正的触发点 `DEFAULT_MODEL_ALIASES` 定义处，不再只存在于路线图；
+- **`infra/platform/mvp-profile.sh`**：补齐 Controller 所需的 `LITELLM_MASTER_KEY` 与 `MODEL_GATEWAY_KEY_SECRET`（缺失时 app compose 直接渲染失败 → 对账永不发生），并把 `model-gateway-controller` 同时纳入**启动清单与健康门禁**（`start_profile` 的 `up` 是显式服务枚举，仅在 compose 里声明 `profiles: ["worker"]` 并不会被拉起——隔离验收栈实跑时健康门禁报出 `app service is missing: model-gateway-controller`，坐实了该缺口：没有它对账永不发生，而后果只会在 Run 真正跑起来后才以 401/瞬态重投暴露）；两份清单都有契约测试钉住。
+
+- **`infra/litellm/worker_gateway_probe.py`**：阶段一把 `LiteLLMChatModelFactory` 的 `api_key` 从构造参数改成按调用传入（fail-closed 的结构性保证），但漏改了这个生产探针的调用点——单测覆盖不到它，隔离验收栈实跑时以 `TypeError: LiteLLMChatModelFactory.__init__() got an unexpected keyword argument 'api_key'` 暴露。已修复并重跑 `worker-chat` / `worker-readiness` / `stub-matrix` 三条既有门禁全绿。
+
+- **S1 解除条件的真实证据（隔离验收栈实测，非推演）**：完整真实栈（PostgreSQL + Redis + MinIO + 真实 LiteLLM v1.86.2 + API + Dispatcher + Worker + **model-gateway-controller** + Sandbox + 前端）启动并全部健康后，从宿主机重放 Demo Seed，随后直接查真实数据库：策略 `status=active`（**Seed 写的是 pending，只可能由真实 Controller 推进**）、Key 行 `key_version=1 / provisioned_key_version=1`（**Seed 完全不写 Key 行，只可能由 Controller 在真实网关确认后创建并标记**）、对账命令 `completed / attempts=1 / 无错误`（Seed 入队的命令被真实消费）。同栈的 `Production worker ChatOpenAI -> LiteLLM -> stub passed` 证明 Worker 侧推理链路通；**Playwright 用户流程 `✓ 用户通过 MVP 完整栈完成数字员工任务并在刷新后看到持久化终态` 通过**，即以真实用户方式（浏览器点击 → 提交 → 任务终态持久化）跑通了 Demo 员工任务。这条链路在修复前**不可能成立**——Seed 从不入队命令，Controller 也不在启动清单里，其派生 Key 在 LiteLLM 侧根本不存在。
+
+**本轮发现的既有问题（不在本任务范围，未修，交主代理判断）**：`infra/litellm/test_config.py::test_local_stub_override_is_test_only_and_not_published` 在 `f5fb483`（C16 开工前）即已失败——它断言 stub override 的 `image` 等于钉住的上游镜像，而 `compose.stub.yml` 实际构建本地 `agent-platform-litellm-stub:local`。已用 `git checkout f5fb483 -- infra/litellm/` 实测确认与本任务无关；本任务对 `infra/litellm/` 只改了 `test.sh` 与 `tenant_key_probe.py`。按「单个任务提交只能包含该任务及其必要基础改动」未夹带修复。
 
 实现记录（阶段一，2026-07-17，本任务提交，分支 `task/c16-model-governance`）：
 
 - **复用既有基线**：`LiteLLMAdminClient`（9074a67，843 行、826 项单测）此前只被自己的单测引用、无任何生产接线；本轮把它接入生产而非另写客户端，未修改其任何行为。新增 `infrastructure/llm/provisioner.py` 作为唯一适配层，把上游错误一次性映射为平台端口语义；
 - **独立 Controller**：新增 `workers/model_gateway_controller.py` 进程（与 `sandbox_janitor` 同构，独立 compose 服务 `model-gateway-controller`），消费既有 outbox 对账真实 LiteLLM 公开管理 API 并推进策略状态；API 进程内不做任何对账。它是唯一持有 LiteLLM master key 的平台进程；
-- **多副本安全**：认领用 `FOR UPDATE SKIP LOCKED` + 按租户串行（NOT EXISTS 排除本租户更早的 pending 命令），认领事务横跨网关调用，崩溃即释放锁、命令仍 pending 自然重入，无需 processing 租约。**真实 PG 并发门禁**：5 项用例（并发不重复执行/跨租户并行/同租户严格有序/CAS 丢弃被取代的 revision/崩溃释放重入）通过；反向验证——移除 `skip_locked` 后其中 3 项立即 RED，证明门禁非假绿；
+- **多副本安全**：认领用 `FOR UPDATE SKIP LOCKED` + 按租户串行（NOT EXISTS 排除本租户更早的 pending 命令），认领事务横跨网关调用，崩溃即释放锁、命令仍 pending 自然重入，无需 processing 租约。**真实 PG 并发门禁**：5 项用例（并发不重复执行/跨租户并行/同租户严格有序/CAS 丢弃被取代的 revision/崩溃释放重入）通过。反向验证（实测，两种退化分别验证）：**移除整个行锁** → 3 项 RED；**仅剥离 `skip_locked` 保留 `FOR UPDATE`**（退化为互相阻塞但仍都成功）→ 并行用例 RED。后者最初并测不出来——原用例只断言两个副本都返回 True、拿到不同租户，不含任何时序断言，因此不 pin 它名字宣称的「并行」行为；现已改为断言两次持锁对账的时间区间真实重叠。
 - **凭据「派生而非存储」**：Key 明文与其 SHA256 摘要都由服务端密钥 + `tenant_id` + `key_version` 现场派生，`tenant_model_gateway_keys` 只存两个整数（`key_version`/`retired_key_version`），数据库中不存在任何由凭据派生的材料，API 也因此无需持有派生密钥。派生密钥在 staging/production fail-closed（≥32 字符、拒绝开发弱密钥），与 C14 `audit_hmac_key` 同模式；
 - **错误分类与不确定语义**：瞬态（传输/超时/5xx/429）按 `next_attempt_at` 指数退避（2s→300s 上限）、次数有界（8 次）后受控转 `error`；永久（4xx/校验/配置）立即 `error`；`LiteLLMAdminOutcomeUnknown` 一律停在 `error` 且绝不自动重放（同 6.2 节 `tool_execution_uncertain` 哲学）。已结算命令按保留期（默认 7 天）有界清扫；
 - **Worker 升级为租户 Key**：`PlatformModelResolver.resolve` 改为 async + 按 `tenant_id` 解析；`LiteLLMChatModelFactory` 不再持有共享 Key，凭据按租户传入。无策略/已撤销/未对账/Key 未签发/alias 越权一律 fail-closed，绝不回退共享 Key；解析只读平台数据库不调管理接口，LiteLLM 管理面故障不波及存量 active 租户。**生产装配由 `tests/unit/workers/test_main.py::test_production_worker_assembly_wires_tenant_attributable_gateway_credentials` 直接背书**（对齐 C07/C13 的生产装配缺口教训）；
 - **审计**：`PUT /policy` 与新增 `POST /api/v1/model-gateway/key/rotate`（仅 Owner `models.manage`）全部经 `emit_audit_event` 接入 C14；metadata 只含 provider-neutral 策略字段与版本号，契约测试断言 Key 明文不在响应与审计中；
 - **Demo Seed**：幂等补齐演示租户 active 策略 + Key v1，保证常驻开发栈的 Demo 员工在 fail-closed 下开箱可跑（`_upsert_record` 顺带从逐表特判主键改为统一从 mapper 取，移除既有 `RunEventRecord` 特判）；
 - **真实 LiteLLM 对账门禁**：新增 `infra/litellm/test.sh tenant-key-reconcile` + `tenant_key_probe.py`，对**真实 LiteLLM v1.86.2 容器**（随机项目名/端口、验后自动销毁）验证租户聚合、Key 签发可归因、幂等重放收敛、轮换后旧版本在网关侧被删除、撤销后立即阻断——首跑即通过，Stub 与真实实现无契约背离；
-- 验证命令：`uv run pytest tests/unit tests/contract -q`（1474 passed）、`tests/integration/database tests/integration/model_gateway tests/integration/bootstrap`（含 autogenerate 漂移守卫）、`uv run ruff check .`、`uv run mypy`（0 错误）、真实 PG 并发门禁 5 passed、真实 LiteLLM 对账门禁 passed；
+- 验证命令（复审修复后重跑）：`uv run pytest tests/unit tests/contract -q`（1480 passed）、`tests/integration/database tests/integration/bootstrap`（45 passed / 1 skipped，含 autogenerate 漂移守卫）、真实 PG `tests/integration/model_gateway`（23 passed）、`uv run ruff check .`、`uv run mypy`（0 错误）、`python3 -m unittest infra.platform.test_contract`（45 OK）、`python3 infra/compose/test_platform_secrets.py`（3 OK）、`bash infra/litellm/test.sh tenant-key-reconcile / tenant-key-inference / worker-chat / worker-readiness / stub-matrix`（全通过）；
+- 阶段一初版验证命令：`uv run pytest tests/unit tests/contract -q`（1474 passed）、`tests/integration/database tests/integration/model_gateway tests/integration/bootstrap`（含 autogenerate 漂移守卫）、`uv run ruff check .`、`uv run mypy`（0 错误）、真实 PG 并发门禁 5 passed、真实 LiteLLM 对账门禁 passed；
 - **本阶段明确不含**（留给阶段二/三/四，不得据此宣称 C16 完成）：用量/Token/延迟/费用记录、预算与配额执行、限流与用量告警、评测、前端页面；
-- **已知缺口 / 遗留项**：① 派生密钥本身仍是环境变量注入的单一密钥，泄漏等于可签发任意租户 Key，纳入 KMS/Vault 托管与轮换属 C18；② 轮换/撤销立即生效，不为在途 Run 保留旧凭据（其后续模型调用会失败而非静默降级），这是有意的安全取舍；③ `DEFAULT_MODEL_ALIASES` 当前只有 `general-purpose`，存量 Key 的 models 范围漂移不可达，故未实现 `update_key`——**新增 alias 时必须同步实现存量 Key 的范围对齐**，否则存量租户会命中 `provisioning_key_scope_conflict` 永久错误；④ Demo Seed 直接写 `status=active` 以保证开发栈开箱可用，与"状态只由 Controller 推进"略有出入（Controller 后续对账幂等收敛到同一 desired）。
+- **已知缺口 / 遗留项**：① 派生密钥本身仍是环境变量注入的单一密钥，泄漏等于可签发任意租户 Key，纳入 KMS/Vault 托管与轮换属 C18（已按最小权限只发给 worker 与 controller，由 `infra/compose/test_platform_secrets.py` 对 `docker compose config` 的最终结果门禁）；② 轮换/撤销立即生效，不为在途 Run 保留旧凭据（其后续模型调用会失败而非静默降级），这是有意的安全取舍；③ `DEFAULT_MODEL_ALIASES` 当前只有 `general-purpose`，存量 Key 的 models 范围漂移不可达，故未实现 `update_key`——**新增 alias 时必须同步实现存量 Key 的范围对齐**，否则存量租户会命中 `provisioning_key_scope_conflict` 永久错误并全量 fail-closed；该提示已作为锚点注释写在真正的触发点 `platform/models.py` 的 `DEFAULT_MODEL_ALIASES` 定义处，不依赖本文档被读到；④ 轮换若永久失败，`retired_key_version` 不会清空，再次轮换持续 409 直到重新 PUT 策略产生新对账命令；服务不受影响（凭据解析用 observed 版本，租户继续使用网关侧真实可用的旧版本），409 文案已给出可操作的逃生舱。
 
 完成定义：
 

@@ -17,6 +17,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import perf_counter
 from uuid import UUID, uuid4
 
 import pytest
@@ -177,15 +178,22 @@ async def test_concurrent_replicas_never_provision_the_same_command_twice(
 async def test_skip_locked_lets_other_tenants_proceed_in_parallel(
     session_factory: async_sessionmaker,
 ) -> None:
+    """SKIP LOCKED 的价值是「不被别的租户阻塞」——必须断言真实并行，而不是只断言都成功。
+
+    只断言 `results == [True, True]` 抓不到退化：把 skip_locked 改成普通 FOR UPDATE
+    时两个副本仍都会成功，只是被串行化了。这里断言两次对账在时间上真实重叠。
+    """
     first_tenant, first_user = await _seed_tenant(session_factory)
     second_tenant, second_user = await _seed_tenant(session_factory)
     await _put_desired(session_factory, _policy(first_tenant, first_user), expected_revision=0)
     await _put_desired(session_factory, _policy(second_tenant, second_user), expected_revision=0)
-    claimed_tenants: list[UUID] = []
+    hold_seconds = 0.4
+    spans: list[tuple[UUID, float, float]] = []
 
     async def handler(claimed: ClaimedProvisioningCommand) -> ReconcileOutcome:
-        claimed_tenants.append(claimed.tenant_id)
-        await asyncio.sleep(0.4)
+        started = perf_counter()
+        await asyncio.sleep(hold_seconds)
+        spans.append((claimed.tenant_id, started, perf_counter()))
         return _COMPLETED
 
     async def replica() -> bool:
@@ -195,9 +203,13 @@ async def test_skip_locked_lets_other_tenants_proceed_in_parallel(
 
     results = await asyncio.gather(replica(), replica())
 
-    # 一个租户被锁住不该拖住另一个租户：两个副本各拿到一个不同租户
     assert results == [True, True]
-    assert set(claimed_tenants) == {first_tenant, second_tenant}
+    assert {span[0] for span in spans} == {first_tenant, second_tenant}
+    # 真实并行断言：两次持锁对账的时间区间必须重叠。串行化时不可能重叠。
+    first_span, second_span = sorted(spans, key=lambda span: span[1])
+    assert first_span[2] > second_span[1], (
+        "两个租户的对账被串行化了：SKIP LOCKED 未生效"
+    )
 
 
 @pytest.mark.asyncio

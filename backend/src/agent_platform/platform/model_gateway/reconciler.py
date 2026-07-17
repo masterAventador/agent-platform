@@ -72,9 +72,12 @@ class ModelGatewayReconciler:
             if claimed.policy.enabled:
                 await self._provisioner.apply_enabled(policy=claimed.policy, key=claimed.key)
                 reached = ModelGatewayPolicyStatus.ACTIVE
+                provisioned = True
             else:
                 await self._provisioner.apply_disabled(policy=claimed.policy, key=claimed.key)
                 reached = ModelGatewayPolicyStatus.DISABLED
+                # 撤销对账完成：网关侧 Key 已被阻断，观测必须随之失效。
+                provisioned = False
         except ModelGatewayProvisioningOutcomeUnknown as error:
             # 可能已在网关生效：自动重放会产生重复副作用，必须停在可诊断的终态。
             return self._settle_error(error)
@@ -85,6 +88,7 @@ class ModelGatewayReconciler:
         return ReconcileOutcome(
             command_status=ProvisioningCommandStatus.COMPLETED,
             policy_status=reached,
+            key_provisioned=provisioned,
             clear_key_retirement=True,
         )
 
@@ -115,6 +119,8 @@ class ModelGatewayReconciler:
 
     @staticmethod
     def _settle_error(error: ModelGatewayProvisioningError) -> ReconcileOutcome:
+        # key_provisioned 保持 None：本次未能观测网关状态。既有观测继续有效——一次失败的
+        # 策略变更不该让一个网关侧仍然可用的租户下线（轮换失败时旧版本就仍然完全可用）。
         return ReconcileOutcome(
             command_status=ProvisioningCommandStatus.FAILED,
             policy_status=ModelGatewayPolicyStatus.ERROR,

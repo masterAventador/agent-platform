@@ -5,6 +5,13 @@ Stub-only proof is not enough: C04 (fake COS relaxed the real SDK contract) and 
 real contact. This probe runs the production LiteLLMModelGatewayProvisioner against a
 real LiteLLM v1.86.2 admin API and asserts the tenant aggregate, key issuance,
 idempotent replay, rotation retirement and revocation all round-trip for real.
+
+`inference` mode closes the gap that let S1 ship: asserting the admin API records a key
+proves nothing about whether the *derived* key can actually authenticate an inference
+call. It provisions a tenant the same way the Controller does, then drives a real
+/chat/completions with the derived credential and asserts HTTP 200 — and asserts that a
+never-provisioned tenant's derived key is rejected, which is exactly what every Demo run
+hit when the seed faked a terminal state without ever enqueuing a reconcile command.
 """
 
 from __future__ import annotations
@@ -54,6 +61,8 @@ def _key(*, version: int = 1, retired: int | None = None) -> TenantModelGatewayK
         tenant_id=TENANT_ID,
         key_version=version,
         retired_key_version=retired,
+        # observed 版本；对账前的入参用 retired（轮换时上一版本仍是网关上真实存在的那个）
+        provisioned_key_version=retired,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -73,6 +82,49 @@ def _admin() -> LiteLLMAdminClient:
         master_key=SecretStr(os.environ["LITELLM_MASTER_KEY"]),
         timeout_seconds=30,
     )
+
+
+async def _assert_inference_round_trip() -> None:
+    """派生 Key 必须真的能完成一次推理——admin 侧有记录不等于凭据可用。"""
+    import httpx
+
+    provisioner = LiteLLMModelGatewayProvisioner(admin=_admin(), key_secret=KEY_SECRET)
+
+    # 未对账的租户：其派生 Key 在网关侧根本不存在，必须被真实拒绝。
+    unprovisioned = derive_tenant_gateway_key(
+        secret=KEY_SECRET, tenant_id=uuid4(), key_version=1
+    )
+    async with httpx.AsyncClient(timeout=30) as client:
+        rejected = await client.post(
+            f"{os.environ['LITELLM_GATEWAY_URL']}/chat/completions",
+            headers={"Authorization": f"Bearer {unprovisioned.get_secret_value()}"},
+            json={"model": "general-purpose", "messages": [{"role": "user", "content": "ping"}]},
+        )
+    assert rejected.status_code in {401, 403}, (
+        f"an unprovisioned tenant key must be rejected, got {rejected.status_code}"
+    )
+    print(f"unprovisioned tenant key correctly rejected: HTTP {rejected.status_code}")
+
+    # 真实对账后，同一派生函数得到的 Key 必须能完成一次真实推理。
+    await provisioner.apply_enabled(policy=_policy(), key=_key())
+    credential = derive_tenant_gateway_key(
+        secret=KEY_SECRET, tenant_id=TENANT_ID, key_version=1
+    )
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            f"{os.environ['LITELLM_GATEWAY_URL']}/chat/completions",
+            headers={"Authorization": f"Bearer {credential.get_secret_value()}"},
+            json={"model": "general-purpose", "messages": [{"role": "user", "content": "ping"}]},
+        )
+    assert response.status_code == 200, (
+        f"provisioned tenant key failed inference: HTTP {response.status_code} {response.text}"
+    )
+    content = response.json()["choices"][0]["message"]["content"]
+    assert content, "inference returned empty content"
+    print(f"derived tenant key completed a real inference: HTTP 200 content={content!r}")
+
+    await _admin().delete_key(TENANT_ID, _digest(1))
+    print("real LiteLLM tenant key inference probe passed")
 
 
 async def main() -> None:
@@ -115,7 +167,8 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        mode = sys.argv[1] if len(sys.argv) > 1 else "reconcile"
+        asyncio.run(_assert_inference_round_trip() if mode == "inference" else main())
     except AssertionError as error:
         print(f"tenant key probe failed: {error}", file=sys.stderr)
         raise SystemExit(1) from None
