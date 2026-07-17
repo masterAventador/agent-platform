@@ -24,6 +24,10 @@ EXPECTED_IMAGE = (
     "ghcr.io/berriai/litellm-non_root:v1.86.2@"
     "sha256:511b513bc68956793433d62c1812daff56984325543f6a15431c622823fd90cb"
 )
+# 本地 Stub 镜像由 Dockerfile.stub 在本机构建，只存在于开发者机器上：
+# 它必须使用不可能被解析到任何 registry 的本地标签，并且永不 pull。
+STUB_IMAGE = "agent-platform-litellm-stub:local"
+STUB_DOCKERFILE = ROOT / "infra/litellm/Dockerfile.stub"
 
 
 class LiteLlmComposeContractTest(unittest.TestCase):
@@ -298,26 +302,32 @@ class LiteLlmComposeContractTest(unittest.TestCase):
             },
         )
         stub = config["services"]["openai-stub"]
-        self.assertEqual(stub["image"], EXPECTED_IMAGE)
+        # Stub 跑的是本机构建的一次性镜像，不是发布用的 LiteLLM 官方镜像。
+        self.assertEqual(stub["image"], STUB_IMAGE)
+        self.assertNotEqual(stub["image"], EXPECTED_IMAGE)
+        # 本地标签永远不能被当成 registry 引用去拉取，否则一旦有人在公共
+        # registry 抢注同名 tag，测试栈就会拉到外部镜像。
+        self.assertEqual(stub.get("pull_policy"), "never")
         self.assertNotIn("ports", stub)
         self.assertEqual(stub["restart"], "no")
         self.assertTrue(stub["read_only"])
-        self.assertEqual(len(stub["volumes"]), 1)
-        self.assertEqual(Path(stub["volumes"][0]["source"]), STUB_SERVER)
-        self.assertTrue(stub["volumes"][0]["read_only"])
+        # Stub 脚本已由 Dockerfile.stub 烤进镜像，不再从宿主机 bind mount；
+        # 因此 stub 不允许持有任何宿主机挂载。
+        self.assertEqual(stub.get("volumes", []), [])
 
         environment = config["services"]["litellm"]["environment"]
         self.assertEqual(environment["LITELLM_UPSTREAM_MODEL"], "openai/local-test")
         self.assertEqual(environment["LITELLM_UPSTREAM_API_BASE"], "http://openai-stub:4010/v1")
         self.assertEqual(environment["LITELLM_UPSTREAM_API_KEY"], "stub-not-a-provider-key")
 
-        config_mount = next(
-            volume
-            for volume in config["services"]["litellm"]["volumes"]
-            if volume["target"] == "/app/config.yaml"
-        )
-        self.assertEqual(Path(config_mount["source"]), STUB_CONFIG)
-        self.assertTrue(config_mount["read_only"])
+        # Stub override 下 LiteLLM 同样跑本地构建镜像：config.stub.yaml 已烤进镜像并
+        # 由 --config 显式选中，宿主机不再挂任何东西进代理容器。
+        litellm = config["services"]["litellm"]
+        self.assertEqual(litellm["image"], STUB_IMAGE)
+        self.assertIn("/app/config.stub.yaml", litellm["command"])
+        self.assertEqual(litellm.get("volumes", []), [])
+        # 发布用的 config.yaml 绝不能在 Stub 栈里被选中。
+        self.assertNotIn("/app/config.yaml", litellm["command"])
 
         self.assertTrue(STUB_CONFIG.is_file(), "missing test-only fallback config")
         stub_config = STUB_CONFIG.read_text(encoding="utf-8")
@@ -331,6 +341,24 @@ class LiteLlmComposeContractTest(unittest.TestCase):
         probe = WORKER_PROBE.read_text(encoding="utf-8")
         self.assertIn('"content": "fallback"', probe)
         self.assertIn("local fallback completion", probe)
+
+    def test_local_stub_image_is_built_from_the_pinned_official_base(self) -> None:
+        # Stub 镜像换成本地构建后，digest 钉死的责任转移到了 Dockerfile.stub 的
+        # FROM 上。这里必须继续钉住，否则 Stub 会悄悄漂到未锁定的 LiteLLM 版本。
+        dockerfile = STUB_DOCKERFILE.read_text(encoding="utf-8")
+        from_lines = [
+            line.split(maxsplit=1)[1].strip()
+            for line in dockerfile.splitlines()
+            if line.startswith("FROM ")
+        ]
+        self.assertEqual(from_lines, [EXPECTED_IMAGE])
+        # Stub 脚本与 Stub 专用 config 必须来自仓库内文件并烤进镜像，
+        # 运行时不依赖宿主机挂载。
+        self.assertIn(f"COPY --chown=65534:65534 {STUB_SERVER.name} /stub/", dockerfile)
+        self.assertIn(
+            f"COPY --chown=65534:65534 {STUB_CONFIG.name} /app/{STUB_CONFIG.name}",
+            dockerfile,
+        )
 
     def test_local_stub_protocol_regressions_are_part_of_the_config_gate(self) -> None:
         self.assertTrue(STUB_PROTOCOL_TEST.is_file(), "missing local Stub protocol tests")

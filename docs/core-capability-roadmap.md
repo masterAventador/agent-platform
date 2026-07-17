@@ -737,7 +737,19 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | 完整本机栈 E2E | 本地 Stub 下 2 项正式 Playwright 场景通过：成功场景完成注册、登录、员工发布、任务执行并在工作台展示真实员工/任务状态；失败场景经生产 Dispatcher/Worker/LiteLLM 返回确定性 HTTP 500，持久化 `failed` Run、错误码和 `run.failed` 事件，并在工作台展示真实失败计数。macOS 真实 Tauri 另以固定 Demo 账号完成登录、员工发布、任务执行、终态和工作台聚合纵切；后端工作台契约/映射 8 项、前端工作台 9 项通过。百炼真实 `qwen-plus` 请求通过 LiteLLM 稳定别名完成并返回真实用量 |
 | macOS/Windows Tauri 构建 | GitHub Actions `Tauri desktop validation` 运行 29334098300 双平台通过：正式桌面构建、Rust 测试与 2 项真实桌面冒烟均通过 |
 
-当前已知失败：**3 项**（2026-07-17 发现；红线 1/2 由主代理在 main 实测复现，红线 3 由 T8 二分发现）。**三条同一病根：真实 PG / 真实构建门禁被跳过后，旧契约测试无人更新——全部是回归，全部不是产品缺陷。**
+当前已知失败（2026-07-17 更新，采集条件：**`TEST_DATABASE_URL=真实 PG`**）：
+
+> **`TEST_DATABASE_URL=真实 PG` 下的后端全量 = 1850 passed / 22 skipped / 5 failed / 13 errors。**
+>
+> - **3 条红线已收口**（T8，零生产改动，双复审 PASS，见下）。
+> - **余 5 failed + 13 errors 全部归属 [T9] 夹具隔离缺陷，非产品缺陷**。根因已实锤到行：`test_postgres_scheduler_concurrency.py` 的 teardown 清理清单删 `UserRecord`/`TenantRecord`，却**不含 C16 新增的 `tenant_model_gateway_policies`** → 跨文件残留触发 `ForeignKeyViolationError: ... tenant_model_gateway_policies_updated_by_fkey`。两个复审各自用**全新库单跑**验证：scheduling `8 passed`、model_gateway `5 passed`，归因成立。
+> - ⚠️ **「1850 passed」仍不是真全量**：22 skipped 全是外部依赖门禁（Redis 3 / COS 5 / MinIO 2 / Docker sandbox 1 等），**无一条与 PG 相关**——即本轮 PG 门禁确已全部执行，但 Redis / COS / MinIO / RAGFlow 门禁仍未覆盖。**别让 1850 变成下一个盲区。**
+
+**已登记跟踪（非阻断，T8 双复审发现）**：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** docstring 都写着「没有审批记录时返回 False/None，调用方走原有流程」，但调用方自 `b319bc2` 起就是 409 fail-closed，「原有流程」在代码中已死。规格复审用三重论证确认**无 fail-open 旁路**（调用链唯一收敛到 409；approve/reject 的 `approval_id` 恒非 None 故 raw 命令路径不可达；变异实测反证该 raise 是唯一出口），属注释腐烂，单开 docs-only 提交订正。
+
+**❌ 本节禁止再写「当前已知失败：无 / 0」**——除非每一条都有归零证据。第 6 节此前长期声明「无」而与 3 条红线共存，已被认定为台账失真；T8 收口后若把 [T9] 的 5 failed / 13 errors 一并写成 0，即为**同一错误第二次发生**。（本条由 T8 规格复审在主代理准备「清零」时当场拦下并强制写入。）
+
+三条红线同一病根：**真实 PG / 真实构建门禁被跳过后，旧契约测试无人更新——全部是回归，全部不是产品缺陷。**
 
 > **⚠️ 方法论盲区（2026-07-17 主代理定位，比这两条红线本身更重要）**
 >
@@ -794,6 +806,10 @@ approve(recovered id) -> completed
 **稳定，且重建后审批直达 `completed`。** 这个不变量是生产关键：`run_worker.py:1757` 在恢复后拿 `pending_approval_id()` 去跟审计/持久化审批号对账——若不稳定，Worker 每次重启后审批就会全线卡死。它是稳定的 → C11 完成定义里的「LangGraph Checkpoint、持久化、进程重启恢复、Interrupt、人工审批」在真实 PG 下成立。
 
 **红线 3（T8 新发现，落在 C13，主代理决策见下）**：`tests/integration/runs/test_postgres_terminal_concurrency.py::test_api_terminal_control_records_non_terminal_intent[reject]` —— **即使单独在全新 DB 上跑也失败**（`assert 409 == 202`），不是隔离问题。二分定位：`b319bc2^` → 4 passed；**`b319bc2 feat(core): C13 独立审批中心` → 1 failed**。用例用**随机 uuid4** 当 `approval_id` 发 reject 并期望 202，而 C13 在 `runs.py:612` 显式加了 fail-closed（注释写着「安全 fail-closed……绝不静默回退老通道直发 raw 命令」）→ 查无审批记录返回 409 `approval_record_missing`。**产品行为是对的，红的又是旧断言——与红线 1、红线 2 同一个病根。**
+
+**已修复（T8，零生产改动，`runs.py` 的 fail-closed 一行未动）**：让用例先经 `Approval.create` + `add_idempotent` 建**真实 pending 审批记录**、用其 `invocation_id` 断言 202；并**新增 `test_run_control_reject_without_approval_record_is_fail_closed` 把 C13 的 fail-closed 正面钉住**——此前该安全校验唯一「碰到」它的测试，恰恰是个期望它不存在的旧断言。新用例断言的不只是 409，而是**真正的零副作用**：run 状态仍 `WAITING_FOR_APPROVAL`、无事件、**命令表条数前后不变**（挡住「返回 409 但已落 raw 命令」这种更隐蔽的 fail-open）。
+
+变异验证（T8 做 + 两个复审各自独立重做）：删掉 fail-closed → 转红 `assert 202 == 409`（正是 `b319bc2` 之前的旁路行为）；换成「返回 409 但仍落命令」→ 转红 `assert 2 == 1`（质量复审实测 `commands_before = 1`，证明那是**真增量断言**、不是 `== 0` 的空门禁）。
 
 **对 C13 `✅` 的决策（主代理）：维持 ✅，但如实记录其证据基础不完整。** 理由：产品行为正确且被验证（C13 的真实 PG 并发门禁 3/3 通过），完成定义里的「Tool 审批、工作流审批复用同一平台协议」「并发审批、越权、过期」均成立；红的是一条承载旧契约的断言。**但必须记下**：C13 合入时把一个真实 PG 门禁留成了红的，而其完成证据「真实 PG 并发 3/3」是**不含该文件的定向子集**——同一个方法论盲区。修复方向：让用例先建真实审批记录、用其 id 断言 202，并**补一条随机 id → 409 的用例把 C13 的 fail-closed 正面钉住**（此前该 fail-closed 无任何正面覆盖）。
 
