@@ -20,6 +20,7 @@ from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.runtimes.base import RuntimeStartRequest
 from agent_platform.runtimes.deep_agent import DeepAgentFactory, DeepAgentRuntime
 from agent_platform.runtimes.langgraph import LangGraphAgentGraph, LangGraphRuntime
+from agent_platform.runtimes.recovery import RuntimeControlMismatch
 
 
 class CounterState(TypedDict):
@@ -158,12 +159,14 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
     if database_url is None:
         pytest.skip("需要 TEST_DATABASE_URL 才运行真实 PostgreSQL runtime 恢复测试")
     checkpoint_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-    approval_id = uuid4()
+    # 图作者在 interrupt 载荷里自带的业务审批号。平台不信任它作为审批身份：
+    # 真正的 approval_id 由运行时按 run_id + 中断实例派生并通过事件下发。
+    business_approval_id = uuid4()
 
     def approval_node(state: ApprovalState) -> ApprovalState:
         del state
         decision = interrupt(
-            {"kind": "approval", "approval_id": str(approval_id)}
+            {"kind": "approval", "approval_id": str(business_approval_id)}
         )
         return {"output": cast(dict[str, object], decision)}
 
@@ -183,10 +186,15 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
 
     async with postgres_checkpointer(checkpoint_url) as first_checkpointer:
         first_graph = builder.compile(checkpointer=first_checkpointer)
-        waiting = await LangGraphRuntime(
+        first_runtime = LangGraphRuntime(
             graph_factory=lambda request: cast(LangGraphAgentGraph, first_graph)
-        ).start(request)
+        )
+        waiting = await first_runtime.start(request)
         assert waiting.status is RunStatus.WAITING_FOR_APPROVAL
+        started_history = await first_runtime.get_history(request.run_id)
+        platform_approval_id = UUID(str(started_history[-1].payload["approval_id"]))
+        # 平台下发的审批号不得等于图载荷里的业务号，否则图作者就能自选审批身份。
+        assert platform_approval_id != business_approval_id
 
     async with postgres_checkpointer(checkpoint_url) as second_checkpointer:
         second_graph = builder.compile(checkpointer=second_checkpointer)
@@ -194,7 +202,23 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
             graph_factory=lambda request: cast(LangGraphAgentGraph, second_graph)
         )
         await restored_runtime.recover(request, RunStatus.WAITING_FOR_APPROVAL)
-        await restored_runtime.approve(request.run_id, approval_id)
+        # 生产关键不变量：审批号必须在「运行时关闭 → 真实 PostgreSQL 往返 → 重建」
+        # 之后保持稳定。否则 Worker 重启后，审批中心里持久化的审批号将永远对不上
+        # 重建出来的运行时，审批全线卡死。
+        restored_history = await restored_runtime.get_history(request.run_id)
+        assert restored_history[-1].payload["approval_id"] == str(platform_approval_id)
+        assert restored_runtime.pending_approval_id(request.run_id) == platform_approval_id
+        # 重建之后这道安全校验必须依然拦得住不匹配的审批号——既包括图自带的
+        # 业务号，也包括任意伪造号；且被拒绝后运行不得被推进。
+        with pytest.raises(RuntimeControlMismatch):
+            await restored_runtime.approve(request.run_id, business_approval_id)
+        with pytest.raises(RuntimeControlMismatch):
+            await restored_runtime.approve(request.run_id, uuid4())
+        assert (
+            await restored_runtime.get_state(request.run_id)
+        ).status is RunStatus.WAITING_FOR_APPROVAL
+
+        await restored_runtime.approve(request.run_id, platform_approval_id)
         assert (await restored_runtime.get_state(request.run_id)).status is RunStatus.COMPLETED
 
     async with postgres_checkpointer(checkpoint_url) as final_checkpointer:
@@ -206,7 +230,7 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
     assert snapshot.next == ()
     assert snapshot.values["output"] == {
         "action": "approve",
-        "approval_id": str(approval_id),
+        "approval_id": str(platform_approval_id),
     }
 
     rejected_request = request.model_copy(
@@ -226,6 +250,15 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
         assert (
             await reject_start_runtime.start(rejected_request)
         ).status is RunStatus.WAITING_FOR_APPROVAL
+        reject_started_history = await reject_start_runtime.get_history(
+            rejected_request.run_id
+        )
+        reject_platform_approval_id = UUID(
+            str(reject_started_history[-1].payload["approval_id"])
+        )
+        # 审批号按 run 派生：同一图、同一业务号，换一个 run 必须得到不同的审批号，
+        # 否则跨 run 的审批可以互相顶替。
+        assert reject_platform_approval_id != platform_approval_id
 
     async with postgres_checkpointer(checkpoint_url) as reject_checkpointer:
         reject_graph = builder.compile(checkpointer=reject_checkpointer)
@@ -236,9 +269,24 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
             rejected_request,
             RunStatus.WAITING_FOR_APPROVAL,
         )
+        assert (
+            reject_runtime.pending_approval_id(rejected_request.run_id)
+            == reject_platform_approval_id
+        )
+        # 拒绝路径同样必须校验审批号：不能用别的 run 的审批号来拒绝本 run。
+        with pytest.raises(RuntimeControlMismatch):
+            await reject_runtime.reject(
+                rejected_request.run_id,
+                platform_approval_id,
+                "wrong approval",
+            )
+        assert (
+            await reject_runtime.get_state(rejected_request.run_id)
+        ).status is RunStatus.WAITING_FOR_APPROVAL
+
         await reject_runtime.reject(
             rejected_request.run_id,
-            approval_id,
+            reject_platform_approval_id,
             "operator rejected",
         )
         assert (
@@ -267,7 +315,7 @@ async def test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpo
     assert rejected_snapshot.next == ()
     assert rejected_snapshot.values["output"] == {
         "action": "reject",
-        "approval_id": str(approval_id),
+        "approval_id": str(reject_platform_approval_id),
         "reason": "operator rejected",
     }
     assert rejected_snapshot.metadata["agent_platform_terminal_status"] == "cancelled"

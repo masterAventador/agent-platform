@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -16,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.api.app import create_app
 from agent_platform.config import AppSettings
+from agent_platform.infrastructure.database.repositories.approvals import (
+    SqlAlchemyApprovalRepository,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
     SqlAlchemyRunEventRepository,
@@ -28,6 +32,7 @@ from agent_platform.infrastructure.queue.redis_streams import (
     RunQueueDelivery,
     RunQueueMessage,
 )
+from agent_platform.platform.approvals.entities import Approval, ApprovalSource
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
 from agent_platform.runtimes.base import RuntimeState
@@ -212,6 +217,42 @@ async def _create_active_run(
     return headers, active, command_id
 
 
+async def _seed_pending_approval(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    run: Run,
+    requested_by: UUID,
+    invocation_id: UUID,
+) -> Approval:
+    """为 run 造一条真实 pending 审批记录（C13 审批中心的正常前置）。
+
+    run 控制入口的 approve/reject 必须经审批中心结算，因此测试不能只把 run
+    直接改成 WAITING_FOR_APPROVAL，还必须有对应审批记录。
+    """
+
+    approval = Approval.create(
+        tenant_id=run.tenant_id,
+        source=ApprovalSource.TOOL_RISK,
+        approval_type="tool.invocation",
+        risk_level="external",
+        requested_by=requested_by,
+        request_key=f"tool:{run.id}:{invocation_id}",
+        context={"tool_name": "send_email"},
+        run_id=run.id,
+        invocation_id=invocation_id,
+        employee_id=run.employee_id,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    async with session_factory() as session:
+        await SqlAlchemyApprovalRepository(session).add_idempotent(approval)
+        await session.commit()
+    return approval
+
+
+async def _current_user_id(client: AsyncClient) -> UUID:
+    return UUID((await client.get("/api/v1/auth/me")).json()["id"])
+
+
 async def _owned_worker(
     session_factory: async_sessionmaker[AsyncSession],
     run: Run,
@@ -240,7 +281,16 @@ async def test_api_terminal_control_records_non_terminal_intent(
     )
     payload: dict[str, object] = {"action": action}
     if action == "reject":
-        payload["approval_id"] = str(uuid4())
+        # C13 起 reject 必须指向一条真实存在的 pending 审批记录，
+        # 随机审批号会被 fail-closed 挡掉（见下方 fail-closed 用例）。
+        invocation_id = uuid4()
+        await _seed_pending_approval(
+            session_factory,
+            run=run,
+            requested_by=await _current_user_id(client),
+            invocation_id=invocation_id,
+        )
+        payload["approval_id"] = str(invocation_id)
     response = await client.post(
         f"/api/v1/runs/{run.id}/control",
         headers=headers,
@@ -261,6 +311,64 @@ async def test_api_terminal_control_records_non_terminal_intent(
     assert persisted is not None and persisted.status is run.status
     assert [event.type for event in events] == [EventType.RUN_PROGRESS]
     assert events[0].payload["action"] == f"{action}_requested"
+
+
+@pytest.mark.asyncio
+async def test_run_control_reject_without_approval_record_is_fail_closed(
+    postgres_runtime_client: tuple[AsyncClient, async_sessionmaker[AsyncSession]],
+) -> None:
+    """C13 fail-closed：run 等待审批但查无审批记录时，绝不放行 raw 命令。
+
+    这是 `runs.py` 中「绝不静默回退老通道直发 raw 命令」那道分支的正面门禁：
+    run 控制入口不能成为绕过审批中心的旁路。
+    """
+
+    client, session_factory = postgres_runtime_client
+    headers, run, _ = await _create_active_run(
+        client,
+        session_factory,
+        waiting_for_approval=True,
+    )
+    async with session_factory() as session:
+        commands_before = len(
+            (
+                await session.execute(
+                    select(RunCommandRecord.id).where(RunCommandRecord.run_id == run.id)
+                )
+            ).all()
+        )
+
+    response = await client.post(
+        f"/api/v1/runs/{run.id}/control",
+        headers=headers,
+        # 查无此审批记录：既可能是历史数据，也可能是有人试图绕过审批中心。
+        json={"action": "reject", "approval_id": str(uuid4())},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approval_record_missing"
+    async with session_factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+        )
+        events = await SqlAlchemyRunEventRepository(session).list(
+            run_id=run.id,
+            after_sequence=0,
+        )
+        commands_after = len(
+            (
+                await session.execute(
+                    select(RunCommandRecord.id).where(RunCommandRecord.run_id == run.id)
+                )
+            ).all()
+        )
+    # fail-closed 必须是真正的零副作用：run 状态不变、不产生 reject 事件、
+    # 更不能落下一条可被 Worker 消费的 raw reject 命令。
+    assert persisted is not None
+    assert persisted.status is RunStatus.WAITING_FOR_APPROVAL
+    assert events == []
+    assert commands_after == commands_before
 
 
 @pytest.mark.asyncio
