@@ -6,30 +6,24 @@ API 追加消息 / 失败重试与 Worker 终态结算后的自动续跑派生�
 """
 
 from collections.abc import Sequence
-from dataclasses import replace
 from uuid import UUID
 
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_platform.infrastructure.database.repositories.artifacts import (
-    SqlAlchemyTaskAttachmentRepository,
-)
 from agent_platform.infrastructure.database.repositories.conversations import (
     SqlAlchemyConversationMessageRepository,
 )
-from agent_platform.infrastructure.database.repositories.runs import (
-    SqlAlchemyRunCommandRepository,
-    SqlAlchemyRunRepository,
+from agent_platform.infrastructure.database.repositories.run_dispatch import (
+    create_employee_run,
 )
-from agent_platform.platform.artifacts.entities import File, TaskAttachment
+from agent_platform.platform.artifacts.entities import File
 from agent_platform.platform.conversations.entities import (
     CONVERSATION_CONTEXT_MAX_CHARS,
     CONVERSATION_CONTEXT_MAX_MESSAGES,
     Conversation,
     ConversationMessage,
 )
-from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run
 
 
@@ -83,29 +77,15 @@ async def create_conversation_run(
     attachment_files: Sequence[File],
     run_id: UUID | None = None,
 ) -> Run:
-    run = Run.create(
+    return await create_employee_run(
+        database_session=database_session,
         tenant_id=conversation.tenant_id,
         employee_id=conversation.employee_id,
         employee_version=employee_version,
         created_by=created_by,
         input_data=input_data,
+        attachment_files=attachment_files,
         conversation_id=conversation.id,
         thread_id=conversation.thread_id,
+        run_id=run_id,
     )
-    if run_id is not None:
-        run = replace(run, id=run_id)
-    await SqlAlchemyRunRepository(database_session).add(run)
-    attachments = SqlAlchemyTaskAttachmentRepository(database_session)
-    for file in attachment_files:
-        await attachments.add(
-            TaskAttachment.create(
-                tenant_id=run.tenant_id,
-                run_id=run.id,
-                file_id=file.id,
-                workspace_path=f"inputs/{file.id}/{file.name}",
-            )
-        )
-    await SqlAlchemyRunCommandRepository(database_session).add(
-        RunCommand.create(run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START)
-    )
-    return run

@@ -742,9 +742,10 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
-    # 合入后单头，链：…0030(审批)→0031(video)→0032(crc64)→0033(workflow)→0034(account)。
+    # 合入后单头，链：…0030(审批)→0031(video)→0032(crc64)→0033(workflow)
+    # →0034(account)→0035(定时任务)。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0034"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0035"
 
 
 def test_workflow_migration_creates_and_removes_tables(tmp_path: Path) -> None:

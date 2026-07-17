@@ -74,7 +74,7 @@
 | Tool/MCP 生命周期 | 待集成 | C09 已合入主线；C13 审批中心已提供统一审批协议（Tool 风险审批已接入）；剩余生产凭据待 C18、stdio 传输 E2E 缺口待补 | C09 |
 | 长期记忆 | 已完成 | 四级命名空间 Memory 领域/API/运行时注入与工具写入/受控提取/治理与记忆中心页面已合入并通过双复审与真实运行时 E2E | C10 |
 | 工作流/混合员工 | 已完成 | Workflow 注册/版本/发布/回滚、LangGraph 编排内核（流程型/混合型）、人工节点接 C13 审批、编辑器开放 workflow/hybrid 已合入并通过双复审与真实栈 workflow E2E | C11 |
-| 定时任务 | 未实现 | 配置字段存在但强制关闭，无调度、历史和失败治理 | C12 |
+| 定时任务 | 进行中 | 后端调度主链已落地（Cron/预约/时区/DST、复用 Run 创建共享路径、多副本行锁+触发点唯一索引、misfire/并发/重试策略、每次调度重校验权限与员工发布状态、审计与历史保留）；前端页面、Playwright E2E 与 C16 配额接入待补 | C12 |
 | 审批中心 | 已完成 | 独立审批记录/状态机/待办/批准/拒绝/转交/超时/幂等、Tool 风险审批接入统一协议、审批中心页面 + 工作台卡片已合入并通过双复审与真实 PG 并发门禁及审批 E2E | C13 |
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 已完成 | 成员邀请/角色/移除/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理已合入并通过三轮双复审与真实 PG + Playwright 完成门；OIDC/MFA 保留扩展边界 | C15 |
@@ -368,7 +368,27 @@
 
 ### C12 定时与预约任务
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-17**
+
+开工说明：前置 C03 已完成。实现分支 `task/c12-scheduled-tasks`（worktree `wt/c12`），迁移取 `20260716_0035`（接 0034 保持单头）。本阶段只做后端调度主链，前端页面与 Playwright E2E 留作后续独立任务；C16 配额接入仍是完成前置。
+
+2026-07-17 后端主链进展（本任务提交，先 RED 后 GREEN）：
+
+- **调度语义**：Cron / 单次预约 / IANA 时区 / 启停 / `next_run_at` 全部落地。Cron 解析与 DST 语义委托 `cronsim==2.7`（零依赖、公开 API、无侵入），春季跳过的本地时间在当日下一个有效时间触发、秋季重复的本地时间只触发一次（fold=0 侧），均有断言 UTC 瞬时的用例覆盖；`schedule.py` 是全平台唯一直接依赖 cronsim 的位置。
+- **不建旁路执行体系**：抽出唯一的 Run 创建共享路径 `run_dispatch.create_employee_run`，API 直跑、会话轮次派生与调度三方复用同一实现，调度产生的就是正常 Run + START 命令，由既有 Dispatcher/Worker 执行。
+- **多副本安全（双重防线）**：`FOR UPDATE SKIP LOCKED` 认领任务行 + `(scheduled_task_id, scheduled_for)` 唯一索引兜底；执行记录先于 Run 落库，冲突即整事务回滚，绝不留孤儿 Run。已由真实 PostgreSQL 并发门禁 4 用例证明（两副本竞争同一触发点只产生 1 个 Run/1 条命令/1 条执行记录）。
+- **策略**：misfire 支持 `skip`（默认）/`run_once`/`run_all`；`run_all` 受补跑窗口（默认 24h）约束、每跳补一个点，避免停机越久补跑越多的无界成本；misfire 判定不回溯枚举错过的触发点（分钟级 Cron 停机一年即数十万个点，枚举本身即无界）。并发策略支持 `allow`/`skip`（默认）/`queue`，`queue` 队列深度恒为 1、后续触发点合并为 `queue_collapsed` 历史。重试为指数退避 + 上限，次数用尽转终态 `failed`。
+- **每次调度重新校验（fail-closed）**：创建者成员身份/`runs.execute` 权限、员工发布状态、发布版本的 `scheduled_tasks` 开关、输入对发布版 `input_schema` 的兼容性逐项重查；任一不满足则受控跳过并留下可见执行历史 + 自动暂停任务（避免每跳重复跳过导致历史无界增长）+ 审计 `scheduled_task.auto_paused`。**C16 配额校验的接入点已就位**：`platform/scheduling/guards.py::evaluate_dispatch_guards`，返回新的 `SkipReason` 即可复用既有跳过/暂停/审计/历史链路。
+- **解除强制关闭**：`is_runnable_employee_definition` 与员工写契约不再把 `scheduled_tasks` 钉死为 `false`；历史已发布版本一律是 `false`，其解释与 C12 前完全一致（有专门用例锁定该不变量）。
+- **API 与审计**：`/api/v1/scheduled-tasks` 提供 CRUD + 暂停/恢复 + 执行历史；权限沿用 runs 语义（统一要求 `runs.execute`，无 `runs.manage` 者只能操作自己创建的任务，他人资源按 404 处理）；创建/修改/暂停/恢复/删除全部接入 C14 统一审计协议（`emit_audit_event`，`resource_type=scheduled_task`），未另起审计通道。路由根已加入 `CORE_API_ROUTE_ROOTS`。
+- **无界成本治理**：执行历史按 `scheduled_task_execution_retention_days`（默认 90 天）清理，只删终态、永不删活跃执行；调度循环随 API lifespan 运行（配置驱动间隔、每条独立事务、单条失败仅计数、成功失败同节流、可优雅取消、可由 `scheduler_enabled` 关闭），与既有审批超时/审计保留清扫同构。
+- **Demo Seed**：幂等补齐 1 个启用中的工作日 Cron 任务 + 1 个暂停的单次预约 + 1 条成功执行历史（绑定终态 run，不会被 Worker 恢复扫描判为孤儿）。
+
+本阶段验证命令：`cd backend && uv run pytest tests/unit tests/contract -q`（1453 passed）；`uv run pytest tests/integration/scheduling tests/integration/runs/test_run_dispatch.py tests/integration/database/test_migrations.py -q`；`TEST_DATABASE_URL=... uv run pytest tests/integration/scheduling/test_postgres_scheduler_concurrency.py -q`（真实 PG 4/4）；`uv run ruff check .`；`uv run mypy`（249 文件）。
+
+剩余未完成（不得据此标记完成）：客户端创建/编辑/暂停/执行记录页面、时区/重启恢复/重复触发/权限的 Playwright E2E、C16 配额接入。
 
 完成定义：
 

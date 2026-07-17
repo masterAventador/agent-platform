@@ -93,7 +93,9 @@ def is_runnable_employee_definition(definition: Mapping[str, object]) -> bool:
     if not (
         isinstance(capabilities, Mapping)
         and isinstance(capabilities.get("conversation"), bool)
-        and capabilities.get("scheduled_tasks") is False
+        # C12 起定时任务是真实能力，开关只要是布尔值即可运行；历史已发布版本
+        # 一律是 False，其解释与 C12 前完全一致。
+        and isinstance(capabilities.get("scheduled_tasks"), bool)
         and isinstance(capabilities.get("file_upload"), bool)
     ):
         return False

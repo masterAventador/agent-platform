@@ -23,6 +23,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
         "observability",
         "run-dead-letters",
         "runs",
+        "scheduled-tasks",
         "skills",
         "tenant",
         "tool-invocations",

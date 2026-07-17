@@ -39,6 +39,7 @@ from agent_platform.api.routes.memories import router as memories_router
 from agent_platform.api.routes.model_gateway import router as model_gateway_router
 from agent_platform.api.routes.observability import router as observability_router
 from agent_platform.api.routes.runs import router as runs_router
+from agent_platform.api.routes.scheduled_tasks import router as scheduled_tasks_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import invocation_router, mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
@@ -57,6 +58,10 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
 )
 from agent_platform.infrastructure.database.repositories.audit import (
     purge_expired_audit_events,
+)
+from agent_platform.infrastructure.database.repositories.scheduling_dispatch import (
+    purge_scheduled_task_executions,
+    run_scheduler_tick,
 )
 from agent_platform.infrastructure.mcp.probe import MCPCatalogProbe
 from agent_platform.infrastructure.mcp.resolver import AllowlistStdioExecutionPolicy
@@ -291,11 +296,63 @@ def create_app(
                 logger.exception("audit_retention_sweep_failed")
             await asyncio.sleep(app_settings.audit_retention_sweep_interval_seconds)
 
+    async def run_scheduler() -> None:
+        """C12 调度循环：与既有清扫任务同构——配置驱动间隔、每条独立事务、
+        单条失败仅计数、成功失败同节流。多副本安全由行锁 + 触发点唯一索引保证。"""
+
+        await _wait_for_database_ready(configured_session_factory)
+        next_purge_at = 0.0
+        while True:
+            try:
+                result = await run_scheduler_tick(
+                    configured_session_factory,
+                    now=datetime.now(UTC),
+                    batch_limit=app_settings.scheduler_tick_batch_limit,
+                )
+                if result.dispatched or result.skipped or result.settled:
+                    logger.info(
+                        "scheduler_tick_completed",
+                        extra={
+                            "dispatched": result.dispatched,
+                            "skipped": result.skipped,
+                            "settled": result.settled,
+                        },
+                    )
+                if result.failed:
+                    logger.warning(
+                        "scheduler_tick_partial_failure", extra={"failed": result.failed}
+                    )
+                loop_time = asyncio.get_running_loop().time()
+                if loop_time >= next_purge_at:
+                    next_purge_at = loop_time + (
+                        app_settings.scheduled_task_execution_purge_interval_seconds
+                    )
+                    purged = await purge_scheduled_task_executions(
+                        configured_session_factory,
+                        cutoff=datetime.now(UTC)
+                        - timedelta(
+                            days=app_settings.scheduled_task_execution_retention_days
+                        ),
+                        limit=app_settings.scheduled_task_execution_purge_batch_limit,
+                    )
+                    if purged:
+                        logger.info(
+                            "scheduled_task_execution_purged", extra={"purged": purged}
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("scheduler_tick_failed")
+            await asyncio.sleep(app_settings.scheduler_tick_interval_seconds)
+
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
         audit_retention_task = asyncio.create_task(sweep_audit_retention())
         approval_expiry_task = asyncio.create_task(sweep_approval_expiry())
+        scheduler_task = (
+            asyncio.create_task(run_scheduler()) if app_settings.scheduler_enabled else None
+        )
         capability_tasks = [
             asyncio.create_task(worker_factory(), name=worker_name)
             for worker_name, worker_factory in capability_background_workers
@@ -304,6 +361,8 @@ def create_app(
         try:
             yield
         finally:
+            if scheduler_task is not None:
+                scheduler_task.cancel()
             approval_expiry_task.cancel()
             audit_retention_task.cancel()
             reconciliation_task.cancel()
@@ -312,6 +371,9 @@ def create_app(
             for capability_task in capability_tasks:
                 with suppress(asyncio.CancelledError):
                     await capability_task
+            if scheduler_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await scheduler_task
             with suppress(asyncio.CancelledError):
                 await approval_expiry_task
             with suppress(asyncio.CancelledError):
@@ -395,6 +457,7 @@ def create_app(
     app.include_router(workflows_router)
     app.include_router(conversations_router)
     app.include_router(runs_router)
+    app.include_router(scheduled_tasks_router)
     app.include_router(approvals_router)
     app.include_router(artifacts_router)
     app.include_router(dead_letters_router)

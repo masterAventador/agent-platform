@@ -24,6 +24,9 @@ from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
+from agent_platform.infrastructure.database.repositories.run_dispatch import (
+    create_employee_run,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
@@ -40,7 +43,6 @@ from agent_platform.platform.approvals.errors import (
 from agent_platform.platform.approvals.service import (
     DecisionAction as ApprovalDecisionAction,
 )
-from agent_platform.platform.artifacts.entities import TaskAttachment
 from agent_platform.platform.dynamic_io import (
     DynamicInputTooLarge,
     DynamicInputValidationFailed,
@@ -397,30 +399,15 @@ async def create_run(
                 raise _not_found()
             attachment_files.append(file)
 
-        run = Run.create(
+        run = await create_employee_run(
+            database_session=database_session,
             tenant_id=access.tenant.id,
             employee_id=employee.id,
             employee_version=employee.published_version,
             created_by=user.id,
             input_data=payload.input,
+            attachment_files=attachment_files,
             idempotency_key=idempotency_key,
-        )
-        await runs.add(run)
-        for file in attachment_files:
-            await attachment_repository.add(
-                TaskAttachment.create(
-                    tenant_id=run.tenant_id,
-                    run_id=run.id,
-                    file_id=file.id,
-                    workspace_path=f"inputs/{file.id}/{file.name}",
-                )
-            )
-        await SqlAlchemyRunCommandRepository(database_session).add(
-            RunCommand.create(
-                run_id=run.id,
-                tenant_id=run.tenant_id,
-                action=RunCommandAction.START,
-            )
         )
         await emit_audit_event(
             database_session,

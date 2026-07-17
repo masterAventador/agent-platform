@@ -36,6 +36,10 @@ from agent_platform.infrastructure.database.repositories.invitations import (
 )
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
+from agent_platform.infrastructure.database.repositories.scheduling import (
+    ScheduledTaskExecutionRecord,
+    ScheduledTaskRecord,
+)
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
     TenantRecord,
@@ -61,6 +65,14 @@ from agent_platform.platform.employees.entities import (
 )
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import EventType
+from agent_platform.platform.scheduling.entities import (
+    DEFAULT_MISFIRE_BACKFILL_WINDOW_SECONDS,
+    DEFAULT_MISFIRE_GRACE_SECONDS,
+    DEFAULT_RETRY_BACKOFF_SECONDS,
+    ConcurrencyPolicy,
+    ExecutionStatus,
+    MisfirePolicy,
+)
 from agent_platform.platform.tenants.invitations import InvitationStatus
 from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tools.entities import McpTransport, ToolRiskLevel
@@ -96,6 +108,9 @@ DEMO_DEAD_LETTER_ID = uuid5(_DEMO_NAMESPACE, "settled-dead-letter")
 DEMO_FILE_ID = uuid5(_DEMO_NAMESPACE, "attached-file")
 DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
+DEMO_SCHEDULED_TASK_ID = uuid5(_DEMO_NAMESPACE, "scheduled-task-daily")
+DEMO_ONCE_SCHEDULED_TASK_ID = uuid5(_DEMO_NAMESPACE, "scheduled-task-once")
+DEMO_SCHEDULED_EXECUTION_ID = uuid5(_DEMO_NAMESPACE, "scheduled-task-execution")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 DEMO_VIDEO_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "video-studio-entitlement")
 DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
@@ -176,6 +191,8 @@ class DemoSeedSummary:
 
 type DemoRecord = (
     ApprovalRecord
+    | ScheduledTaskRecord
+    | ScheduledTaskExecutionRecord
     | UserRecord
     | CapabilityEntitlementRecord
     | TenantRecord
@@ -680,6 +697,7 @@ def _demo_records(
         ),
         *_demo_run_records(),
         *_demo_approval_records(),
+        *_demo_scheduled_task_records(),
         *_demo_artifact_records(),
         *_demo_memory_records(),
         (
@@ -1085,6 +1103,130 @@ def _demo_approval_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
         ),
     ]
     return records
+
+
+def _demo_scheduled_task_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    """C12 定时任务演示数据：一个启用中的 Cron 任务、一个暂停的单次预约，
+    以及一条已成功的执行历史（绑定终态 run，不会被 Worker 恢复扫描判为孤儿）。
+
+    幂等：全部使用稳定 uuid5 标识；重复执行只补齐/更新，不制造重复记录。
+    Cron 任务的 next_run_at 落在远期，避免开发栈刚起就立刻真跑一个 Run。
+    """
+
+    task_fields = (
+        "tenant_id",
+        "employee_id",
+        "created_by",
+        "name",
+        "schedule_kind",
+        "cron_expression",
+        "run_at",
+        "timezone",
+        "input_data",
+        "enabled",
+        "pause_reason",
+        "next_run_at",
+        "last_run_at",
+        "misfire_policy",
+        "concurrency_policy",
+        "misfire_grace_seconds",
+        "misfire_backfill_window_seconds",
+        "max_retries",
+        "retry_backoff_seconds",
+        "revision",
+    )
+    next_run_at = datetime(2027, 1, 4, 1, 0, tzinfo=UTC)
+    return [
+        (
+            ScheduledTaskRecord(
+                id=DEMO_SCHEDULED_TASK_ID,
+                tenant_id=DEMO_TENANT_ID,
+                employee_id=DEMO_EMPLOYEE_ID,
+                created_by=DEMO_USER_ID,
+                name="每个工作日早上九点巡检",
+                schedule_kind="cron",
+                cron_expression="0 9 * * 1-5",
+                run_at=None,
+                timezone="Asia/Shanghai",
+                input_data={"topic": "每日巡检"},
+                enabled=True,
+                pause_reason=None,
+                next_run_at=next_run_at,
+                last_run_at=_DEMO_STARTED_AT,
+                misfire_policy=MisfirePolicy.SKIP.value,
+                concurrency_policy=ConcurrencyPolicy.SKIP.value,
+                misfire_grace_seconds=DEFAULT_MISFIRE_GRACE_SECONDS,
+                misfire_backfill_window_seconds=(
+                    DEFAULT_MISFIRE_BACKFILL_WINDOW_SECONDS
+                ),
+                max_retries=1,
+                retry_backoff_seconds=60,
+                revision=1,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            task_fields,
+        ),
+        (
+            ScheduledTaskRecord(
+                id=DEMO_ONCE_SCHEDULED_TASK_ID,
+                tenant_id=DEMO_TENANT_ID,
+                employee_id=DEMO_EMPLOYEE_ID,
+                created_by=DEMO_USER_ID,
+                name="季度报告单次预约（已暂停）",
+                schedule_kind="once",
+                cron_expression=None,
+                run_at=datetime(2027, 4, 1, 1, 0, tzinfo=UTC),
+                timezone="Asia/Shanghai",
+                input_data={"topic": "季度报告"},
+                enabled=False,
+                pause_reason=None,
+                next_run_at=None,
+                last_run_at=None,
+                misfire_policy=MisfirePolicy.RUN_ONCE.value,
+                concurrency_policy=ConcurrencyPolicy.QUEUE.value,
+                misfire_grace_seconds=DEFAULT_MISFIRE_GRACE_SECONDS,
+                misfire_backfill_window_seconds=(
+                    DEFAULT_MISFIRE_BACKFILL_WINDOW_SECONDS
+                ),
+                max_retries=0,
+                retry_backoff_seconds=DEFAULT_RETRY_BACKOFF_SECONDS,
+                revision=1,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            task_fields,
+        ),
+        (
+            ScheduledTaskExecutionRecord(
+                id=DEMO_SCHEDULED_EXECUTION_ID,
+                tenant_id=DEMO_TENANT_ID,
+                scheduled_task_id=DEMO_SCHEDULED_TASK_ID,
+                scheduled_for=_DEMO_STARTED_AT,
+                status=ExecutionStatus.SUCCEEDED.value,
+                attempts=1,
+                revision=2,
+                created_at=_DEMO_STARTED_AT,
+                updated_at=_DEMO_STARTED_AT,
+                run_id=DEMO_COMPLETED_RUN_ID,
+                skip_reason=None,
+                error_message=None,
+                next_attempt_at=None,
+            ),
+            (
+                "tenant_id",
+                "scheduled_task_id",
+                "scheduled_for",
+                "status",
+                "attempts",
+                "revision",
+                "run_id",
+                "skip_reason",
+                "error_message",
+                "next_attempt_at",
+            ),
+        ),
+    ]
 
 
 def _demo_workflow_records(
