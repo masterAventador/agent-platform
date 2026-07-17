@@ -24,19 +24,16 @@ import pytest
 import pytest_asyncio
 from alembic import command as alembic_command
 from alembic.config import Config
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.infrastructure.database.repositories import scheduling_dispatch
 from agent_platform.infrastructure.database.repositories.audit import (
-    AuditChainStateRecord,
     AuditEventRecord,
 )
 from agent_platform.infrastructure.database.repositories.auth import UserRecord
 from agent_platform.infrastructure.database.repositories.employees import (
-    EmployeeRecord,
-    EmployeeVersionRecord,
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
 )
@@ -46,7 +43,6 @@ from agent_platform.infrastructure.database.repositories.runs import (
 )
 from agent_platform.infrastructure.database.repositories.scheduling import (
     ScheduledTaskExecutionRecord,
-    ScheduledTaskRecord,
     SqlAlchemyScheduledTaskRepository,
 )
 from agent_platform.infrastructure.database.repositories.scheduling_dispatch import (
@@ -72,6 +68,7 @@ from agent_platform.platform.scheduling.entities import (
 )
 from agent_platform.platform.scheduling.schedule import Schedule
 from agent_platform.platform.tenants.memberships import TenantRole
+from tests.fixtures.postgres_reset import reset_database
 
 BACKEND_ROOT = Path(__file__).parents[3]
 
@@ -95,23 +92,11 @@ def migrated_postgres_url() -> str:
 async def session_factory(migrated_postgres_url: str) -> AsyncIterator[async_sessionmaker]:
     engine = create_async_engine(migrated_postgres_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    # 用例前清理：本文件的断言按全库计数，必须不受前序测试文件残留影响。
+    await reset_database(engine)
     yield factory
-    async with factory() as session:
-        for record in (
-            ScheduledTaskExecutionRecord,
-            ScheduledTaskRecord,
-            RunCommandRecord,
-            RunRecord,
-            AuditEventRecord,
-            AuditChainStateRecord,
-            EmployeeVersionRecord,
-            EmployeeRecord,
-            TenantMembershipRecord,
-            UserRecord,
-            TenantRecord,
-        ):
-            await session.execute(delete(record))
-        await session.commit()
+    # 用例后清理：不把数据泄漏给后续测试文件。
+    await reset_database(engine)
     await engine.dispose()
 
 
