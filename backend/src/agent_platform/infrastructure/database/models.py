@@ -37,7 +37,11 @@ from agent_platform.infrastructure.database.repositories.knowledge import Knowle
 from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.model_gateway import (
     ModelGatewayProvisioningCommandRecord,
+    TenantModelGatewayKeyRecord,
     TenantModelGatewayPolicyRecord,
+)
+from agent_platform.infrastructure.database.repositories.model_usage import (
+    ModelUsageRow,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
     RunCommandRecord,
@@ -92,6 +96,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ToolAuditRecord,
     TenantModelGatewayPolicyRecord,
     ModelGatewayProvisioningCommandRecord,
+    TenantModelGatewayKeyRecord,
+    ModelUsageRow,
     FileRecord,
     TaskAttachmentRecord,
     ArtifactRecord,

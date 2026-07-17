@@ -23,6 +23,9 @@ from agent_platform.infrastructure.database.repositories.model_gateway import (
     SqlAlchemyModelGatewayKeyRepository,
     SqlAlchemyModelGatewayPolicyRepository,
 )
+from agent_platform.infrastructure.database.repositories.model_usage import (
+    SessionModelUsageRecorder,
+)
 from agent_platform.infrastructure.database.repositories.runtime_ownership import (
     RuntimeOwnershipBusy,
 )
@@ -438,9 +441,7 @@ def _build_runtime_resolver(
             MCPToolExecutor(
                 DatabaseMCPClientResolver(
                     tool_reader,
-                    stdio_policy=AllowlistStdioExecutionPolicy(
-                        settings.mcp_stdio_allowed_commands
-                    ),
+                    stdio_policy=AllowlistStdioExecutionPolicy(settings.mcp_stdio_allowed_commands),
                     timeout_seconds=settings.tool_invocation_timeout_seconds,
                 )
             ),
@@ -494,6 +495,9 @@ def _build_runtime_resolver(
         knowledge_provider_registry=KnowledgeProviderRegistry([knowledge_provider]),
         close_callback=close_adapters_and_knowledge_provider,
         model_resolver=model_resolver,
+        # C16 阶段二（纯观测面）：每次模型调用结束即落一条用量记录。默认定价表随
+        # DEFAULT_MODEL_PRICING 生效；落库失败只降级为可观测信号，绝不拖垮 Run。
+        model_usage_recorder=SessionModelUsageRecorder(session_factory),
     )
 
 

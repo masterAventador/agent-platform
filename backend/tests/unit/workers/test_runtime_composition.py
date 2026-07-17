@@ -1567,3 +1567,60 @@ async def test_corrupt_persisted_policy_is_permanent_not_retried() -> None:
             PublishedModel(kind="gateway_alias", alias="general-purpose"),
             tenant_id=uuid4(),
         )
+
+
+@pytest.mark.asyncio
+async def test_composed_resolver_attaches_usage_capture_when_recorder_configured(
+    session_factory,
+) -> None:
+    """C16 阶段二：装配了用量记录器时，交给执行内核的模型必须带上用量捕获回调，
+    且不污染原（可能跨 run 复用的）注入模型实例，归属指向本 run。"""
+
+    from agent_platform.platform.model_gateway.usage import ModelUsageRecord
+    from agent_platform.workers.model_usage_capture import ModelUsageCaptureHandler
+
+    class _CollectingRecorder:
+        def __init__(self) -> None:
+            self.records: list[ModelUsageRecord] = []
+
+        async def record(self, record: ModelUsageRecord) -> None:
+            self.records.append(record)
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    manager = RecordingSandboxManager()
+    selector = RecordingSelector()
+    model_resolver, model = injected_model_resolver()
+    recorder = _CollectingRecorder()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=selector,
+        model_resolver=model_resolver,
+        model_usage_recorder=recorder,
+    )
+
+    prepared = await resolver.resolve(run, autonomous_definition())
+
+    selected_model = selector.selection["model"]
+    # 不是原注入实例（用 model_copy 避免跨 run callback 累积）
+    assert selected_model is not model
+    assert model.callbacks is None
+    handlers = [
+        cb for cb in (selected_model.callbacks or []) if isinstance(cb, ModelUsageCaptureHandler)
+    ]
+    assert len(handlers) == 1
+    # 归属指向本 run（内部私有属性，仅测试断言）
+    assert handlers[0]._run_id == run.id
+    assert handlers[0]._tenant_id == run.tenant_id
+    assert handlers[0]._employee_id == run.employee_id
+    assert handlers[0]._alias == "general-purpose"
+
+    await prepared.close()

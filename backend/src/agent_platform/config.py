@@ -63,6 +63,10 @@ class AppSettings(BaseSettings):
         default=3_600.0, ge=60, le=86_400
     )
     model_gateway_command_prune_batch_limit: int = Field(default=500, ge=1, le=10_000)
+    # C16 阶段二：模型用量记录保留期与有界清扫（观测面无界增长的成本上界）。
+    model_usage_retention_days: int = Field(default=90, ge=1, le=3_650)
+    model_usage_prune_interval_seconds: float = Field(default=3_600.0, ge=60, le=86_400)
+    model_usage_prune_batch_limit: int = Field(default=1_000, ge=1, le=10_000)
     ragflow_url: str = "http://127.0.0.1:19380"
     ragflow_api_key: str = ""
     minio_endpoint: str = "127.0.0.1:9000"

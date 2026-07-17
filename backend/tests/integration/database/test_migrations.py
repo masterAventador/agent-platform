@@ -748,7 +748,7 @@ def test_migration_head_is_current_forward_only_revision() -> None:
     # →0034(account)→0035(定时任务)→0036(网关 Key)→0037(provisioned)。
     # C12 先合入保留 0035；C16 的 0036 由主代理合并时从 0034 重链至 0035。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0037"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0038"
 
 
 def test_model_gateway_key_migration_creates_and_removes_the_credential_table(

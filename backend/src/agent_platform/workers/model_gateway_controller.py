@@ -29,6 +29,9 @@ from agent_platform.infrastructure.database.bootstrap import initialize_database
 from agent_platform.infrastructure.database.repositories.model_gateway import (
     SqlAlchemyModelGatewayCommandStore,
 )
+from agent_platform.infrastructure.database.repositories.model_usage import (
+    SessionModelUsagePruner,
+)
 from agent_platform.infrastructure.llm.admin import (
     LiteLLMAdminClient,
     LiteLLMAdminConfigurationError,
@@ -55,6 +58,10 @@ class Reconciler(Protocol):
     ) -> int: ...
 
 
+class UsagePruner(Protocol):
+    async def prune(self, *, now: datetime, retention: timedelta, limit: int) -> int: ...
+
+
 async def serve_controller(
     *,
     reconciler: Reconciler,
@@ -64,9 +71,14 @@ async def serve_controller(
     prune_interval_seconds: float,
     prune_batch_limit: int,
     ready_file: Path = READY_FILE,
+    usage_pruner: UsagePruner | None = None,
+    usage_retention: timedelta | None = None,
+    usage_prune_interval_seconds: float = 3_600.0,
+    usage_prune_batch_limit: int = 1_000,
 ) -> None:
     ready_file.touch(mode=0o600)
     next_prune_at = 0.0
+    next_usage_prune_at = 0.0
     try:
         while not stop_event.is_set():
             try:
@@ -93,6 +105,24 @@ async def serve_controller(
                         extra={"error_type": type(error).__name__},
                     )
                 next_prune_at = monotonic() + prune_interval_seconds
+            if (
+                usage_pruner is not None
+                and usage_retention is not None
+                and monotonic() >= next_usage_prune_at
+            ):
+                try:
+                    await usage_pruner.prune(
+                        now=_now(),
+                        retention=usage_retention,
+                        limit=usage_prune_batch_limit,
+                    )
+                except Exception as error:
+                    # 用量清扫失败绝不终止 Controller（对账必须继续）。
+                    logger.error(
+                        "model_usage_prune_failed",
+                        extra={"error_type": type(error).__name__},
+                    )
+                next_usage_prune_at = monotonic() + usage_prune_interval_seconds
             if drained:
                 # 用 stop_event 做退避等待：SIGTERM 立即唤醒，不被 sleep 拖住。
                 with suppress(TimeoutError):
@@ -124,9 +154,7 @@ def build_reconciler(
         LiteLLMAdminConfigurationError,
         ModelGatewayKeySecretNotConfiguredError,
     ):
-        raise ControllerConfigurationError(
-            "model gateway admin client is not configured"
-        ) from None
+        raise ControllerConfigurationError("model gateway admin client is not configured") from None
     return ModelGatewayReconciler(
         store=SqlAlchemyModelGatewayCommandStore(session_factory),
         provisioner=provisioner,
@@ -155,11 +183,14 @@ async def run_controller_service(
             stop_event=service_stop,
             interval_seconds=app_settings.model_gateway_controller_interval_seconds,
             retention=timedelta(days=app_settings.model_gateway_command_retention_days),
-            prune_interval_seconds=(
-                app_settings.model_gateway_command_prune_interval_seconds
-            ),
+            prune_interval_seconds=(app_settings.model_gateway_command_prune_interval_seconds),
             prune_batch_limit=app_settings.model_gateway_command_prune_batch_limit,
             ready_file=ready_file,
+            # C16 阶段二：用量表随调用无界增长，由本 Controller 循环按保留期有界清扫。
+            usage_pruner=SessionModelUsagePruner(session_factory),
+            usage_retention=timedelta(days=app_settings.model_usage_retention_days),
+            usage_prune_interval_seconds=app_settings.model_usage_prune_interval_seconds,
+            usage_prune_batch_limit=app_settings.model_usage_prune_batch_limit,
         )
     finally:
         await engine.dispose()

@@ -74,6 +74,11 @@ from agent_platform.platform.model_gateway.errors import (
     ModelGatewayCredentialUnavailable,
     ModelGatewayPolicyPersistenceError,
 )
+from agent_platform.platform.model_gateway.pricing import (
+    DEFAULT_MODEL_PRICING,
+    ModelPricingTable,
+)
+from agent_platform.platform.model_gateway.usage import ModelUsageRecorder
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -117,6 +122,10 @@ from agent_platform.runtimes.workflow_graph import (
 from agent_platform.sandbox.entities import SandboxScope
 from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.sandbox.ports import RunExecutionEnvironment
+from agent_platform.workers.model_usage_capture import (
+    ModelUsageCaptureHandler,
+    attach_usage_capture,
+)
 
 RuntimeWorkMode = Literal["autonomous", "workflow", "hybrid"]
 ResolvedModel = BaseChatModel
@@ -418,9 +427,7 @@ class PlatformModelResolver:
             # 缺凭据解析器时宁可失败关闭：静默放行等于恢复不可归因的共享 Key 调用。
             raise ModelGatewayUnavailable("tenant gateway credentials are unavailable")
         try:
-            api_key = await self._tenant_credentials.resolve(
-                tenant_id=tenant_id, alias=model.alias
-            )
+            api_key = await self._tenant_credentials.resolve(tenant_id=tenant_id, alias=model.alias)
         except ModelGatewayCredentialNotReady as error:
             # 对账进行中：Controller 秒级收敛，交队列重投。判成永久会让「管理员改了个
             # rpm_limit」这种事在对账窗口内打死每一个并发 Run。
@@ -644,6 +651,8 @@ class ComposedRuntimeResolver:
         workflow_spec_loader: WorkflowSpecLoader | None = None,
         model_resolver: PlatformModelResolver | None = None,
         knowledge_provider_registry: KnowledgeProviderRegistry | None = None,
+        model_usage_recorder: ModelUsageRecorder | None = None,
+        model_pricing: ModelPricingTable = DEFAULT_MODEL_PRICING,
         sandbox_ttl: timedelta = DEFAULT_RUN_SANDBOX_TTL,
         artifact_operation_lease_duration: timedelta = DEFAULT_STORAGE_OPERATION_LEASE,
         artifact_operation_heartbeat_interval: float = (
@@ -661,6 +670,8 @@ class ComposedRuntimeResolver:
         self._workflow_spec_loader = workflow_spec_loader
         self._model_resolver = model_resolver or PlatformModelResolver()
         self._knowledge_provider_registry = knowledge_provider_registry
+        self._model_usage_recorder = model_usage_recorder
+        self._model_pricing = model_pricing
         self._sandbox_ttl = sandbox_ttl
         self._artifact_operation_lease_duration = artifact_operation_lease_duration
         self._artifact_operation_heartbeat_interval = artifact_operation_heartbeat_interval
@@ -675,9 +686,7 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = await self._model_resolver.resolve(
-            capabilities.model, tenant_id=run.tenant_id
-        )
+        model = await self._model_resolver.resolve(capabilities.model, tenant_id=run.tenant_id)
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,
@@ -719,9 +728,7 @@ class ComposedRuntimeResolver:
         if "skill_paths" in definition:
             raise UntrustedRuntimeDefinition("skill_paths must be supplied by runtime preparation")
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
-        model = await self._model_resolver.resolve(
-            capabilities.model, tenant_id=run.tenant_id
-        )
+        model = await self._model_resolver.resolve(capabilities.model, tenant_id=run.tenant_id)
         knowledge_context = await self._prepare_knowledge_context(
             run=run,
             capabilities=capabilities,
@@ -920,6 +927,7 @@ class ComposedRuntimeResolver:
         environment: RunExecutionEnvironment,
         delete_on_error: bool,
     ) -> PreparedRuntimeResult:
+        model = self._attach_usage_capture(model=model, run=run, capabilities=capabilities)
         try:
             async with self._session_factory() as session:
                 if self._artifact_storage is not None:
@@ -1191,6 +1199,31 @@ class ComposedRuntimeResolver:
             knowledge_context=knowledge_context,
             memory_context=memory_context,
         )
+
+    def _attach_usage_capture(
+        self,
+        *,
+        model: ResolvedModel,
+        run: Run,
+        capabilities: PublishedRuntimeCapabilities,
+    ) -> ResolvedModel:
+        """C16 阶段二（纯观测面）：per-run 装配用量捕获回调到执行内核用的模型。
+
+        未装配记录器时零改动（保持既有行为）。归属（tenant/run/employee）与
+        provider-neutral alias 由此处闭包注入；捕获点本身对模型调用行为零影响。
+        """
+
+        if self._model_usage_recorder is None:
+            return model
+        handler = ModelUsageCaptureHandler(
+            recorder=self._model_usage_recorder,
+            pricing=self._model_pricing,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            employee_id=run.employee_id,
+            model_alias=capabilities.model.alias,
+        )
+        return attach_usage_capture(model, handler)
 
     async def aclose(self) -> None:
         if self._close_callback is None:
