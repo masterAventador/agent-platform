@@ -101,22 +101,22 @@ deployment_installed && tenant_entitled && user_permitted
 
 ## 3. Video Studio 功能清单
 
-竞品视频链路主要采用阿里云 OSS + Timeline + IMS/ICE 云剪辑，不是本地完整 FFmpeg 渲染；这是竞品事实。本项目目标供应商已确定为腾讯云，第一阶段采用 LighthouseCOS/COS + 自研 Timeline/预览 + MPS 云端渲染，并保留未来本地 Provider 扩展点。具体部署基线见 [`tencent-cloud-mvp-deployment.md`](tencent-cloud-mvp-deployment.md)。
+竞品视频链路主要采用阿里云 OSS + Timeline + IMS/ICE 云剪辑，不是本地完整 FFmpeg 渲染；这是竞品事实。本项目第一阶段同样使用阿里云 Timeline Web SDK + IMS/ICE 完成预览、剪辑和云端渲染，但权威素材、成片和 Artifact 继续保存在腾讯云 LighthouseCOS/COS。IMS/ICE 如不能直接读写 COS，由服务端使用任务级私有阿里云 OSS 临时区中转，成片回写 COS 后清理临时对象；不得建立第二套权威素材库。具体部署基线见 [`tencent-cloud-mvp-deployment.md`](tencent-cloud-mvp-deployment.md)。
 
-**第一期范围冻结：** 本地 FFmpeg 执行器不属于 B01-B17 的竞品对标交付范围，不采购、不随 App 打包、不按需下载，也不作为任何第一期任务的完成依赖。第一期只保留供应商无关 `VideoRenderProvider` 扩展边界，实际渲染使用腾讯云 MPS；只有用户后续明确启动离线、隐私或降本增强时，才单独建立 `LocalFfmpegProvider` 任务和验收标准。
+**第一期范围冻结：** 本地 FFmpeg 执行器不属于 B01-B17 的竞品对标交付范围，不采购、不随 App 打包、不按需下载，也不作为任何第一期任务的完成依赖。第一期保留供应商无关 `VideoRenderProvider` 扩展边界，实际渲染使用阿里云 IMS/ICE 的 `AliyunIceProvider`；只有用户后续明确启动离线、隐私或降本增强时，才单独建立 `LocalFfmpegProvider` 任务和验收标准。
 
 | 功能域 | 功能清单 | 竞品证据 | 我们的实现边界 |
 | --- | --- | --- | --- |
 | 素材库 | 视频、图片、音乐等素材上传、列表、选择和管理 | 已证实 | 复用 Core Artifact，腾讯 LighthouseCOS/COS 保存业务对象 |
 | 下载任务 | 素材或成片下载队列、进度、成功/失败记录 | 高可信 | 使用平台任务和产物协议，不建立旁路状态 |
 | 对象存储直传 | 竞品使用 OSS STS，客户端直传对象存储 | 已证实 | 我们使用腾讯云 CAM/STS + LighthouseCOS/COS，永久密钥只在服务端 |
-| Timeline | 创建、解析、保存剪辑时间线 | 已证实 | 业务模型使用供应商无关 Timeline DTO |
-| App 内预览 | 竞品加载阿里云 Web SDK、播放器、转场和时间线预览 | 已证实 | 我们自研 Timeline 编辑器，使用 HTML5 Video/Canvas 和低清代理素材预览 |
+| Timeline | 创建、解析、保存剪辑时间线 | 已证实 | 业务模型使用供应商无关 Timeline DTO，通过 Adapter 接入阿里云 Timeline Web SDK |
+| App 内预览 | 竞品加载阿里云 Web SDK、播放器、转场和时间线预览 | 已证实 | 使用阿里云 Timeline Web SDK，页面不直接持有阿里云密钥或供应商签名逻辑 |
 | 一键剪辑 | 依据素材和规则创建云端剪辑任务 | 已证实 | 通过 `VideoRenderProvider` 提交 |
 | 模板剪辑 | 选择模板、替换素材、生成多个成片 | 已证实 | 模板版本固定，输入输出可追溯 |
 | 批量剪辑 | 批量导入素材、批量创建任务和结果管理 | 已证实 | 配额、并发、幂等和失败隔离由平台统一治理 |
 | 剪辑任务 | 创建、排队、运行、轮询、取消、失败重试 | 已证实 | 映射到 Core Run/Event，不复制任务中心 |
-| 云端渲染 | 竞品使用 IMS/ICE 异步 Job、进度、结果、费用和错误 | 高可信 | 第一阶段 `TencentMpsProvider`，服务端调用 MPS `EditMedia` 等官方 API |
+| 云端渲染 | 竞品使用 IMS/ICE 异步 Job、进度、结果、费用和错误 | 高可信 | 第一阶段 `AliyunIceProvider`，服务端提交 IMS/ICE Timeline Job；必要时以任务级私有 OSS 临时区桥接 COS，结果回写 COS 后清理 |
 | 成片管理 | 获取成片、下载、预览、删除、保留策略 | 已证实 | 成片作为 Core Artifact，具备租户权限与生命周期 |
 | 发布衔接 | 成片进入账号、标题、话题和多平台发布流程 | 已证实 | 只通过稳定 Artifact ID 交给 Social Operations |
 | 本地 FFmpeg | 离线、隐私或成本敏感场景的本地渲染 | 规划增强 | 后续 `LocalFfmpegProvider`，不作为第一阶段竞品复刻目标 |
@@ -363,11 +363,11 @@ deployment_installed && tenant_entitled && user_permitted
 完成定义：
 
 - 定义供应商无关 Timeline、轨道、素材、时间区间、转场和模板引用；
-- 自研 Timeline 编辑器，以 HTML5 Video/Canvas 和低清代理素材实现 App 内预览；
+- 通过独立 Adapter 接入阿里云 Timeline Web SDK，在 App 内完成编辑与预览，供应商对象不得泄漏到业务页面和持久领域模型；
 - 支持 Timeline 创建、保存、版本、解析和预览错误；
-- 页面不直接持有腾讯云长期密钥或拼装 OpenAPI 签名；
+- 页面不直接持有阿里云长期 AccessKey、腾讯云长期密钥或拼装任一供应商 OpenAPI 签名；
 - Timeline 与员工、任务、素材和客户模板稳定关联；
-- 组件、协议和真实素材预览 E2E 通过。
+- 组件、协议、SDK 加载失败关闭、真实 COS 素材跨云预览和 E2E 通过。
 
 ### B06 一键剪辑、模板剪辑、批量任务与云端成片
 
@@ -377,12 +377,12 @@ deployment_installed && tenant_entitled && user_permitted
 
 完成定义：
 
-- 建立 `VideoRenderProvider` 和第一阶段 `TencentMpsProvider`；
+- 建立 `VideoRenderProvider` 和第一阶段 `AliyunIceProvider`；
 - 支持一键剪辑、模板替换、批量提交和幂等 Job；
 - 支持排队、轮询、进度、取消、失败重试、费用和供应商错误映射；
 - 成片进入 Core Artifact，可预览、下载、删除和交给发布流程；
 - App 关闭后云端任务继续，重开后恢复真实状态；
-- Stub 协议、真实 MPS `EditMedia` 小样、LighthouseCOS/COS 成片回写和批量隔离测试通过。
+- Stub 协议、真实 IMS/ICE Timeline Job 小样、COS→任务级私有 OSS→IMS/ICE→COS 成片回写、临时对象清理和批量隔离测试通过。
 
 ### B07 多平台聚合发布、批量发布与发布记录
 

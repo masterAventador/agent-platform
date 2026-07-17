@@ -247,7 +247,7 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 ### 可插拔行业能力包
 
 - 视频剪辑和自动运营不进入 AI 中台 Core，分别作为独立能力包维护；
-- 视频能力包可以包含素材库、LighthouseCOS/COS、自研 Timeline、腾讯云 MPS、模板、剪辑任务和成片；
+- 视频能力包可以包含素材库、LighthouseCOS/COS、阿里云 Timeline Web SDK、阿里云 IMS/ICE、模板、剪辑任务和成片；
 - 自动运营能力包可以包含平台账号、Playwright、本地 RPA、微信、朋友圈、私信、发布和曝光；
 - 能力包只能依赖 Core 的公开协议和服务，Core 禁止导入能力包内部实现；
 - 能力包之间禁止互相导入内部代码，跨包协作必须通过公开接口、平台事件、稳定 ID 或工作流；
@@ -278,10 +278,10 @@ Tauri 只承载桌面客户端和必要的原生适配，不默认内置 Python 
 - 所有客户组合必须纳入测试矩阵，至少覆盖 Core-only、Core+视频、Core+自动运营以及目标客户实际组合；
 - 能力关闭后，Core 登录、数字员工、任务、知识、Skill、Tool、审批和审计流程必须保持可用。
 
-### 腾讯云 MVP 基线
+### 腾讯云基础设施 + 阿里云软件服务 MVP 基线
 
-- [`docs/tencent-cloud-mvp-deployment.md`](docs/tencent-cloud-mvp-deployment.md) 是当前腾讯云资源、最小采购、单机部署、对象存储、视频云服务、RAGFlow 延后方案和扩容条件的权威基线；涉及腾讯云采购、部署或 Provider 选择前必须先完整阅读；
-- 本项目的模型服务使用阿里云百炼，云端运行、对象存储和视频渲染分别使用腾讯云 Lighthouse、LighthouseCOS/COS 和 MPS；腾讯云部署不代表模型供应商必须迁移到腾讯云，禁止再次把这两个决策绑定；竞品分析中保留的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 只描述竞品事实，不得作为本项目默认实现；
+- [`docs/tencent-cloud-mvp-deployment.md`](docs/tencent-cloud-mvp-deployment.md) 是当前腾讯云基础设施、阿里云软件云服务、最小采购、单机部署、对象存储、视频云服务、RAGFlow 延后方案和扩容条件的权威基线；涉及云资源采购、部署或 Provider 选择前必须先完整阅读；
+- 本项目只把腾讯云用于云端运行硬件和权威对象存储：应用运行在腾讯云 Lighthouse，素材、成片和 Artifact 保存于 LighthouseCOS/COS；模型服务使用阿里云百炼，视频剪辑使用阿里云 Timeline Web SDK 与 IMS/ICE。IMS/ICE 如不能直接消费或产出 COS 对象，由服务端以任务级私有阿里云 OSS 临时区中转，成片回写 COS 后立即清理；禁止把临时 OSS 变成第二套权威素材库。腾讯云基础设施选择与阿里云软件云服务选择相互独立，禁止再次把云服务器、对象存储、模型和视频剪辑供应商错误绑定；
 - 当前 Demo 阶段的百炼 API Key 为方便多台开发电脑同步，由用户明确决定随私有项目仓库版本化；除非用户再次明确要求，不得删除该 Key、要求轮换或改写 Git 历史。2026-07-16 用户明确批准第二个例外：开发用腾讯云子账号 `agent-platform-server` 的 SecretId/SecretKey 与开发桶信息随私有仓库版本化（位于 `infra/compose/.env.platform`），仅限开发/演示用途，C18 生产凭据体系建立时必须轮换废止。这两个例外之外，不扩展到服务器密码、SSH 私钥、生产凭据、客户凭据或其他任何腾讯云密钥；
 - 当前无 RAGFlow MVP 复用已有北京 4C4G Lighthouse；在 C07 前不得为了展示提前采购 RAGFlow 或其 MySQL、Redis、Elasticsearch、MinIO 托管服务；
 - 现有 4C4G 只承载低并发演示，不运行本地大模型、完整 FFmpeg 批量渲染、RAGFlow 或重型观测栈；素材和成片必须直传对象存储；

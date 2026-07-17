@@ -744,7 +744,7 @@
 
 C01 完成并建立质量基线后，以下能力包可以在独立分支/工作树与 Core 主线并行开发：
 
-1. `video-studio`：LighthouseCOS/COS 素材、自研 Timeline、腾讯云 MPS、模板、剪辑任务和成片；
+1. `video-studio`：LighthouseCOS/COS 权威素材、阿里云 Timeline Web SDK、阿里云 IMS/ICE、模板、剪辑任务和回写 COS 的成片；
 2. `social-operations`：平台账号、浏览器自动化、本地 RPA、微信、朋友圈、私信、发布和曝光；
 3. 客户解决方案包：AI 角色、工作流、提示词、知识绑定、审批规则、品牌和业务参数。
 

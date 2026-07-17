@@ -1,21 +1,22 @@
-# 腾讯云最小成本 MVP 部署基线
+# 腾讯云基础设施 + 阿里云软件服务最小成本 MVP 部署基线
 
-> 文档性质：当前腾讯云资源、MVP 部署拓扑、采购边界与后续扩容条件的正式基线
+> 文档性质：当前腾讯云基础设施、阿里云软件服务、MVP 部署拓扑、采购边界与后续扩容条件的正式基线
 > 建立日期：2026-07-14
+> 供应商边界更新：2026-07-18
 > 当前阶段：单机、无 RAGFlow、低并发演示
 > 目标：以最小固定成本跑通可演示 MVP，不提前购买生产级高可用服务
 
 ## 1. 已确认的供应商决策
 
-本项目采用“腾讯云基础设施 + 阿里云百炼模型服务”的组合：
+本项目采用“腾讯云硬件与权威对象存储 + 阿里云软件云服务”的组合：
 
 - 模型服务：阿里云百炼，当前通过北京地域 OpenAI 兼容接口调用 `qwen-plus`；
 - 业务对象存储：轻量对象存储（Lighthouse 版），必要时兼容普通 COS；
-- 视频最终渲染：腾讯云媒体处理 MPS；
+- 视频编辑与最终渲染：阿里云 Timeline Web SDK + 智能媒体服务 IMS/ICE；
 - 云端运行环境：腾讯云轻量应用服务器；
 - 浏览器 RPA、Windows 微信 UI Automation、macOS Accessibility/AX 和本地 OCR：继续在用户设备的 Tauri Sidecar 执行，不迁移到云服务器。
 
-腾讯云是本项目的云端运行、对象存储和视频处理供应商，不代表模型服务必须迁移到腾讯云。[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md) 中的阿里云 OSS、Timeline Web SDK 和 IMS/ICE 是竞品事实，不代表本项目采用这些阿里云媒体产品；百炼模型服务是独立且已经确认的项目决策。竞品证据必须保留原貌；本项目的开发与采购以本文档和两份路线图为准。
+腾讯云只承载本项目的云端运行硬件和权威对象存储；阿里云承载模型与视频编辑等软件云服务。权威素材、成片和 Artifact 始终保存在 LighthouseCOS/COS。IMS/ICE 如不能直接读取或产出 COS 对象，服务端使用按租户、按任务隔离的私有阿里云 OSS 临时区桥接，成片回写 COS 后删除中转对象；临时 OSS 不得承载素材库、长期成片或其他权威状态。[`dt-ai-helper-competitive-analysis.md`](dt-ai-helper-competitive-analysis.md) 中的阿里云 Timeline Web SDK 与 IMS/ICE 既是竞品事实，也是本项目 2026-07-18 明确采用的视频方案。
 
 ## 2. 当前已有资源实测
 
@@ -61,20 +62,24 @@ Tauri App / Web 调试端
 └── 轻量 OpenTelemetry/本地日志
               │
               ├── 阿里云百炼：对话、工具调用、结构化输出、Embedding
-              ├── LighthouseCOS：素材、成片、Artifact、更新文件
-              └── MPS：云端剪辑、合成、转码和异步 Job
+              ├── LighthouseCOS：权威素材、成片、Artifact、更新文件
+              └── AliyunIceProvider
+                    ├── 任务级私有 OSS 临时输入/输出
+                    ├── Timeline Web SDK + IMS/ICE 异步 Job
+                    └── 成片回写 LighthouseCOS/COS 后清理临时对象
 ```
 
 本拓扑只面向单客户、少量测试账号和低并发演示。允许服务中断和演示数据丢失，不得直接作为正式生产环境交付。
 
-## 4. 当前需要开通的腾讯云服务
+## 4. 当前需要开通的云服务
 
 | 服务 | MVP 用途 | 计费/采购策略 | 当前结论 |
 | --- | --- | --- | --- |
 | 已有 Lighthouse | API、Worker、LiteLLM 和基础依赖 | 复用现有实例 | 不新增服务器 |
 | 阿里云百炼 | 语言模型和向量模型 | 现有北京地域 API Key，按量调用 | 已开通 |
 | 轻量对象存储 | 素材、成片、Artifact、安装与更新文件 | 优先使用已有套餐，超额按量 | 不购买普通 COS |
-| MPS | 视频剪辑、拼接、多轨合成、字幕、转场、混音、画中画和转码 | 开通后按任务计费，不买资源包 | 开发视频功能时启用 |
+| 阿里云 IMS/ICE | 视频剪辑、拼接、多轨合成、字幕、转场、混音、画中画和异步成片 | 按任务计费，不买资源包 | 开发视频功能时启用 |
+| 阿里云 OSS 临时桶 | 仅桥接 IMS/ICE 任务输入与输出，不保存权威素材 | 私有、短生命周期、按量计费 | 与 IMS/ICE 同地域启用 |
 | CAM / STS | 服务端权限和客户端临时上传凭据 | 平台能力，无独立计算实例 | 必须配置 |
 | TCR 个人版 | 暂存自研 Docker 镜像 | 免费限额版 | 可选 |
 | VPC / 防火墙 | 网络隔离和端口控制 | 使用 Lighthouse 自带能力 | 必须配置 |
@@ -96,7 +101,7 @@ Tauri App / Web 调试端
 ```text
 artifacts/   # AI 任务产物
 materials/   # 视频、图片、音乐和模板素材
-renders/     # MPS 最终成片
+renders/     # IMS/ICE 回写后的最终成片
 updates/     # Tauri 安装包和更新清单
 diagnostics/ # 脱敏后的受控诊断产物
 ```
@@ -109,17 +114,18 @@ diagnostics/ # 脱敏后的受控诊断产物
 - 不把 PostgreSQL、Redis、Docker Volume、LangGraph Checkpoint 或 RAGFlow 内部数据放在对象存储挂载目录；
 - 应用通过 COS API/SDK 使用存储，不依赖 `/lhcos-data` 挂载；
 - 正式采用前，必须完成 Tauri 直传、CORS、签名下载、删除和跨租户权限测试；
-- MPS 对轻量对象存储的 COS 输入/输出必须完成真实小样；通过前保留普通 COS 按量桶作为兼容回退，不提前购买资源包。
+- IMS/ICE 与 LighthouseCOS/COS 的跨云输入、输出必须完成真实小样；若官方接口不支持直接使用短时 COS URL，则只允许通过任务级私有 OSS 临时区中转，并验证完成回写与失败清理。
 
-### 4.3 MPS 使用边界
+### 4.3 阿里云 IMS/ICE 使用边界
 
-- `VideoRenderProvider` 的第一实现改为 `TencentMpsProvider`；
-- MPS 负责最终 MP4 的云端异步生成，不在 4C4G 服务器运行完整 FFmpeg 批量渲染；
-- 输入优先使用 LighthouseCOS/COS，成片写回 `renders/`；
-- 保存 MPS Task ID、进度、费用、错误、重试、取消和最终对象 ID；
+- `VideoRenderProvider` 的第一实现为 `AliyunIceProvider`；
+- 阿里云 Timeline Web SDK 负责 App 内编辑与预览，IMS/ICE 负责最终 MP4 的云端异步生成，不在 4C4G 服务器运行完整 FFmpeg 批量渲染；
+- LighthouseCOS/COS 是权威输入与输出存储；需要 OSS 中转时，只复制当前 Job 所需素材，输出回写 `renders/` 后立即清理；
+- 保存 IMS/ICE Job ID、进度、费用、错误、重试、取消、临时对象清理状态和最终 Artifact ID；
 - App 关闭后任务继续，重新打开后恢复云端真实状态；
-- MPS 没有被本项目确认具备与 `AliyunTimelinePlayer` 对等的 Web 时间线编辑器，因此 Timeline DTO、编辑 UI 和低清预览由 Tauri/React 自研；
-- 第一阶段不购买云点播 VOD 或播放器 License，只有形成面向观众的视频播放业务后再评估。
+- 业务模型保留供应商无关 Timeline DTO，页面通过 Adapter 使用阿里云 Timeline Web SDK，不直接拼装阿里云签名或持有长期 AccessKey；
+- 服务端阿里云凭据、临时 OSS 桶和跨云传输必须按租户隔离，记录传输量、费用、保留时间和删除结果；
+- 第一阶段不购买阿里云 VOD 或播放器 License，只有形成面向观众的视频播放业务后再评估。
 
 ## 5. 4C4G 运行边界
 
@@ -198,6 +204,7 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - CLB；
 - 腾讯云托管 PostgreSQL、MySQL、Redis 和 Elasticsearch；
 - 腾讯云向量数据库；
+- 腾讯云媒体处理 MPS；
 - 云点播 VOD 和播放器 License；
 - CDN；
 - WAF、付费 Anti-DDoS、云防火墙；
@@ -244,7 +251,7 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 
 ## 11. 开发任务映射
 
-| 路线图任务 | 腾讯云落地 |
+| 路线图任务 | 混合云落地 |
 | --- | --- |
 | C03 | 完整栈先排除 RAGFlow，通过 LiteLLM 完成百炼真实 AI 烟测 |
 | C04 | `ArtifactStorageProvider` + `TencentCosArtifactProvider` |
@@ -254,8 +261,8 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 | C18 | 腾讯云 CAM/STS、生产凭据和 Sandbox 隔离 |
 | C20 | Lighthouse 部署、LighthouseCOS 更新产物和正式发布流程 |
 | B04 | LighthouseCOS 素材库、STS 直传和下载任务 |
-| B05 | 自研 Timeline DTO、编辑器和 App 内低清预览 |
-| B06 | `TencentMpsProvider`、真实 EditMedia 小样和成片回写 |
+| B05 | 供应商无关 Timeline DTO、阿里云 Timeline Web SDK Adapter 和 App 内预览 |
+| B06 | `AliyunIceProvider`、真实 IMS/ICE Job、任务级 OSS 中转和 COS 成片回写 |
 | B07 | 从 LighthouseCOS Artifact 进入多平台发布 |
 | B09-B16 | 阿里云百炼 + 用户设备本地执行器，不新增云主机 |
 
@@ -268,11 +275,11 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - [x] 创建北京私有 LighthouseCOS 存储桶（2026-07-16：`agent-platform-1424480216`，私有读写；CAM 子账号 `agent-platform-server` 已授权 COS+STS）；
 - [ ] 完成服务端 STS、Tauri 直传和签名下载（凭据已就绪，签发实现属 B04，待 C17 三层授权）；
 - [x] 验证现有 MinIO 路径和 Tencent COS Provider 迁移边界（2026-07-15：MinIO 真实全链路及 COS 官方 SDK 契约通过；2026-07-16：真实 COS 桶凭据门禁通过，并修复 Provider 对真实 StreamBody 的资源释放缺陷——Mock 曾放宽 close 契约）；
-- [ ] MPS 从 LighthouseCOS/COS 读取素材并将成片写回；
+- [ ] IMS/ICE 完成 LighthouseCOS/COS → 任务级私有 OSS → 云端合成 → COS 成片回写，并验证成功、失败和取消时的临时对象清理；
 - [ ] 完成单用户、单 Worker、单 Sandbox 的资源压力检查；
 - [ ] 验证服务器重启后容器恢复；
 - [ ] 确认关闭 RAGFlow 后 Core 非知识库流程不受影响；
-- [ ] 记录实际 Token、对象存储、MPS 和服务器费用。
+- [ ] 记录实际 Token、COS、临时 OSS、IMS/ICE、跨云流量和服务器费用。
 
 ## 13. 官方参考
 
@@ -280,7 +287,9 @@ MVP 和早期试运营阶段不单独购买腾讯云 MySQL、Redis、Elasticsear
 - [轻量对象存储产品概述](https://cloud.tencent.com/document/product/1207/80957)
 - [轻量对象存储挂载说明](https://cloud.tencent.com/document/product/1207/97692)
 - [COS 临时密钥生成及使用](https://cloud.tencent.com/document/product/436/14048)
-- [腾讯云 MPS 编辑视频 API](https://cloud.tencent.com/document/product/862/43010)
+- [阿里云智能生产制作概述](https://help.aliyun.com/zh/ims/user-guide/overview-of-intelligent-production)
+- [阿里云智能生产制作快速入门与 Job 查询](https://help.aliyun.com/zh/ims/getting-started/intelligent-production-production-quick-start)
+- [阿里云剪辑及预览组件 Web SDK Timeline 支持](https://help.aliyun.com/zh/ims/developer-reference/timeline-support-guide-for-editing-and-previewing-the-component-web-sdk)
 - [阿里云百炼与 LangChain 集成](https://help.aliyun.com/zh/model-studio/use-bailian-in-langchain)
 - [阿里云百炼文本向量接口](https://help.aliyun.com/zh/model-studio/text-embedding-synchronous-api)
 - [RAGFlow 官方部署要求](https://github.com/infiniflow/ragflow/blob/main/README.md)
