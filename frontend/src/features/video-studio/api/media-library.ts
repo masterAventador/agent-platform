@@ -22,7 +22,9 @@ const materialSchema = z.object({
   media_type: z.string().min(1).max(255),
   size_bytes: z.number().int().positive(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  crc64ecma: z.string().regex(/^[0-9]{1,20}$/),
+  // 迁移 0033 前完成的存量素材 crc64 回填为空串；crc64 仅用于展示与录入校验（门禁在后端
+  // 以服务端 x-cos-hash-crc64ecma 完成），故读契约容忍空串，避免单条存量行让整表解析崩溃。
+  crc64ecma: z.union([z.literal(''), z.string().regex(/^[0-9]{1,20}$/)]),
   storage_key: z.string().min(1).max(700),
   status: z.enum(['pending_upload', 'available', 'upload_failed', 'deleted']),
   tags: z.array(z.string()),
