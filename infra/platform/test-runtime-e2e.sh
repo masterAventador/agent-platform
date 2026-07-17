@@ -35,8 +35,33 @@ export PLAYWRIGHT_MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT}"
 
 COMPOSE=(docker compose --project-name "${COMPOSE_PROJECT_NAME}" --env-file "${COMPOSE_ENV}" -f "${COMPOSE_FILE}")
 
+# Playwright 以 reuseExistingServer=false 拉起 7 个本地 webServer（uv run uvicorn /
+# pnpm dev），它们是「uv/sh -c → python/node」多层子进程。Playwright 正常退出会收掉，
+# 但异常终止（驱动进程被 SIGKILL、trap 未及、SIGTERM 未传到孙子进程）时这些本地
+# server 会残留成孤儿。以下按本轮随机分配的端口兜底清理——只杀监听本轮端口的进程，
+# 不触碰 dev 常驻栈或其他并行栈（它们用不同端口）。
+runtime_webserver_ports() {
+  printf '%s\n' \
+    "${PLAYWRIGHT_RUNTIME_API_PORT}" \
+    "${PLAYWRIGHT_RUNTIME_SANDBOX_PORT}" \
+    "${PLAYWRIGHT_RUNTIME_RAGFLOW_PORT}" \
+    "${PLAYWRIGHT_RUNTIME_FRONTEND_PORT}" \
+    "${PLAYWRIGHT_RUNTIME_MCP_STUB_PORT}"
+}
+
+kill_local_webservers() {
+  local port pid
+  while IFS= read -r port; do
+    [[ -n "${port}" ]] || continue
+    while IFS= read -r pid; do
+      [[ -n "${pid}" ]] && kill -9 "${pid}" >/dev/null 2>&1 || true
+    done < <(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)
+  done < <(runtime_webserver_ports)
+}
+
 cleanup() {
   local lease_id container_id
+  kill_local_webservers
   while IFS= read -r lease_id; do
     [[ -n "${lease_id}" ]] || continue
     while IFS= read -r container_id; do
@@ -54,6 +79,8 @@ cleanup() {
     dropdb --force --if-exists -U agent_platform "${DATABASE_NAME}" \
     >/dev/null 2>&1 || true
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  # docker down 之后再兜底一次，捕获 compose 拆栈期间才退出的本地 server 残留。
+  kill_local_webservers
   rm -f /tmp/agent-platform-runtime-e2e-dispatcher-ready \
     /tmp/agent-platform-runtime-e2e-worker-ready \
     /tmp/agent-platform-runtime-e2e-slow-model-started \
@@ -61,6 +88,10 @@ cleanup() {
     /tmp/agent-platform-runtime-e2e-slow-model-side-effect
 }
 trap cleanup EXIT INT TERM
+
+# 启动前预清：若调用方复用固定 PLAYWRIGHT_RUNTIME_* 端口，先清掉上一轮可能残留的
+# 本地 webServer，避免端口占用或误连旧 server。随机端口场景下为空操作。
+kill_local_webservers
 
 rm -f /tmp/agent-platform-runtime-e2e-dispatcher-ready \
   /tmp/agent-platform-runtime-e2e-worker-ready \

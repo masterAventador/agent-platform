@@ -35,7 +35,12 @@ const backendEnvironment = {
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['runtime.spec.ts', 'knowledge-runtime.spec.ts', 'approvals.spec.ts'],
+  testMatch: [
+    'runtime.spec.ts',
+    'knowledge-runtime.spec.ts',
+    'memory-runtime.spec.ts',
+    'approvals.spec.ts',
+  ],
   globalSetup: './e2e/runtime-global-setup.ts',
   globalTeardown: './e2e/runtime-global-teardown.ts',
   fullyParallel: false,

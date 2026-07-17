@@ -30,6 +30,7 @@ const definition: EmployeeWriteDefinition = {
     conversation: true,
     scheduled_tasks: false,
     file_upload: false,
+    memory: false,
   },
   skill_ids: [],
   tool_ids: [],

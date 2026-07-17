@@ -16,6 +16,7 @@ CORE_API_ROUTE_ROOTS = frozenset(
         "health",
         "knowledge-bases",
         "mcp-servers",
+        "memories",
         "model-gateway",
         "observability",
         "run-dead-letters",

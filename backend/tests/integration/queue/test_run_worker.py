@@ -6037,3 +6037,211 @@ async def test_followup_uuid5_conflict_is_treated_as_already_derived_not_failure
     assert command_processed is True
     runs = await _conversation_runs(factory, seed)
     assert len(runs) == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_extracts_remember_directives_into_memories(factory) -> None:
+    """任务完成后受控提取：显式 <remember> 声明收编到发起用户命名空间。"""
+    from agent_platform.infrastructure.database.repositories.memories import (
+        SqlAlchemyMemoryRepository,
+    )
+    from agent_platform.platform.memory.entities import MemoryScope, MemorySource
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"message": "执行任务"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={
+            "runtime_type": "workflow",
+            "capabilities": {"conversation": True, "memory": True},
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="memory-extract",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(
+            ConversationOutputRuntime("好的。<remember>用户偏好中文邮件签名</remember>")
+        ),
+        consumer_name="memory-extract-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        memories = await SqlAlchemyMemoryRepository(session).list(
+            tenant_id=run.tenant_id, visible_to=None
+        )
+    assert len(memories) == 1
+    memory = memories[0]
+    assert memory.scope is MemoryScope.USER
+    assert memory.scope_ref == run.created_by
+    assert memory.source is MemorySource.RUN
+    assert memory.source_ref == str(run.id)
+    assert memory.content == "用户偏好中文邮件签名"
+
+
+@pytest.mark.asyncio
+async def test_worker_skips_memory_extraction_when_capability_disabled(factory) -> None:
+    """员工记忆能力关闭时禁用后不写：即使输出带记忆声明也不落库。"""
+    from agent_platform.infrastructure.database.repositories.memories import (
+        SqlAlchemyMemoryRepository,
+    )
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"message": "执行任务"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={
+            "runtime_type": "workflow",
+            "capabilities": {"conversation": True, "memory": False},
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="memory-disabled",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+    worked = await RunWorker(
+        session_factory=factory,
+        queue=queue,
+        runtime_resolver=Resolver(
+            ConversationOutputRuntime("好的。<remember>不该被记住</remember>")
+        ),
+        consumer_name="memory-disabled-worker",
+    ).run_once(block_ms=1)
+
+    assert worked is True
+    async with factory() as session:
+        memories = await SqlAlchemyMemoryRepository(session).list(
+            tenant_id=run.tenant_id, visible_to=None
+        )
+    assert memories == []
+
+
+@pytest.mark.asyncio
+async def test_worker_completion_survives_memory_extraction_failure(
+    factory, monkeypatch, caplog
+) -> None:
+    """提取入口失败只记录日志，不阻断 Run 收尾（独立安全事务）。"""
+    import logging
+
+    async def broken_extraction(**kwargs) -> int:
+        raise RuntimeError("memory extraction backend down")
+
+    monkeypatch.setattr(
+        "agent_platform.workers.run_worker.extract_run_memories",
+        broken_extraction,
+    )
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"message": "执行任务"},
+    )
+    command = RunCommand.create(
+        run_id=run.id, tenant_id=run.tenant_id, action=RunCommandAction.START
+    )
+    version = EmployeeVersion(
+        id=uuid4(),
+        employee_id=run.employee_id,
+        tenant_id=run.tenant_id,
+        version=1,
+        definition={
+            "runtime_type": "workflow",
+            "capabilities": {"conversation": True, "memory": True},
+        },
+        published_by=run.created_by,
+        published_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        await SqlAlchemyRunRepository(session).add(run)
+        await SqlAlchemyEmployeeVersionRepository(session).add(version)
+        await SqlAlchemyRunCommandRepository(session).add(command)
+        await session.commit()
+
+    queue = OneMessageQueue(
+        RunQueueDelivery(
+            delivery_id="memory-extract-failure",
+            message=RunQueueMessage(
+                command_id=command.id,
+                run_id=run.id,
+                tenant_id=run.tenant_id,
+                action="start",
+            ),
+        )
+    )
+    with caplog.at_level(logging.ERROR, logger="agent_platform.workers.run_worker"):
+        worked = await RunWorker(
+            session_factory=factory,
+            queue=queue,
+            runtime_resolver=Resolver(
+                ConversationOutputRuntime("好的。<remember>提取失败场景</remember>")
+            ),
+            consumer_name="memory-extract-failure-worker",
+        ).run_once(block_ms=1)
+
+    assert worked is True
+    assert queue.acknowledged == ["memory-extract-failure"]
+    async with factory() as session:
+        persisted = await SqlAlchemyRunRepository(session).get(
+            tenant_id=run.tenant_id, run_id=run.id
+        )
+        command_processed = await SqlAlchemyRunCommandRepository(session).is_processed(command.id)
+    assert persisted is not None and persisted.status is RunStatus.COMPLETED
+    assert command_processed is True
+    assert "memory_extraction_failed" in [record.getMessage() for record in caplog.records]

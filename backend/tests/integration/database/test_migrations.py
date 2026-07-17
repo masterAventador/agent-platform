@@ -651,7 +651,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
-    # C13 分支占用 20260716_0030（down_revision 暂指 0028，主代理合并时统一重链）。
+    # C13 迁移 20260716_0030；合入时已重链 down_revision 至 0029（C10 记忆迁移），保持单头。
     config = Config(BACKEND_ROOT / "alembic.ini")
     assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0030"
 
@@ -709,6 +709,82 @@ def test_approval_migration_creates_and_removes_table(tmp_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         remaining = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approvals'"
+        ).fetchall()
+    assert remaining == []
+
+
+def test_memory_migration_creates_namespaced_table_with_dedupe_constraint(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "memories-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'memories'"
+            ).fetchall()
+        }
+        tenant_id = str(uuid4())
+        connection.execute(
+            "INSERT INTO tenants (id, name, slug, created_at) VALUES (?, ?, ?, ?)",
+            (tenant_id, "记忆迁移租户", f"memory-{tenant_id[:8]}", "2026-07-17 00:00:00"),
+        )
+        insert = (
+            "INSERT INTO memories (id, tenant_id, scope, scope_ref, key, content, source, "
+            "source_ref, confidence, status, expires_at, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        base = (
+            tenant_id,
+            "user",
+            str(uuid4()),
+            "dedupe-key",
+            "用户偏好中文签名",
+            "run",
+            "run-1",
+            1.0,
+            "active",
+            None,
+            None,
+            "2026-07-17 00:00:00",
+            "2026-07-17 00:00:00",
+        )
+        connection.execute(insert, (str(uuid4()), *base))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (str(uuid4()), *base))
+
+    assert {
+        "id",
+        "tenant_id",
+        "scope",
+        "scope_ref",
+        "key",
+        "content",
+        "source",
+        "source_ref",
+        "confidence",
+        "status",
+        "expires_at",
+        "created_by",
+        "created_at",
+        "updated_at",
+    } == columns
+    assert "uq_memories_namespace_source_key" in indexes
+
+    command.downgrade(config, "20260716_0028")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories'"
         ).fetchall()
     assert remaining == []
 

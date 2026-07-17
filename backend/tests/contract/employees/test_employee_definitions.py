@@ -928,3 +928,34 @@ async def test_model_alias_allowlist_is_authoritative_for_update_and_publish(
     )
     assert rejected_publish.status_code == 422
     assert rejected_publish.json()["detail"]["code"] == ("employee_model_alias_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_autonomous_employee_accepts_memory_capability_default_off(
+    employee_clients: tuple[AsyncClient, AsyncClient],
+) -> None:
+    """记忆能力可显式开启，且缺省关闭（禁用后运行时不读不写）。"""
+    owner, _ = employee_clients
+    current_user = await register_and_login(owner, "employee-memory@example.com")
+    tenant_id = current_user["workspaces"][0]["id"]
+
+    definition = employee_definition(name="记忆能力员工")
+    capabilities = definition["capabilities"]
+    assert isinstance(capabilities, dict)
+    capabilities["memory"] = True
+    enabled = await owner.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": tenant_id},
+        json=definition,
+    )
+    assert enabled.status_code == 201
+    assert enabled.json()["definition"]["capabilities"]["memory"] is True
+
+    default_definition = employee_definition(name="缺省记忆员工")
+    default = await owner.post(
+        "/api/v1/employees",
+        headers={"X-Tenant-ID": tenant_id},
+        json=default_definition,
+    )
+    assert default.status_code == 201
+    assert default.json()["definition"]["capabilities"]["memory"] is False

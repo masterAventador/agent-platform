@@ -1,6 +1,6 @@
 """C13 独立审批中心：approvals 审批记录表。
 
-down_revision 暂指 20260716_0028：0030/0031 由并行分支占用（C13/C10），
+合入 main 时已重链 down_revision 至 20260716_0029（C10 记忆迁移），保持迁移单头。
 主代理合并时统一重链（见 core-capability-roadmap C13 开工说明）。
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260716_0030"
-down_revision: str | None = "20260716_0028"
+down_revision: str | None = "20260716_0029"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
