@@ -5,6 +5,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { usePublishedSkills } from '../../skills/api/queries'
 import { useAvailableTools } from '../../tools/api/queries'
 import { useKnowledgeBases } from '../../knowledge/api/queries'
+import { useWorkflows } from '../../workflows/api/queries'
+import { publishedWorkflowOptions } from '../../workflows/api/workflows'
 import type {
   EmployeeWriteDefinition,
   KnowledgeMetadataComparisonOperator,
@@ -27,6 +29,7 @@ interface EmployeeFormValues {
   name: string
   roleDescription: string
   workMode: WorkMode
+  workflowId?: string
   systemPrompt: string
   modelAlias: 'general-purpose'
   conversation: boolean
@@ -68,6 +71,7 @@ const defaultValues: EmployeeFormValues = {
   name: '',
   roleDescription: '',
   workMode: 'autonomous',
+  workflowId: undefined,
   systemPrompt: '',
   modelAlias: 'general-purpose',
   conversation: true,
@@ -139,13 +143,14 @@ export function EmployeeEditorPage() {
   const skills = usePublishedSkills()
   const tools = useAvailableTools()
   const knowledgeBases = useKnowledgeBases()
+  const workflows = useWorkflows()
   const [form] = Form.useForm<EmployeeFormValues>()
   const mutation = employeeId ? updateEmployee : createEmployee
   const selectedWorkMode = Form.useWatch('workMode', form) ?? 'autonomous'
   const selectedKnowledgeBaseIds = Form.useWatch('knowledgeBaseIds', form) ?? []
   const legacyDefinition = editingEmployee.data?.definition
-  const hasLegacyWorkMode = legacyDefinition?.work_mode !== undefined
-    && legacyDefinition.work_mode !== 'autonomous'
+  const workflowOptions = publishedWorkflowOptions(workflows.data ?? [])
+  const requiresWorkflow = selectedWorkMode !== 'autonomous'
   const hasLegacyUnavailableCapability = Boolean(
     legacyDefinition?.capabilities.scheduled_tasks,
   )
@@ -157,6 +162,7 @@ export function EmployeeEditorPage() {
       name: employee.definition.name,
       roleDescription: employee.definition.role_description,
       workMode: employee.definition.work_mode,
+      workflowId: employee.definition.workflow_id ?? undefined,
       systemPrompt: employee.definition.system_prompt,
       modelAlias: 'general-purpose',
       conversation: employee.definition.capabilities.conversation,
@@ -175,10 +181,10 @@ export function EmployeeEditorPage() {
   }, [editingEmployee.data, form])
 
   const submit = async (values: EmployeeFormValues) => {
-    if (values.workMode !== 'autonomous') {
+    if (values.workMode !== 'autonomous' && !values.workflowId) {
       form.setFields([{
-        name: 'workMode',
-        errors: ['当前只支持自主执行，请先显式切换工作模式'],
+        name: 'workflowId',
+        errors: ['流程/混合员工必须引用一个已发布工作流'],
       }])
       return
     }
@@ -193,19 +199,18 @@ export function EmployeeEditorPage() {
       return
     }
     const existing = editingEmployee.data?.definition
-    const definition: EmployeeWriteDefinition = {
+    const base = {
       name: values.name,
       avatar_url: existing?.avatar_url,
       role_description: values.roleDescription,
       visibility: existing?.visibility ?? 'tenant',
-      work_mode: 'autonomous',
       system_prompt: values.systemPrompt,
-      model: { kind: 'gateway_alias', alias: 'general-purpose' },
+      model: { kind: 'gateway_alias', alias: 'general-purpose' } as const,
       input_schema: inputSchema.value,
       output_schema: outputSchema.value,
       capabilities: {
         conversation: values.conversation,
-        scheduled_tasks: false,
+        scheduled_tasks: false as const,
         file_upload: values.fileUpload,
         memory: values.memory ?? false,
       },
@@ -216,6 +221,10 @@ export function EmployeeEditorPage() {
       approval_policy: existing?.approval_policy ?? {},
       release_strategy: existing?.release_strategy ?? { mode: 'all' },
     }
+    const definition: EmployeeWriteDefinition =
+      values.workMode === 'autonomous'
+        ? { ...base, work_mode: 'autonomous' }
+        : { ...base, work_mode: values.workMode, workflow_id: values.workflowId! }
     try {
       const employee = await mutation.mutateAsync(definition)
       navigate(`/employees/${employee.id}`, { replace: true })
@@ -238,20 +247,6 @@ export function EmployeeEditorPage() {
             type="error"
             showIcon
             title={getEmployeeApiErrorMessage(mutation.error, '保存失败，请稍后重试')}
-          />
-        )}
-        {hasLegacyWorkMode && selectedWorkMode !== 'autonomous' && (
-          <Alert
-            className="employee-form-error"
-            type="warning"
-            showIcon
-            title="历史配置使用了尚未开放的工作模式"
-            description="该模式当前不能真实执行，也不能继续保存或发布。请显式切换为自主执行。"
-            action={(
-              <Button onClick={() => form.setFieldValue('workMode', 'autonomous')}>
-                切换为自主执行
-              </Button>
-            )}
           />
         )}
         {hasLegacyUnavailableCapability && (
@@ -281,13 +276,29 @@ export function EmployeeEditorPage() {
               virtual={false}
               options={[
                 { value: 'autonomous', label: '自主执行' },
-                { value: 'workflow', label: '固定流程（尚未开放）', disabled: true },
-                { value: 'hybrid', label: '混合协作（尚未开放）', disabled: true },
+                { value: 'workflow', label: '固定流程' },
+                { value: 'hybrid', label: '混合协作' },
               ]}
             />
           </Form.Item>
+          {requiresWorkflow && (
+            <Form.Item
+              label="引用工作流"
+              name="workflowId"
+              rules={[{ required: true, message: '请选择一个已发布工作流' }]}
+              extra="只能引用已发布的工作流；发布员工时会固化当前发布版本。"
+            >
+              <Select
+                virtual={false}
+                placeholder="选择已发布工作流"
+                loading={workflows.isPending}
+                notFoundContent="暂无已发布工作流，请先在工作流中心发布"
+                options={workflowOptions}
+              />
+            </Form.Item>
+          )}
           <Typography.Paragraph type="secondary">
-            当前仅自主执行模式已接入真实运行时；固定流程与混合协作尚未开放。
+            自主执行使用 Deep Agents；固定流程/混合协作使用已发布的 LangGraph 工作流编排。
           </Typography.Paragraph>
           <Form.Item label="系统指令" name="systemPrompt" rules={[{ required: true }]}>
             <Input.TextArea rows={6} />
@@ -467,7 +478,6 @@ export function EmployeeEditorPage() {
               type="primary"
               htmlType="submit"
               loading={mutation.isPending}
-              disabled={selectedWorkMode !== 'autonomous'}
             >
               保存草稿
             </Button>

@@ -651,9 +651,74 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
-    # C13 迁移 20260716_0030；合入时已重链 down_revision 至 0029（C10 记忆迁移），保持单头。
+    # C11 迁移 20260716_0032（工作流注册表）；down_revision 暂指 0030，主代理合并时重链。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0030"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0032"
+
+
+def test_workflow_migration_creates_and_removes_tables(tmp_path: Path) -> None:
+    database_path = tmp_path / "workflows-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        workflow_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workflows)").fetchall()
+        }
+        version_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(workflow_versions)").fetchall()
+        }
+        workflow_indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'workflows'"
+            ).fetchall()
+        }
+        version_indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'workflow_versions'"
+            ).fetchall()
+        }
+    assert {
+        "id",
+        "tenant_id",
+        "created_by",
+        "name",
+        "description",
+        "latest_version",
+        "published_version",
+        "status",
+        "created_at",
+        "updated_at",
+    } == workflow_columns
+    assert {
+        "id",
+        "workflow_id",
+        "tenant_id",
+        "version",
+        "description",
+        "graph",
+        "created_by",
+        "created_at",
+        "published_at",
+    } == version_columns
+    assert "uq_workflows_tenant_name_lower" in workflow_indexes
+    assert "uq_workflow_versions_number" in version_indexes
+
+    command.downgrade(config, "20260716_0030")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('workflows', 'workflow_versions')"
+        ).fetchall()
+    assert remaining == []
 
 
 def test_approval_migration_creates_and_removes_table(tmp_path: Path) -> None:

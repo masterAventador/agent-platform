@@ -51,6 +51,10 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantRecord,
 )
 from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.database.repositories.workflows import (
+    WorkflowRecord,
+    WorkflowVersionRecord,
+)
 
 ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     UserRecord,
@@ -84,6 +88,8 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ArtifactStorageOperationRecord,
     CapabilityEntitlementRecord,
     ApprovalRecord,
+    WorkflowRecord,
+    WorkflowVersionRecord,
 )
 
 

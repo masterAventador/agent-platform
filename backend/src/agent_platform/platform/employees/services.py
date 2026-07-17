@@ -6,6 +6,7 @@ from agent_platform.platform.employees.entities import (
     Employee,
     EmployeeDraft,
     EmployeeVersion,
+    RuntimeType,
     is_runnable_employee_definition,
 )
 from agent_platform.platform.employees.errors import (
@@ -14,6 +15,7 @@ from agent_platform.platform.employees.errors import (
     EmployeeNotFound,
     EmployeeSkillNotBindable,
     EmployeeToolNotBindable,
+    EmployeeWorkflowNotBindable,
 )
 from agent_platform.platform.employees.ports import (
     EmployeeKnowledgeBasePolicy,
@@ -21,7 +23,10 @@ from agent_platform.platform.employees.ports import (
     EmployeeSkillPolicy,
     EmployeeToolPolicy,
     EmployeeVersionRepository,
+    EmployeeWorkflowPolicy,
 )
+
+_WORKFLOW_RUNTIME_TYPES = {RuntimeType.WORKFLOW, RuntimeType.HYBRID}
 
 
 class EmployeeService:
@@ -33,12 +38,14 @@ class EmployeeService:
         skills: EmployeeSkillPolicy,
         tools: EmployeeToolPolicy,
         knowledge_bases: EmployeeKnowledgeBasePolicy,
+        workflows: EmployeeWorkflowPolicy,
     ) -> None:
         self._employees = employees
         self._versions = versions
         self._skills = skills
         self._tools = tools
         self._knowledge_bases = knowledge_bases
+        self._workflows = workflows
 
     async def create(
         self,
@@ -53,6 +60,7 @@ class EmployeeService:
             tenant_id=tenant_id,
             knowledge_base_ids=draft.knowledge_base_ids,
         )
+        await self._ensure_workflow_bindable(tenant_id=tenant_id, draft=draft)
         employee = Employee.create(tenant_id=tenant_id, created_by=created_by, draft=draft)
         await self._employees.add(employee)
         return employee
@@ -70,6 +78,7 @@ class EmployeeService:
             tenant_id=tenant_id,
             knowledge_base_ids=draft.knowledge_base_ids,
         )
+        await self._ensure_workflow_bindable(tenant_id=tenant_id, draft=draft)
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
         updated = employee.update(draft)
         await self._employees.update(updated)
@@ -83,7 +92,13 @@ class EmployeeService:
         published_by: UUID,
     ) -> Employee:
         employee = await self._required_employee(tenant_id=tenant_id, employee_id=employee_id)
-        if not is_runnable_employee_definition(employee.draft.snapshot()):
+        workflow_version = await self._fixate_workflow_version(
+            tenant_id=tenant_id,
+            draft=employee.draft,
+        )
+        if not is_runnable_employee_definition(
+            employee.draft.snapshot(workflow_version=workflow_version)
+        ):
             raise EmployeeConfigurationUnavailable
         await self._ensure_skills_bindable(
             tenant_id=tenant_id,
@@ -104,6 +119,7 @@ class EmployeeService:
         published, version = employee.publish(
             published_by=published_by,
             skill_versions=skill_versions,
+            workflow_version=workflow_version,
         )
         await self._employees.update(published)
         await self._versions.add(version)
@@ -159,3 +175,36 @@ class EmployeeService:
             knowledge_base_ids=knowledge_base_ids,
         ):
             raise EmployeeKnowledgeBaseNotBindable
+
+    async def _ensure_workflow_bindable(self, *, tenant_id: UUID, draft: EmployeeDraft) -> None:
+        """流程/混合员工必须引用一个已注册工作流；引用未注册流程受控拒绝。"""
+
+        if draft.runtime_type not in _WORKFLOW_RUNTIME_TYPES:
+            return
+        if draft.workflow_id is None:
+            raise EmployeeWorkflowNotBindable
+        if not await self._workflows.is_registered(
+            tenant_id=tenant_id,
+            workflow_id=draft.workflow_id,
+        ):
+            raise EmployeeWorkflowNotBindable
+
+    async def _fixate_workflow_version(
+        self,
+        *,
+        tenant_id: UUID,
+        draft: EmployeeDraft,
+    ) -> int | None:
+        """发布时固化被引用工作流的当前已发布版本；未发布则拒绝发布。"""
+
+        if draft.runtime_type not in _WORKFLOW_RUNTIME_TYPES:
+            return None
+        if draft.workflow_id is None:
+            raise EmployeeConfigurationUnavailable
+        version = await self._workflows.published_version(
+            tenant_id=tenant_id,
+            workflow_id=draft.workflow_id,
+        )
+        if version is None:
+            raise EmployeeConfigurationUnavailable
+        return version

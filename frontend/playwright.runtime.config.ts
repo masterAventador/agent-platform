@@ -40,6 +40,7 @@ export default defineConfig({
     'knowledge-runtime.spec.ts',
     'memory-runtime.spec.ts',
     'approvals.spec.ts',
+    'workflow-runtime.spec.ts',
   ],
   globalSetup: './e2e/runtime-global-setup.ts',
   globalTeardown: './e2e/runtime-global-teardown.ts',

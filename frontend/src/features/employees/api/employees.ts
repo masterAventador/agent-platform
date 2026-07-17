@@ -87,12 +87,31 @@ export interface EmployeeDefinition {
   knowledge_retrieval: KnowledgeRetrievalConfig
   approval_policy: Record<string, unknown>
   release_strategy: Record<string, unknown>
+  /** 流程/混合员工引用的工作流；自主员工为 null。 */
+  workflow_id?: string | null
+  /** 服务端发布时固化的工作流版本，只读。 */
+  workflow_version?: number | null
 }
 
-export type EmployeeWriteDefinition = Omit<EmployeeDefinition, 'work_mode' | 'capabilities'> & {
-  work_mode: 'autonomous'
+type EmployeeWriteBase = Omit<
+  EmployeeDefinition,
+  'work_mode' | 'capabilities' | 'workflow_id' | 'workflow_version'
+> & {
   capabilities: EmployeeWriteCapabilities
 }
+
+export type AutonomousEmployeeWriteDefinition = EmployeeWriteBase & {
+  work_mode: 'autonomous'
+}
+
+export type WorkflowEmployeeWriteDefinition = EmployeeWriteBase & {
+  work_mode: 'workflow' | 'hybrid'
+  workflow_id: string
+}
+
+export type EmployeeWriteDefinition =
+  | AutonomousEmployeeWriteDefinition
+  | WorkflowEmployeeWriteDefinition
 
 export interface Employee {
   id: string
@@ -104,8 +123,14 @@ export interface Employee {
 }
 
 export function isEmployeeConfigurationAvailable(definition: EmployeeDefinition): boolean {
-  return definition.work_mode === 'autonomous'
-    && !definition.capabilities.scheduled_tasks
+  if (definition.capabilities.scheduled_tasks) {
+    return false
+  }
+  if (definition.work_mode === 'autonomous') {
+    return true
+  }
+  // 流程/混合员工必须引用一个工作流。
+  return Boolean(definition.workflow_id)
 }
 
 function assertEmployeeConfigurationAvailable(definition: EmployeeDefinition): void {

@@ -18,11 +18,12 @@ test('用户可以创建并发布数字员工', async ({ page }) => {
     'aria-selected',
     'true',
   )
-  await expect(page.getByRole('option', { name: '固定流程（尚未开放）' })).toHaveAttribute(
+  // C11：固定流程与混合协作已开放，可选择。
+  await expect(page.getByRole('option', { name: '固定流程' })).not.toHaveAttribute(
     'aria-disabled',
     'true',
   )
-  await expect(page.getByRole('option', { name: '混合协作（尚未开放）' })).toHaveAttribute(
+  await expect(page.getByRole('option', { name: '混合协作' })).not.toHaveAttribute(
     'aria-disabled',
     'true',
   )

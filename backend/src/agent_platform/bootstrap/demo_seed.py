@@ -42,6 +42,10 @@ from agent_platform.infrastructure.database.repositories.tools import (
     ToolRecord,
     ToolVersionRecord,
 )
+from agent_platform.infrastructure.database.repositories.workflows import (
+    WorkflowRecord,
+    WorkflowVersionRecord,
+)
 from agent_platform.infrastructure.object_storage.artifacts import (
     create_artifact_storage_provider,
 )
@@ -56,6 +60,8 @@ from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.runs.events import EventType
 from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tools.entities import McpTransport, ToolRiskLevel
+from agent_platform.platform.workflows.entities import WorkflowStatus
+from agent_platform.platform.workflows.graph_spec import parse_workflow_graph
 
 DEMO_EMAIL = "demo@example.com"
 DEMO_ADMIN_EMAIL = "demo.admin@example.com"
@@ -87,6 +93,10 @@ DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitleme
 DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
 DEMO_APPROVED_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "approved-approval")
 DEMO_APPROVED_APPROVAL_INVOCATION_ID = uuid5(_DEMO_NAMESPACE, "approved-approval-invocation")
+DEMO_WORKFLOW_ID = uuid5(_DEMO_NAMESPACE, "workflow")
+DEMO_WORKFLOW_VERSION_ID = uuid5(_DEMO_NAMESPACE, "workflow-version-1")
+DEMO_WORKFLOW_EMPLOYEE_ID = uuid5(_DEMO_NAMESPACE, "workflow-employee")
+DEMO_WORKFLOW_EMPLOYEE_VERSION_ID = uuid5(_DEMO_NAMESPACE, "workflow-employee-version-1")
 DEMO_TENANT_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "tenant-memory")
 DEMO_USER_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "user-memory")
 DEMO_EMPLOYEE_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "employee-memory")
@@ -103,6 +113,37 @@ _SYSTEM_DATABASES = frozenset({"postgres", "template0", "template1"})
 _DEMO_MODEL_DISCLOSURE = (
     "Seed 本身不调用模型；用户手动发起任务会使用本机已配置网关，并可能产生上游费用。"
 )
+
+
+def _demo_workflow_graph() -> dict[str, object]:
+    """演示固定工作流：收集 → 人工审批 → 总结，展示节点与 Interrupt/人工节点。"""
+
+    graph = parse_workflow_graph(
+        {
+            "entrypoint": "collect",
+            "nodes": [
+                {
+                    "name": "collect",
+                    "type": "agent",
+                    "config": {"prompt": "整理用户请求要点：{input}"},
+                    "next": "review",
+                },
+                {
+                    "name": "review",
+                    "type": "human_approval",
+                    "config": {"title": "请审批处理结论"},
+                    "next": "summarize",
+                },
+                {
+                    "name": "summarize",
+                    "type": "agent",
+                    "config": {"prompt": "输出最终答复"},
+                    "next": None,
+                },
+            ],
+        }
+    ).to_json_dict()
+    return cast(dict[str, object], graph)
 
 
 class DemoSeedSafetyError(RuntimeError):
@@ -143,6 +184,8 @@ type DemoRecord = (
     | TaskAttachmentRecord
     | ArtifactRecord
     | MemoryRecord
+    | WorkflowRecord
+    | WorkflowVersionRecord
 )
 
 
@@ -299,6 +342,33 @@ def _demo_records(
         "approval_policy": {},
         "release_strategy": {"mode": "all"},
     }
+    workflow_graph = _demo_workflow_graph()
+    workflow_employee_definition: dict[str, object] = {
+        "name": "演示流程数字员工",
+        "avatar_url": None,
+        "role_description": f"展示固定工作流数字员工（含人工审批节点）。{_DEMO_MODEL_DISCLOSURE}",
+        "visibility": EmployeeVisibility.TENANT.value,
+        "work_mode": RuntimeType.WORKFLOW.value,
+        "system_prompt": "按已发布的固定工作流执行。",
+        "model": {"kind": "gateway_alias", "alias": "general-purpose"},
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "capabilities": {
+            "conversation": True,
+            "scheduled_tasks": False,
+            "file_upload": False,
+            "memory": False,
+        },
+        "skill_ids": [],
+        "tool_ids": [],
+        "knowledge_base_ids": [],
+        "knowledge_retrieval": {},
+        "approval_policy": {},
+        "release_strategy": {"mode": "all"},
+        # 固化引用：演示工作流 v1（回滚工作流不改动该已发布员工版本的运行语义）。
+        "workflow_id": str(DEMO_WORKFLOW_ID),
+        "workflow_version": 1,
+    }
     records: list[tuple[DemoRecord, tuple[str, ...]]] = [
         (
             UserRecord(
@@ -444,6 +514,73 @@ def _demo_records(
                 tenant_id=DEMO_TENANT_ID,
                 version=1,
                 definition=employee_definition,
+                published_by=DEMO_USER_ID,
+                published_at=_DEMO_CREATED_AT,
+            ),
+            ("employee_id", "tenant_id", "version", "definition", "published_by"),
+        ),
+        *_demo_workflow_records(workflow_graph),
+        (
+            EmployeeRecord(
+                id=DEMO_WORKFLOW_EMPLOYEE_ID,
+                tenant_id=DEMO_TENANT_ID,
+                created_by=DEMO_USER_ID,
+                name="演示流程数字员工",
+                avatar_url=None,
+                role_description=(f"展示固定工作流数字员工（含人工审批节点）。{_DEMO_MODEL_DISCLOSURE}"),
+                visibility=EmployeeVisibility.TENANT.value,
+                runtime_type=RuntimeType.WORKFLOW.value,
+                system_prompt="按已发布的固定工作流执行。",
+                model_settings={"kind": "gateway_alias", "alias": "general-purpose"},
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+                capabilities={
+                    "conversation": True,
+                    "scheduled_tasks": False,
+                    "file_upload": False,
+                    "memory": False,
+                },
+                skill_ids=[],
+                tool_ids=[],
+                knowledge_base_ids=[],
+                approval_policy={},
+                release_strategy={"mode": "all"},
+                status=EmployeeStatus.PUBLISHED.value,
+                published_version=1,
+                workflow_id=DEMO_WORKFLOW_ID,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            (
+                "tenant_id",
+                "created_by",
+                "name",
+                "avatar_url",
+                "role_description",
+                "visibility",
+                "runtime_type",
+                "system_prompt",
+                "model_settings",
+                "input_schema",
+                "output_schema",
+                "capabilities",
+                "skill_ids",
+                "tool_ids",
+                "knowledge_base_ids",
+                "approval_policy",
+                "release_strategy",
+                "status",
+                "published_version",
+                "workflow_id",
+            ),
+        ),
+        (
+            EmployeeVersionRecord(
+                id=DEMO_WORKFLOW_EMPLOYEE_VERSION_ID,
+                employee_id=DEMO_WORKFLOW_EMPLOYEE_ID,
+                tenant_id=DEMO_TENANT_ID,
+                version=1,
+                definition=workflow_employee_definition,
                 published_by=DEMO_USER_ID,
                 published_at=_DEMO_CREATED_AT,
             ),
@@ -907,6 +1044,52 @@ def _demo_approval_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
         ),
     ]
     return records
+
+
+def _demo_workflow_records(
+    workflow_graph: dict[str, object],
+) -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    """幂等的演示工作流注册表：一个已发布工作流 + 其 v1 图快照。"""
+
+    return [
+        (
+            WorkflowRecord(
+                id=DEMO_WORKFLOW_ID,
+                tenant_id=DEMO_TENANT_ID,
+                created_by=DEMO_USER_ID,
+                name="演示客服工作流",
+                description="收集 → 人工审批 → 总结的固定流程",
+                latest_version=1,
+                published_version=1,
+                status=WorkflowStatus.PUBLISHED.value,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            (
+                "tenant_id",
+                "created_by",
+                "name",
+                "description",
+                "latest_version",
+                "published_version",
+                "status",
+            ),
+        ),
+        (
+            WorkflowVersionRecord(
+                id=DEMO_WORKFLOW_VERSION_ID,
+                workflow_id=DEMO_WORKFLOW_ID,
+                tenant_id=DEMO_TENANT_ID,
+                version=1,
+                description="收集 → 人工审批 → 总结的固定流程",
+                graph=workflow_graph,
+                created_by=DEMO_USER_ID,
+                created_at=_DEMO_CREATED_AT,
+                published_at=_DEMO_CREATED_AT,
+            ),
+            ("workflow_id", "tenant_id", "version", "description", "graph", "created_by"),
+        ),
+    ]
 
 
 def _demo_file_storage_key() -> str:

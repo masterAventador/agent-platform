@@ -382,7 +382,7 @@ def test_openapi_exposes_current_employee_write_contract(
 ) -> None:
     app, _, _ = employee_api
     schema = app.openapi()
-    definition = schema["components"]["schemas"]["EmployeeDefinitionRequest"]
+    definition = schema["components"]["schemas"]["AutonomousEmployeeDefinitionRequest"]
     capabilities_ref = definition["properties"]["capabilities"]["$ref"]
     capabilities = schema["components"]["schemas"][capabilities_ref.rsplit("/", 1)[-1]]
 
@@ -390,6 +390,11 @@ def test_openapi_exposes_current_employee_write_contract(
     assert capabilities["properties"]["scheduled_tasks"]["const"] is False
     assert capabilities["properties"]["file_upload"]["type"] == "boolean"
     assert capabilities["properties"]["conversation"]["type"] == "boolean"
+
+    # 写契约现在是自主 + 流程/混合的判别联合；流程变体必须要求 workflow_id。
+    workflow_request = schema["components"]["schemas"]["WorkflowEmployeeDefinitionRequest"]
+    assert set(workflow_request["properties"]["work_mode"]["enum"]) == {"workflow", "hybrid"}
+    assert "workflow_id" in workflow_request["required"]
 
 
 @pytest.mark.asyncio

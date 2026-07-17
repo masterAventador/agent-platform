@@ -37,6 +37,7 @@ from agent_platform.api.routes.runs import router as runs_router
 from agent_platform.api.routes.skills import router as skills_router
 from agent_platform.api.routes.tools import invocation_router, mcp_router, tool_router
 from agent_platform.api.routes.workbench import router as workbench_router
+from agent_platform.api.routes.workflows import router as workflows_router
 from agent_platform.bootstrap.capabilities import resolve_installed_backend_registrations
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
@@ -367,6 +368,7 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(audit_router)
     app.include_router(employees_router)
+    app.include_router(workflows_router)
     app.include_router(conversations_router)
     app.include_router(runs_router)
     app.include_router(approvals_router)

@@ -252,6 +252,117 @@ def injected_model_resolver() -> tuple[PlatformModelResolver, GenericFakeChatMod
     )
 
 
+class FakeWorkflowSpecLoader:
+    def __init__(self, graph: dict[str, object] | None) -> None:
+        from agent_platform.platform.workflows.graph_spec import parse_workflow_graph
+
+        self._spec = parse_workflow_graph(graph) if graph is not None else None
+        self.calls: list[tuple[UUID, UUID, int]] = []
+
+    async def load(self, *, tenant_id: UUID, workflow_id: UUID, version: int):
+        self.calls.append((tenant_id, workflow_id, version))
+        return self._spec
+
+
+@pytest.mark.asyncio
+async def test_composed_resolver_runs_registered_workflow_to_completion(
+    session_factory,
+) -> None:
+    """流程员工：定义 → 加载注册图 → LangGraph 编排跑到终态（真实执行内核）。"""
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agent_platform.platform.runs.entities import RunStatus
+    from agent_platform.runtimes.base import RuntimeStartRequest
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={"topic": "报销"},
+    )
+    workflow_id = uuid4()
+    definition = autonomous_definition(
+        work_mode="workflow",
+        workflow_id=str(workflow_id),
+        workflow_version=2,
+    )
+    loader = FakeWorkflowSpecLoader(
+        {
+            "entrypoint": "answer",
+            "nodes": [
+                {"name": "answer", "type": "agent", "config": {"prompt": "答复"}, "next": None}
+            ],
+        }
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=PlatformRuntimeSelector(checkpointer=InMemorySaver()),
+        workflow_spec_loader=loader,
+        model_resolver=model_resolver,
+    )
+
+    prepared = await resolver.resolve(run, definition)
+    assert loader.calls == [(run.tenant_id, workflow_id, 2)]
+
+    state = await prepared.runtime.start(
+        RuntimeStartRequest(
+            run_id=run.id,
+            tenant_id=run.tenant_id,
+            user_id=run.created_by,
+            employee_id=run.employee_id,
+            thread_id=run.thread_id,
+            employee_definition=prepared.employee_definition,
+            input_data=run.input_data,
+        )
+    )
+    assert state.status is RunStatus.COMPLETED
+    assert state.data["output"] == "ok"
+    await prepared.close()
+
+
+@pytest.mark.asyncio
+async def test_composed_resolver_fails_closed_for_unregistered_workflow(
+    session_factory,
+) -> None:
+    from agent_platform.workers.runtime_composition import WorkflowNotRegistered
+
+    run = Run.create(
+        tenant_id=uuid4(),
+        employee_id=uuid4(),
+        employee_version=1,
+        created_by=uuid4(),
+        input_data={},
+    )
+    definition = autonomous_definition(
+        work_mode="workflow",
+        workflow_id=str(uuid4()),
+        workflow_version=1,
+    )
+    manager = RecordingSandboxManager()
+    model_resolver, _ = injected_model_resolver()
+    resolver = ComposedRuntimeResolver(
+        session_factory=session_factory,
+        skill_storage=EmptyStorage(),
+        sandbox_manager=manager,
+        gateway=UnusedGateway(),
+        runtime_selector=PlatformRuntimeSelector(),
+        workflow_spec_loader=FakeWorkflowSpecLoader(None),
+        model_resolver=model_resolver,
+    )
+
+    with pytest.raises(WorkflowNotRegistered):
+        await resolver.resolve(run, definition)
+    # 未命中注册表时在获取沙盒前失败，不应申请沙盒。
+    assert manager.scope is None
+
+
 def test_published_capabilities_parse_trusted_model_and_version_bound_ids() -> None:
     skill_id = uuid4()
     tool_id = uuid4()
@@ -1064,14 +1175,17 @@ async def test_untrusted_definition_is_rejected_before_sandbox_side_effect(
 
 
 def test_selector_routes_only_published_workflow_references() -> None:
+    from agent_platform.platform.workflows.graph_spec import parse_workflow_graph
+    from agent_platform.runtimes.langgraph import LangGraphRuntime
+    from agent_platform.workers.runtime_composition import WorkflowNotRegistered
+
     calls: list[tuple[object, ...]] = []
     selector = PlatformRuntimeSelector(
         autonomous_factory=lambda tools, environment, model: (
             calls.append(("deep-agent", environment, model)) or object()
         ),
-        workflow_factory=lambda workflow_id, version, tools, environment, model: (
-            calls.append((workflow_id, version, environment, model)) or object()
-        ),
+        # 子智能体工厂无副作用即可（本用例不跑图，只验证路由与构建类型）。
+        subagent_runner_factory=lambda **kwargs: (lambda **inner: None),
     )
     manager = RecordingSandboxManager()
     scope = SandboxScope(tenant_id=uuid4(), user_id=uuid4(), run_id=uuid4(), thread_id="thread")
@@ -1092,14 +1206,34 @@ def test_selector_routes_only_published_workflow_references() -> None:
         }
     )
     model = GenericFakeChatModel(messages=iter(["ok"]))
+    spec = parse_workflow_graph(
+        {
+            "entrypoint": "a",
+            "nodes": [{"name": "a", "type": "agent", "config": {"prompt": "hi"}, "next": None}],
+        }
+    )
 
     selector.select(capabilities=autonomous, tools=[], environment=environment, model=model)
-    selector.select(capabilities=workflow, tools=[], environment=environment, model=model)
+    workflow_runtime = selector.select(
+        capabilities=workflow,
+        tools=[],
+        environment=environment,
+        model=model,
+        workflow_spec=spec,
+    )
 
-    assert calls == [
-        ("deep-agent", environment, model),
-        (workflow_id, 3, environment, model),
-    ]
+    assert calls == [("deep-agent", environment, model)]
+    assert isinstance(workflow_runtime, LangGraphRuntime)
+
+    # 引用工作流但未命中注册表（无 spec）→ 失败关闭。
+    with pytest.raises(WorkflowNotRegistered):
+        selector.select(
+            capabilities=workflow,
+            tools=[],
+            environment=environment,
+            model=model,
+            workflow_spec=None,
+        )
 
 
 def test_default_autonomous_selector_injects_durable_checkpointer(monkeypatch) -> None:
@@ -1113,7 +1247,6 @@ def test_default_autonomous_selector_injects_durable_checkpointer(monkeypatch) -
         ),
     )
     selector = PlatformRuntimeSelector(
-        workflow_factory=lambda workflow_id, version, tools, environment, model: object(),
         checkpointer=checkpointer,
     )
     manager = RecordingSandboxManager()

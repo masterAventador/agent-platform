@@ -49,6 +49,7 @@ class EmployeeRecord(Base):
     release_strategy: Mapped[dict[str, object]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32))
     published_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workflow_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -113,6 +114,7 @@ class SqlAlchemyEmployeeRepository:
         record.release_strategy = employee.draft.release_strategy
         record.status = employee.status.value
         record.published_version = employee.published_version
+        record.workflow_id = employee.draft.workflow_id
         record.updated_at = employee.updated_at
         await self._flush_name_constraint()
 
@@ -165,6 +167,7 @@ class SqlAlchemyEmployeeRepository:
             release_strategy=employee.draft.release_strategy,
             status=employee.status.value,
             published_version=employee.published_version,
+            workflow_id=employee.draft.workflow_id,
             created_at=employee.created_at,
             updated_at=employee.updated_at,
         )
@@ -192,6 +195,7 @@ class SqlAlchemyEmployeeRepository:
                 knowledge_retrieval=record.knowledge_retrieval or {},
                 approval_policy=record.approval_policy,
                 release_strategy=record.release_strategy,
+                workflow_id=record.workflow_id,
             ),
             status=EmployeeStatus(record.status),
             published_version=record.published_version,

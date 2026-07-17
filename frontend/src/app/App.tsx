@@ -49,6 +49,11 @@ const EmployeeDetailPage = lazy(() =>
     default: module.EmployeeDetailPage,
   })),
 )
+const WorkflowsPage = lazy(() =>
+  import('../features/workflows/pages/WorkflowsPage').then((module) => ({
+    default: module.WorkflowsPage,
+  })),
+)
 const RunsPage = lazy(() =>
   import('../features/runs/pages/RunsPage').then((module) => ({ default: module.RunsPage })),
 )
@@ -268,6 +273,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
           <Space className="app-navigation" orientation="vertical" size="middle">
             <Link to="/">工作台</Link>
             <Link to="/employees">数字员工</Link>
+            {capabilities.canManageEmployees && <Link to="/workflows">工作流中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/runs">任务中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/conversations">会话中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/approvals">审批中心</Link>}
@@ -346,6 +352,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                 title="无权编辑数字员工"
               >
                 <EmployeeEditorPage />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/workflows"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.employeesManage}
+                title="无权管理工作流"
+              >
+                <WorkflowsPage canManageEmployees={capabilities.canManageEmployees} />
               </WorkspaceCapabilityGate>
             )}
           />
