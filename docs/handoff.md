@@ -24,21 +24,21 @@ ps aux | grep -E "pytest|playwright" | grep -v grep
 docker ps -a --format "{{.Names}}\t{{.Status}}"
 ```
 
-两者**零文件重叠**，都被要求**不 commit/不 push**（所以工作区有改动是正常的）。若确认代理已死且有改动，**先读完整差异再决定接管或重派**，别直接覆盖。
+各代理**零文件重叠**，都被要求**不 commit/不 push**（所以工作区有改动是正常的）。若确认代理已死且有改动，**先读完整差异再决定接管或重派**，别直接覆盖。
 
-### [T8] `wt/t8` / `task/t8-main-redlines` —— 收 main 上的三条既有红线
+⚠️ 看到随机名容器（如 `*-mvp-test-<pid>-*`、`t8-pg*`）**先查 `Status` 再动手**——曾差点把某代理刚起 3 秒的验收栈当残留清掉。
 
-红线 1、2 **已修完**（零生产改动），**红线 3 在收**：`tests/integration/runs/test_postgres_terminal_concurrency.py::test_api_terminal_control_records_non_terminal_intent[reject]`。
+### [T8] `task/t8-main-redlines` @ `322ebc1` —— 收 main 上的三条既有红线｜**实现已完、双复审在跑**
 
-三条红线的完整证据、根因、C11/C13 的 ✅ 评估 → 全在 **roadmap 第 6 节「当前已知失败」**，不在这里复述。
+三条红线全部收完，**零生产改动**（`backend/src/` 空 diff）——根因同一个：真实 PG / 真实构建门禁被跳过后，旧契约测试没随生产加固更新。完整证据与根因 → **roadmap 第 6 节**，不在这里复述。
 
-**给它的收尾指令要点**（跑完检查这些做到没）：
-- 让用例先建真实审批记录、用其 id 断言 202；
-- **补一条随机 id → 409 `approval_record_missing` 的用例，把 C13 在 `runs.py:612` 的 fail-closed 正面钉住**——那道安全校验此前唯一「碰到」它的测试，恰恰是个期望它不存在的旧断言；
-- 变异验证必做（删掉那道 fail-closed → 新用例必须转红）；
-- 该文件**单独在全新 DB 上跑**（[T9] 那个隔离缺陷会让整套跑出噪音）。
+**两个复审代理在跑**（各自独立工作树，防串扰）：
+- 规格复审 → `wt/t8`（general-purpose）
+- 质量复审 → `wt/t8-review`（`pr-review-toolkit:code-reviewer`，detached）
 
-**跑完我要做**：基于新 HEAD 派独立双复审 → 合并 → roadmap 第 6 节「当前已知失败」清零。
+给两者的共同要求：审 `git diff cc25cd3..322ebc1` **全分支**；不得采信开发代理汇报；**自己重做变异验证**（删掉 `runs.py` 的 fail-closed → 新门禁必须转红）。核心风险点是**"改测试去迎合生产"把真缺陷洗白**，以及 `.get(k, [])` 类写法造成的空断言。
+
+**跑完我要做**：两者皆 PASS → 合并 → roadmap 第 6 节「当前已知失败」按复审建议改写（**注意采集口径盲区**：历史"全量 X passed"都是没设 `TEST_DATABASE_URL` 采的，红线就藏在 skipped 里）→ 删掉 `wt/t8-review` 工作树。任一 FAIL → 退回实现，**汇总同类根因后集中修**，不许逐条打补丁。
 
 ### [T3] `wt/c12-fe` / `task/c12-frontend` —— C12 阶段二：定时任务前端 + Playwright E2E
 
