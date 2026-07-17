@@ -20,3 +20,7 @@ class EmployeeKnowledgeBaseNotBindable(Exception):
 
 class EmployeeConfigurationUnavailable(Exception):
     """数字员工配置包含当前平台尚不可运行的能力。"""
+
+
+class EmployeeWorkflowNotBindable(Exception):
+    """流程/混合数字员工只能引用当前租户已注册的工作流。"""

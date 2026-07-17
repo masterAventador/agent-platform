@@ -58,6 +58,10 @@ from agent_platform.infrastructure.database.repositories.tenants import (
     TenantRecord,
 )
 from agent_platform.infrastructure.database.repositories.tools import McpServerRecord, ToolRecord
+from agent_platform.infrastructure.database.repositories.workflows import (
+    WorkflowRecord,
+    WorkflowVersionRecord,
+)
 from agent_platform.infrastructure.security.passwords import Argon2PasswordHasher
 from agent_platform.platform.runs.entities import RunStatus
 
@@ -162,8 +166,11 @@ async def test_demo_seed_is_stable_idempotent_login_ready_and_has_no_external_da
         assert await _count(session, UserRecord) == 3
         assert await _count(session, TenantRecord) == 1
         assert await _count(session, TenantMembershipRecord) == 3
-        assert await _count(session, EmployeeRecord) == 2
-        assert await _count(session, EmployeeVersionRecord) == 1
+        # 演示研究助理、私有草稿、流程数字员工（C11）。
+        assert await _count(session, EmployeeRecord) == 3
+        assert await _count(session, EmployeeVersionRecord) == 2
+        assert await _count(session, WorkflowRecord) == 1
+        assert await _count(session, WorkflowVersionRecord) == 1
         assert await _count(session, RunRecord) == 2
         assert await _count(session, RunEventRecord) == 7
         assert await _count(session, ApprovalRecord) == 2

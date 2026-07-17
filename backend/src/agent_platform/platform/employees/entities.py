@@ -41,6 +41,7 @@ class EmployeeDraft:
     approval_policy: dict[str, object]
     release_strategy: dict[str, object]
     knowledge_retrieval: dict[str, object] = field(default_factory=dict)
+    workflow_id: UUID | None = None
 
     def normalized(self) -> "EmployeeDraft":
         return replace(
@@ -50,7 +51,12 @@ class EmployeeDraft:
             system_prompt=self.system_prompt.strip(),
         )
 
-    def snapshot(self, *, skill_versions: dict[UUID, int] | None = None) -> dict[str, object]:
+    def snapshot(
+        self,
+        *,
+        skill_versions: dict[UUID, int] | None = None,
+        workflow_version: int | None = None,
+    ) -> dict[str, object]:
         snapshot: dict[str, object] = {
             "name": self.name,
             "avatar_url": self.avatar_url,
@@ -70,6 +76,9 @@ class EmployeeDraft:
             ).model_dump(mode="json"),
             "approval_policy": self.approval_policy,
             "release_strategy": self.release_strategy,
+            "workflow_id": str(self.workflow_id) if self.workflow_id is not None else None,
+            # 员工发布时固化的工作流版本；草稿快照为 None。回滚工作流不改动已固化版本。
+            "workflow_version": workflow_version,
         }
         if skill_versions is not None:
             snapshot["skill_versions"] = [
@@ -81,13 +90,27 @@ class EmployeeDraft:
 
 def is_runnable_employee_definition(definition: Mapping[str, object]) -> bool:
     capabilities = definition.get("capabilities")
-    return (
-        definition.get("work_mode") == RuntimeType.AUTONOMOUS.value
-        and isinstance(capabilities, Mapping)
+    if not (
+        isinstance(capabilities, Mapping)
         and isinstance(capabilities.get("conversation"), bool)
         and capabilities.get("scheduled_tasks") is False
         and isinstance(capabilities.get("file_upload"), bool)
-    )
+    ):
+        return False
+    work_mode = definition.get("work_mode")
+    if work_mode == RuntimeType.AUTONOMOUS.value:
+        return True
+    if work_mode in {RuntimeType.WORKFLOW.value, RuntimeType.HYBRID.value}:
+        # 流程/混合员工必须引用已注册工作流，且已固化具体已发布版本。
+        workflow_id = definition.get("workflow_id")
+        workflow_version = definition.get("workflow_version")
+        return (
+            isinstance(workflow_id, str)
+            and bool(workflow_id)
+            and isinstance(workflow_version, int)
+            and workflow_version > 0
+        )
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +157,7 @@ class Employee:
         *,
         published_by: UUID,
         skill_versions: dict[UUID, int] | None = None,
+        workflow_version: int | None = None,
     ) -> tuple["Employee", "EmployeeVersion"]:
         version_number = (self.published_version or 0) + 1
         published_at = datetime.now(UTC)
@@ -149,7 +173,10 @@ class Employee:
                 employee_id=self.id,
                 tenant_id=self.tenant_id,
                 version=version_number,
-                definition=self.draft.snapshot(skill_versions=skill_versions),
+                definition=self.draft.snapshot(
+                    skill_versions=skill_versions,
+                    workflow_version=workflow_version,
+                ),
                 published_by=published_by,
                 published_at=published_at,
             ),

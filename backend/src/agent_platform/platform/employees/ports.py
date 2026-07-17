@@ -37,3 +37,9 @@ class EmployeeToolPolicy(Protocol):
 
 class EmployeeKnowledgeBasePolicy(Protocol):
     async def are_bindable(self, *, tenant_id: UUID, knowledge_base_ids: list[UUID]) -> bool: ...
+
+
+class EmployeeWorkflowPolicy(Protocol):
+    async def is_registered(self, *, tenant_id: UUID, workflow_id: UUID) -> bool: ...
+
+    async def published_version(self, *, tenant_id: UUID, workflow_id: UUID) -> int | None: ...

@@ -3,17 +3,17 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.repositories.audit import SqlAlchemyToolAuditSink
+from agent_platform.infrastructure.database.repositories.workflows import (
+    SqlAlchemyWorkflowSpecLoader,
+)
 from agent_platform.infrastructure.secrets import LocalFileCredentialResolver
 from agent_platform.sandbox.manager import SandboxManager
 from agent_platform.workers.runtime_adapters import (
-    RegisteredWorkflowFactory,
     RuntimeAdapterConfigurationError,
-    WorkflowNotRegistered,
     create_runtime_adapters,
 )
 
@@ -32,6 +32,7 @@ async def test_builtin_adapter_bundle_requires_no_external_module(tmp_path) -> N
     assert isinstance(adapters.sandbox_manager, SandboxManager)
     assert isinstance(adapters.credential_resolver, LocalFileCredentialResolver)
     assert isinstance(adapters.audit_sink, SqlAlchemyToolAuditSink)
+    assert isinstance(adapters.workflow_spec_loader, SqlAlchemyWorkflowSpecLoader)
     await adapters.aclose()
     await engine.dispose()
 
@@ -90,9 +91,3 @@ def test_builtin_adapter_bundle_fails_fast_without_controller_secret(tmp_path) -
         )
 
 
-def test_unregistered_workflow_fails_closed() -> None:
-    factory = RegisteredWorkflowFactory()
-    model = GenericFakeChatModel(messages=iter(["ok"]))
-
-    with pytest.raises(WorkflowNotRegistered, match="not registered"):
-        factory(uuid4(), 1, [], object(), model)

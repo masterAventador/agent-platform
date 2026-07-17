@@ -6,10 +6,12 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
+from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import JsonValue, TypeAdapter
@@ -81,6 +83,9 @@ from agent_platform.platform.skills.materializer import (
 )
 from agent_platform.platform.skills.ports import SkillStorage
 from agent_platform.platform.tool_gateway import PolicyContext
+from agent_platform.platform.workflows.graph_spec import (
+    WorkflowGraphSpec,
+)
 from agent_platform.runtimes.artifacts import ArtifactBackedRuntime
 from agent_platform.runtimes.base import ArtifactReference, EmployeeRuntime
 from agent_platform.runtimes.deep_agent import (
@@ -98,6 +103,10 @@ from agent_platform.runtimes.tool_gateway_adapter import (
     ToolExecutionBlocked,
     ToolGatewayAdapter,
     ToolGatewayInvoker,
+)
+from agent_platform.runtimes.workflow_graph import (
+    WorkflowNodeDependencies,
+    build_workflow_runtime,
 )
 from agent_platform.sandbox.entities import SandboxScope
 from agent_platform.sandbox.manager import SandboxManager
@@ -373,16 +382,58 @@ class PlatformModelResolver:
 AutonomousRuntimeFactory = Callable[
     [Sequence[BaseTool], RunExecutionEnvironment, ResolvedModel], EmployeeRuntime
 ]
-WorkflowRuntimeFactory = Callable[
-    [
-        UUID,
-        int,
-        Sequence[BaseTool],
-        RunExecutionEnvironment,
-        ResolvedModel,
-    ],
-    EmployeeRuntime,
-]
+SubagentRunnerFactory = Callable[..., Any]
+
+
+class WorkflowNotRegistered(PermanentRuntimePreparationError):
+    """发布定义引用的 workflow/version 未在注册表命中；生产环境必须失败关闭。"""
+
+    code = "workflow_not_registered"
+
+
+class WorkflowSpecLoader(Protocol):
+    """按发布固化的 (workflow_id, version) 加载并解析已注册工作流图。"""
+
+    async def load(
+        self,
+        *,
+        tenant_id: UUID,
+        workflow_id: UUID,
+        version: int,
+    ) -> WorkflowGraphSpec | None: ...
+
+
+def build_deep_agent_subagent_runner(
+    *,
+    model: ResolvedModel,
+    tools: Sequence[BaseTool],
+    backend: object,
+) -> Callable[..., Any]:
+    """混合型员工工作流节点内调用 Deep Agents 子智能体（公开 create_deep_agent 工厂）。"""
+
+    sandbox_backend = require_sandbox_backend(backend)
+
+    async def runner(*, prompt: str, input_data: dict[str, JsonValue], node_name: str) -> str:
+        del node_name
+        agent = create_deep_agent(
+            model=model,
+            tools=list(tools),
+            system_prompt=prompt,
+            backend=sandbox_backend,
+        )
+        message = (
+            json.dumps(input_data, ensure_ascii=False, sort_keys=True, default=str)
+            if input_data
+            else prompt
+        )
+        result = await agent.ainvoke({"messages": [HumanMessage(content=message)]})
+        messages = result.get("messages") if isinstance(result, Mapping) else None
+        if messages:
+            last = messages[-1]
+            return str(getattr(last, "content", last))
+        return ""
+
+    return runner
 
 
 def create_deep_agent_runtime(
@@ -419,18 +470,23 @@ def create_deep_agent_runtime(
 
 
 class PlatformRuntimeSelector:
-    """自主员工走 Deep Agents；流程员工必须命中已发布流程注册表。"""
+    """自主员工走 Deep Agents；流程/混合员工按已固化的注册工作流图用 LangGraph 编排。
+
+    工作流图由准备层（ComposedRuntimeResolver）按 (workflow_id, version) 从注册表加载
+    并传入 ``workflow_spec``；命中不到即 fail-closed，不构造任何执行体。混合型员工的
+    Deep Agents 子智能体由 ``subagent_runner_factory`` 在节点内调用（公开工厂，零侵入）。
+    """
 
     def __init__(
         self,
         *,
-        workflow_factory: WorkflowRuntimeFactory,
         autonomous_factory: AutonomousRuntimeFactory | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
+        subagent_runner_factory: SubagentRunnerFactory = build_deep_agent_subagent_runner,
     ) -> None:
         self._autonomous_factory = autonomous_factory
         self._checkpointer = checkpointer
-        self._workflow_factory = workflow_factory
+        self._subagent_runner_factory = subagent_runner_factory
 
     def select(
         self,
@@ -440,6 +496,7 @@ class PlatformRuntimeSelector:
         environment: RunExecutionEnvironment,
         model: ResolvedModel,
         approval_store: OneTimeToolApprovalStore | None = None,
+        workflow_spec: WorkflowGraphSpec | None = None,
     ) -> EmployeeRuntime:
         if capabilities.work_mode == "autonomous":
             if self._autonomous_factory is not None:
@@ -453,12 +510,22 @@ class PlatformRuntimeSelector:
             )
         if capabilities.workflow_id is None or capabilities.workflow_version is None:
             raise UntrustedRuntimeDefinition("published workflow reference is required")
-        return self._workflow_factory(
-            capabilities.workflow_id,
-            capabilities.workflow_version,
-            tools,
-            environment,
-            model,
+        if workflow_spec is None:
+            # 引用的已发布工作流版本不在注册表 → 失败关闭，不构造任何执行体。
+            raise WorkflowNotRegistered("published workflow is not registered")
+        deps = WorkflowNodeDependencies(
+            model=model,
+            tools_by_name={tool.name: tool for tool in tools},
+            subagent_runner=self._subagent_runner_factory(
+                model=model,
+                tools=tools,
+                backend=environment.backend,
+            ),
+        )
+        return build_workflow_runtime(
+            spec=workflow_spec,
+            deps=deps,
+            checkpointer=self._checkpointer,
         )
 
 
@@ -515,6 +582,7 @@ class ComposedRuntimeResolver:
         sandbox_manager: SandboxManager,
         gateway: ToolGatewayInvoker,
         runtime_selector: PlatformRuntimeSelector,
+        workflow_spec_loader: WorkflowSpecLoader | None = None,
         model_resolver: PlatformModelResolver | None = None,
         knowledge_provider_registry: KnowledgeProviderRegistry | None = None,
         sandbox_ttl: timedelta = DEFAULT_RUN_SANDBOX_TTL,
@@ -531,6 +599,7 @@ class ComposedRuntimeResolver:
         self._sandbox_manager = sandbox_manager
         self._gateway = gateway
         self._runtime_selector = runtime_selector
+        self._workflow_spec_loader = workflow_spec_loader
         self._model_resolver = model_resolver or PlatformModelResolver()
         self._knowledge_provider_registry = knowledge_provider_registry
         self._sandbox_ttl = sandbox_ttl
@@ -556,6 +625,8 @@ class ComposedRuntimeResolver:
             run=run,
             capabilities=capabilities,
         )
+        # 工作流图在获取沙盒前加载：引用未注册版本即失败关闭，避免无谓的沙盒申请。
+        workflow_spec = await self._prepare_workflow_spec(run=run, capabilities=capabilities)
         scope = SandboxScope(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -573,6 +644,7 @@ class ComposedRuntimeResolver:
             model=model,
             knowledge_context=knowledge_context,
             memory_context=memory_context,
+            workflow_spec=workflow_spec,
             scope=scope,
             environment=environment,
             delete_on_error=True,
@@ -595,6 +667,7 @@ class ComposedRuntimeResolver:
             run=run,
             capabilities=capabilities,
         )
+        workflow_spec = await self._prepare_workflow_spec(run=run, capabilities=capabilities)
         scope = SandboxScope(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -612,10 +685,34 @@ class ComposedRuntimeResolver:
             model=model,
             knowledge_context=knowledge_context,
             memory_context=memory_context,
+            workflow_spec=workflow_spec,
             scope=scope,
             environment=environment,
             delete_on_error=False,
         )
+
+    async def _prepare_workflow_spec(
+        self,
+        *,
+        run: Run,
+        capabilities: PublishedRuntimeCapabilities,
+    ) -> WorkflowGraphSpec | None:
+        """流程/混合员工按固化版本加载注册工作流图；未命中即失败关闭。"""
+
+        if capabilities.work_mode == "autonomous":
+            return None
+        if capabilities.workflow_id is None or capabilities.workflow_version is None:
+            raise UntrustedRuntimeDefinition("published workflow reference is required")
+        if self._workflow_spec_loader is None:
+            raise WorkflowNotRegistered("workflow registry is unavailable")
+        spec = await self._workflow_spec_loader.load(
+            tenant_id=run.tenant_id,
+            workflow_id=capabilities.workflow_id,
+            version=capabilities.workflow_version,
+        )
+        if spec is None:
+            raise WorkflowNotRegistered("published workflow is not registered")
+        return spec
 
     async def _prepare_knowledge_context(
         self,
@@ -755,6 +852,7 @@ class ComposedRuntimeResolver:
         model: ResolvedModel,
         knowledge_context: RuntimeKnowledgeContext | None,
         memory_context: MemoryRuntimeContext | None,
+        workflow_spec: WorkflowGraphSpec | None,
         scope: SandboxScope,
         environment: RunExecutionEnvironment,
         delete_on_error: bool,
@@ -912,6 +1010,7 @@ class ComposedRuntimeResolver:
                 environment=environment,
                 model=model,
                 approval_store=approval_store,
+                workflow_spec=workflow_spec,
             )
             if self._artifact_storage is not None:
 
