@@ -4,15 +4,23 @@
 > `docs/core-capability-roadmap.md`（Core）和 `docs/industry-capability-roadmap.md`（行业能力包）为准。
 > 每次里程碑推进后更新本文件的"检查点"与"下一步"两节即可；与路线图冲突时以路线图为准。
 
-## 当前检查点（2026-07-17，C12/C16 开工）
+## 当前检查点（2026-07-17，C12/C16 阶段一已合入）
 
-- **Git**：`main` = `f5fb483`，已推送 origin。当前有两个进行中的 worktree/分支：
-  - `wt/c12` = `task/c12-scheduled-tasks`（C12 后端调度主链，迁移占号 `20260716_0035`）
-  - `wt/c16` = `task/c16-model-governance`（C16 阶段一，迁移占号 `20260716_0036`）
-  - 两者 `down_revision` 均为 `20260716_0034`；**先合入者保留编号、后合入者重链到当时单头**（由主代理合并时处理）。
-- **迁移**：main 单头 `20260716_0034`（链：…0029 记忆 → 0030 审批 → 0031 video → 0032 crc64 → 0033 workflow → 0034 account）。
-- **常驻开发栈** `agent-platform-dev`：12 服务健康，Demo Seed 已重放。固定测试账号 `demo@example.com` / `agent-platform-demo`。发布端口：API 18000、前端 18080、Postgres 15432、MinIO 19000。
+- **Git**：`main` = `b0589ae`，C12 与 C16 的**阶段一均已 `--no-ff` 合入**。两个分支/worktree 仍在（`wt/c12`、`wt/c16`），供各自后续阶段继续用。
+- **迁移**：main 单头 `20260716_0037`。链：…0034 account → **0035 定时任务(C12)** → **0036 网关 Key(C16)** → **0037 provisioned(C16)**。C12 先合入保留 0035；C16 的 0036 由主代理合并时从 0034 **重链至 0035**，`test_migrations.py` 的降级目标同步改为 0035。
+- **常驻开发栈** `agent-platform-dev`：**13 服务**健康（新增 `model-gateway-controller`），Demo Seed 已重放。固定测试账号 `demo@example.com` / `agent-platform-demo`。发布端口：API 18000、前端 18080、Postgres 15432、MinIO 19000。
 - **无遗留**：无隔离验收栈、孤儿测试进程、悬空镜像。
+
+### 合并后真实链路冒烟（2026-07-17，主代理在常驻栈实测）
+
+- **C16 的 S1 解除条件实证**（DB 直查）：`policy status=active` / `key v1 provisioned=1` / `command completed attempts=1`——**这三样 Demo Seed 都不写**（Seed 只写 `pending` 策略 + 入队 reconcile 命令、不写 Key 行），只可能由真实 Controller 对账 LiteLLM 后产生。修复前该链路不可能成立。
+- **C12**：`GET /api/v1/scheduled-tasks` 返回 2 条，Cron 任务 `enabled=true` / `next_run_at=2026-07-20T01:00:00Z`（与 `0 9 * * 1-5` + Asia/Shanghai 自洽，非早期那个硬编码的 2027 假值）；单次预约以暂停态表达。
+- **Demo 员工真实任务闭环**：发起 → `run.started → run.progress → approval.required` → 停在 `waiting_for_approval`（**无网关失败事件 = 租户派生 Key 在 LiteLLM 侧真实可用**）→ 经审批中心批准 → `completed`。
+- **C16 策略 API 无 Key 明文泄漏**（响应断言通过）。
+
+### Docker 磁盘清理（2026-07-17，用户授权）
+
+删除 hugai app 全部 27 个历史 tag（约 10GB，registry 可重拉）+ 孤儿实验镜像（华为云源 ragflow v0.26.1 与 text-embeddings-inference，约 10GB）+ 构建缓存 3.7GB。镜像 52.43GB → 38.84GB。**保留**：hug-ai 的 `infiniflow/ragflow:v0.26.1`（`ragflow-local-threshold-*` 5 容器在用，记忆明令不得删）与 agent-platform 钉的 `ragflow:v0.25.6`（`infra/ragflow/VERSION`）。已配 `~/.docker/daemon.json` 的 `builder.gc`（构建缓存超 10GB 自动回收、7 天未用降到 2GB），**需重启 Docker Desktop 生效**。**镜像层面 Docker 无原生 TTL**，且无差别定时清理会反复删掉 agent-platform 钉的 12.6GB（本项目验收栈用完即销毁，该镜像永远处于「无容器引用」态），故未装镜像定时清理。
 
 ### C16 关键发现（2026-07-17 主代理核查，写入 roadmap C16 条目）
 
@@ -22,12 +30,18 @@ C16 **不是零起点**。提交 `9074a67`（2026-07-14，早于 C16 开工）�
 
 真零起点。`api/routes/employees.py` 的 `scheduled_tasks: Literal[False] = False` 与 `platform/employees/entities.py` 的对应校验强制关闭该能力，C12 要让它真实可用。
 
-## Core 进度：14/20 ✅（C12、C16 🚧 进行中）
+## Core 进度：14/20 ✅（C12、C16 🚧 进行中，阶段一均已合入）
 
 - **已完成**：C01-C08、C10、C11、C13、C14、C15、**C17**。
-- **🚧 进行中**（2026-07-17 开工，两个并行槽位已占满）：
-  - **C12** 定时任务 —— 分支 `task/c12-scheduled-tasks`。按阶段推进：①后端调度主链（进行中）②前端页面 + Playwright E2E。
-  - **C16** 模型治理/配额 —— 分支 `task/c16-model-governance`。按阶段推进：①Controller 对账 LiteLLM + 租户可归因/可撤销凭据（进行中）②用量/成本 + 预算/配额/限流/告警（配额校验届时接入 C12 调度入口）③固定数据集回归评测/人工反馈/版本对比 ④前端页面 + C14 审计 + E2E。
+- **🚧 进行中**（2026-07-17 开工，两个并行槽位已占满；**阶段一均已合入 main 并通过双复审，条目本身不标 ✅**）：
+  - **C12** 定时任务 —— 分支 `task/c12-scheduled-tasks`。**①后端调度主链 ✅ 已合入**（四轮返工 + 双复审 PASS）｜②前端页面 + Playwright E2E（待开工）。另：C16 阶段三的配额接入也是 C12 的完成前置。
+  - **C16** 模型治理/配额 —— 分支 `task/c16-model-governance`。**①Controller 对账 + 租户可归因/可撤销凭据 ✅ 已合入**（两轮返工 + 双复审 PASS）｜②用量/成本记录（纯观测面）｜③预算/配额/限流/告警 + fallback + C12 配额门禁接入（控制面）｜④评测｜⑤前端 + C14 审计 + 第 8 条验收。
+
+### ⚠️ main 上有 2 条既有红线 + 1 个方法论盲区（见 [T8]，roadmap 第 6 节有完整记录）
+
+1. `infra/litellm/test_config.py::test_local_stub_override_is_test_only_and_not_published` —— 测试笔误（拿 openai-stub 比 LiteLLM 镜像常量），疑似自创建起未通过。
+2. **`tests/integration/checkpoints/test_postgres_checkpointer.py::test_postgres_runtime_closes_rebuilds_approves_and_reads_final_checkpoint`** —— **生产代码回归**（`RuntimeControlMismatch` @ `langgraph.py:481`），落在 C11/C13 交界、**两者都标着 ✅**。主代理已在常驻栈实测把范围收窄：**普通「审批→继续」活路径是通的**（实测 Demo 员工经审批中心批准后 Run 正常 `completed`），问题只在该用例特有的 **closes → rebuilds → approves**（运行时重建后再审批的 checkpoint 恢复路径）。
+3. **方法论盲区（最重要）**：台账历来的「后端全量 X passed / Y skipped」**全部在未设 `TEST_DATABASE_URL` 下采集**，真实 PG 门禁用例统统落进 skip 桶——红线 2 就藏在那几十个 skipped 里。今后写「全量」必须注明采集条件，条目终验至少跑一次带真实 PG 的全量。
 - **🧪 待集成**（已在 main，仅剩集成尾巴）：
   - **C09** Tool/MCP 生命周期 —— stdio 传输 E2E 缺口；生产凭据待 C18。
 - **⬜ 未开始**：**C18** 生产凭据与沙箱（**依赖已解开**：前置 C14+C17 均已完成）、**C19** 协议契约自动化（**依赖已解开**：前置 C17 已完成）、**C20** 发布与容灾收口（须等 C01-C19 全绿）。

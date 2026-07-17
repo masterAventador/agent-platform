@@ -763,6 +763,8 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 **该路径属 C11（工作流/混合员工，LangGraph 编排内核）与 C13（审批中心）的交界，两者均已标 `✅ 已完成`。** 收口时必须先查明：是 `30e64ac` 的安全边界加固引入的回归，还是 C11/C13 合入时该用例本就未在真实 PG 下跑过（参照 C14 记录过的「前端 `audit.test.ts` 断言笔误、该用例自创建起未通过」先例）。**若确认为回归，C11 和/或 C13 的 `✅` 标记必须重新审视**——完成定义里的「人工审批、拒绝、继续和取消」若在真实 PG 的 checkpoint 恢复路径上不成立，那个 ✅ 就不成立。
 
+**范围收窄（2026-07-17 主代理在常驻开发栈上实测定位）**：**普通的「审批 → 继续」活路径是通的**——在 `agent-platform-dev` 上以真实用户路径发起 Demo 员工任务，Run 走到 `waiting_for_approval`（事件序列 `run.started → run.progress → approval.required`），经 `POST /api/v1/approvals/{id}/approve`（C13 审批中心 → 驱动 C11 运行时）批准后 Run 正常推进到 `completed`。因此该红线**不是「审批全线不可用」**，问题范围收窄到该用例特有的 **closes → rebuilds → approves** 序列，即**运行时关闭重建后再审批的 checkpoint 恢复路径**。这个定位缩小了排查面：优先看 `langgraph.py` 的 `_required_pending`/`_require_approval` 在运行时从 checkpoint 重建后，待处理中断的 kind/approval_id 是否被正确恢复。
+
 ## 7. 完成记录
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 提交 | 验证证据 |
