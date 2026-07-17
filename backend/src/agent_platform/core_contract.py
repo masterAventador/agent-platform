@@ -5,6 +5,7 @@ from agent_platform.platform.tenants.permissions import TenantPermission
 
 CORE_API_ROUTE_ROOTS = frozenset(
     {
+        "approvals",
         "artifacts",
         "audit",
         "auth",

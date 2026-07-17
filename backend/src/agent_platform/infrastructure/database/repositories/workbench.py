@@ -1,11 +1,13 @@
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.employees import EmployeeRecord
 from agent_platform.infrastructure.database.repositories.runs import RunRecord
+from agent_platform.platform.approvals.entities import ApprovalStatus
 from agent_platform.platform.employees.entities import EmployeeStatus, EmployeeVisibility
 from agent_platform.platform.runs.entities import RunStatus
 from agent_platform.platform.workbench.models import EmployeeCounts, RunCounts, WorkbenchSummary
@@ -28,6 +30,7 @@ class SqlAlchemyWorkbenchSummaryReader:
         tenant_id: UUID,
         include_draft_and_private_employees: bool,
         run_created_by: UUID | None,
+        approvals_visible_to: UUID | None,
     ) -> WorkbenchSummary:
         employee_query = select(
             func.count(EmployeeRecord.id),
@@ -55,6 +58,21 @@ class SqlAlchemyWorkbenchSummaryReader:
         run_row = (await self._session.execute(run_query)).one()
         status_counts = _map_run_status_counts(run_row[1:])
 
+        approval_query = select(func.count(ApprovalRecord.id)).where(
+            ApprovalRecord.tenant_id == tenant_id,
+            ApprovalRecord.status == ApprovalStatus.PENDING.value,
+        )
+        if approvals_visible_to is not None:
+            approval_query = approval_query.where(
+                or_(
+                    ApprovalRecord.assignee_id == approvals_visible_to,
+                    ApprovalRecord.requested_by == approvals_visible_to,
+                )
+            )
+        pending_approvals = int(
+            (await self._session.execute(approval_query)).scalar_one() or 0
+        )
+
         return WorkbenchSummary(
             employees=EmployeeCounts(
                 total=int(employee_row[0] or 0),
@@ -71,4 +89,5 @@ class SqlAlchemyWorkbenchSummaryReader:
                 failed=status_counts[RunStatus.FAILED],
                 cancelled=status_counts[RunStatus.CANCELLED],
             ),
+            pending_approvals=pending_approvals,
         )

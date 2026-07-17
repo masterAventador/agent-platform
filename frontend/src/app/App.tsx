@@ -97,6 +97,11 @@ const ToolsPage = lazy(() =>
     default: module.ToolsPage,
   })),
 )
+const ApprovalCenterPage = lazy(() =>
+  import('../features/approvals/pages/ApprovalCenterPage').then((module) => ({
+    default: module.ApprovalCenterPage,
+  })),
+)
 const DeadLettersPage = lazy(() =>
   import('../features/operations/pages/DeadLettersPage').then((module) => ({
     default: module.DeadLettersPage,
@@ -265,6 +270,7 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             <Link to="/employees">数字员工</Link>
             {capabilities.canExecuteRuns && <Link to="/runs">任务中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/conversations">会话中心</Link>}
+            {capabilities.canExecuteRuns && <Link to="/approvals">审批中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/memories">记忆中心</Link>}
             <Link to="/knowledge-bases">知识库</Link>
             <Link to="/skills">Skill 中心</Link>
@@ -406,6 +412,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                   currentUserId={user.id}
                   canManageRuns={capabilities.canManageRuns}
                 />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/approvals"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.runsExecute}
+                title="无权访问审批中心"
+              >
+                <ApprovalCenterPage currentUserId={user.id} />
               </WorkspaceCapabilityGate>
             )}
           />

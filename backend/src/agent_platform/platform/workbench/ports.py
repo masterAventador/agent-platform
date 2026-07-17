@@ -11,4 +11,5 @@ class WorkbenchSummaryReader(Protocol):
         tenant_id: UUID,
         include_draft_and_private_employees: bool,
         run_created_by: UUID | None,
+        approvals_visible_to: UUID | None,
     ) -> WorkbenchSummary: ...

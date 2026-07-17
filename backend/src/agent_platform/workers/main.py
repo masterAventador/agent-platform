@@ -52,6 +52,7 @@ from agent_platform.infrastructure.queue.redis_streams import RedisRunQueue
 from agent_platform.knowledge.ragflow import RagFlowClient
 from agent_platform.observability.metrics import OperationalComponent, OperationalMetrics
 from agent_platform.observability.telemetry import configure_telemetry
+from agent_platform.platform.audit.hashing import configure_audit_hashing
 from agent_platform.platform.knowledge.registry import KnowledgeProviderRegistry
 from agent_platform.platform.tool_gateway import (
     InMemoryToolCircuitBreaker,
@@ -233,6 +234,9 @@ async def run_worker_service(
 
     initialize_database_metadata()
     app_settings = settings or AppSettings()
+    # 与 API create_app 同源装配审计 HMAC 密钥：worker 投递路径会写审计事件
+    # （审批决策落审计），未装配时审计写入 fail-closed，投递会失败。
+    configure_audit_hashing(app_settings.audit_hmac_key.get_secret_value())
     telemetry = configure_telemetry(app_settings)
     telemetry.instrument_libraries()
     if runtime_resolver is None and model_resolver is None:
@@ -284,6 +288,7 @@ async def run_worker_service(
             runtime_lease_duration=timedelta(seconds=app_settings.runtime_lease_seconds),
             cancellation_poll_initial_seconds=(app_settings.runtime_cancel_poll_initial_seconds),
             cancellation_poll_max_seconds=app_settings.runtime_cancel_poll_max_seconds,
+            approval_pending_timeout_seconds=app_settings.approval_pending_timeout_seconds,
         )
         recovered = await wait_for_runtime_recovery(
             worker=worker,

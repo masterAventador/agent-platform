@@ -43,6 +43,7 @@ class WorkbenchSummaryResponse(BaseModel):
 
     employees: EmployeeCountsResponse
     runs: RunCountsResponse
+    pending_approvals: NonNegativeInt
 
     @classmethod
     def from_summary(cls, summary: WorkbenchSummary) -> "WorkbenchSummaryResponse":
@@ -62,6 +63,7 @@ class WorkbenchSummaryResponse(BaseModel):
                 failed=summary.runs.failed,
                 cancelled=summary.runs.cancelled,
             ),
+            pending_approvals=summary.pending_approvals,
         )
 
 

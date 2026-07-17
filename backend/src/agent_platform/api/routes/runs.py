@@ -11,6 +11,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_platform.api.dependencies.authentication import resolve_workspace
+from agent_platform.api.routes.approvals import _map_service_error as _map_approval_error
+from agent_platform.infrastructure.database.repositories.approvals import (
+    create_approval_service,
+)
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyFileRepository,
     SqlAlchemyTaskAttachmentRepository,
@@ -24,6 +28,17 @@ from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
     SqlAlchemyRunEventRepository,
     SqlAlchemyRunRepository,
+)
+from agent_platform.platform.approvals.errors import (
+    ApprovalConcurrencyConflict,
+    ApprovalExpired,
+    ApprovalNotPending,
+    ApprovalPermissionDenied,
+    ApprovalReasonRequired,
+    ApprovalRunNotActionable,
+)
+from agent_platform.platform.approvals.service import (
+    DecisionAction as ApprovalDecisionAction,
 )
 from agent_platform.platform.artifacts.entities import TaskAttachment
 from agent_platform.platform.dynamic_io import (
@@ -40,6 +55,7 @@ from agent_platform.platform.employees.entities import (
 from agent_platform.platform.runs.commands import RunCommand, RunCommandAction
 from agent_platform.platform.runs.entities import Run, RunStatus
 from agent_platform.platform.runs.events import EventType, PlatformEvent
+from agent_platform.platform.tenants.memberships import TenantRole
 from agent_platform.platform.tenants.permissions import TenantPermission, role_has_permission
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
@@ -581,6 +597,42 @@ async def control_run(
 
         updated = _apply_control_request(run, payload)
 
+        if payload.action in {"approve", "reject"} and payload.approval_id is not None:
+            # C13：run 控制入口与审批中心共用同一审批协议，先结算审批记录，
+            # 由 ApprovalService 统一创建 run 命令/事件/审计，不留旁路通道。
+            settled = await _settle_approval_record(
+                database_session=database_session,
+                run=run,
+                payload=payload,
+                actor_id=user.id,
+                actor_role=access.role,
+            )
+            if settled:
+                await emit_audit_event(
+                    database_session,
+                    tenant_id=run.tenant_id,
+                    actor_user_id=user.id,
+                    action="run.control_requested",
+                    resource_type="run",
+                    resource_id=run.id,
+                    metadata={
+                        "requested_action": payload.action,
+                        "reason_present": payload.reason is not None,
+                    },
+                )
+                await database_session.commit()
+                return RunResponse.from_entity(updated)
+            # 安全 fail-closed：run 已在 WAITING_FOR_APPROVAL（_apply_control_request 已校验）
+            # 却查无对应审批记录，属旁路窗口，必须拒绝，绝不静默回退老通道直发 raw 命令。
+            await database_session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "approval_record_missing",
+                    "message": "该任务处于等待审批但缺少审批记录，请通过审批中心处理",
+                },
+            )
+
         command_payload: dict[str, JsonValue] = {"requested_by": str(user.id)}
         if payload.approval_id is not None:
             command_payload["approval_id"] = str(payload.approval_id)
@@ -633,6 +685,45 @@ async def control_run(
         )
         await database_session.commit()
     return RunResponse.from_entity(updated)
+
+
+async def _settle_approval_record(
+    *,
+    database_session: AsyncSession,
+    run: Run,
+    payload: ControlRunRequest,
+    actor_id: UUID,
+    actor_role: TenantRole,
+) -> bool:
+    """结算 run + invocation 对应的审批记录；返回是否存在并已处理。
+
+    没有审批记录（历史数据/测试直造）时返回 False，调用方走原有流程。
+    """
+
+    assert payload.approval_id is not None
+    try:
+        settled = await create_approval_service(database_session).decide_by_invocation(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            invocation_id=payload.approval_id,
+            action=cast(ApprovalDecisionAction, payload.action),
+            actor_id=actor_id,
+            actor_role=actor_role,
+            reason=payload.reason,
+        )
+    except ApprovalExpired as error:
+        await database_session.commit()  # 惰性过期结算需要落库
+        raise _map_approval_error(error) from error
+    except (
+        ApprovalNotPending,
+        ApprovalConcurrencyConflict,
+        ApprovalPermissionDenied,
+        ApprovalReasonRequired,
+        ApprovalRunNotActionable,
+    ) as error:
+        await database_session.rollback()
+        raise _map_approval_error(error) from error
+    return settled is not None
 
 
 def _apply_control_request(run: Run, payload: ControlRunRequest) -> Run:

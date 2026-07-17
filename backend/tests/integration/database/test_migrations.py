@@ -651,8 +651,66 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 
 def test_migration_head_is_current_forward_only_revision() -> None:
+    # C13 迁移 20260716_0030；合入时已重链 down_revision 至 0029（C10 记忆迁移），保持单头。
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0029"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0030"
+
+
+def test_approval_migration_creates_and_removes_table(tmp_path: Path) -> None:
+    database_path = tmp_path / "approvals-migration.db"
+    config = Config(BACKEND_ROOT / "alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{database_path}")
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(approvals)").fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = 'approvals'"
+            ).fetchall()
+        }
+    assert {
+        "id",
+        "tenant_id",
+        "source",
+        "approval_type",
+        "risk_level",
+        "requested_by",
+        "request_key",
+        "context",
+        "required_role",
+        "status",
+        "revision",
+        "created_at",
+        "updated_at",
+        "run_id",
+        "invocation_id",
+        "employee_id",
+        "assignee_id",
+        "expires_at",
+        "decided_by",
+        "decision_reason",
+        "decided_at",
+        "decision_key",
+        "transferred_from_id",
+        "transferred_to_id",
+    } == columns
+    assert "uq_approvals_tenant_request_key" in indexes
+    assert "ix_approvals_status_expires_at" in indexes
+
+    command.downgrade(config, "20260716_0028")
+
+    with sqlite3.connect(database_path) as connection:
+        remaining = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approvals'"
+        ).fetchall()
+    assert remaining == []
 
 
 def test_memory_migration_creates_namespaced_table_with_dedupe_constraint(

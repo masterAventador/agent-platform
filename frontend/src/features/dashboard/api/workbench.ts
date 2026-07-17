@@ -21,6 +21,7 @@ const workbenchSummarySchema = z.strictObject({
     failed: countSchema,
     cancelled: countSchema,
   }),
+  pending_approvals: countSchema,
 })
 
 export type WorkbenchSummary = z.infer<typeof workbenchSummarySchema>

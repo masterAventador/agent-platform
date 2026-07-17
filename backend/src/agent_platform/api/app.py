@@ -21,6 +21,7 @@ from agent_platform.api.dependencies.capabilities import (
 from agent_platform.api.middleware.request_body_limit import (
     FileUploadRequestBodyLimitMiddleware,
 )
+from agent_platform.api.routes.approvals import router as approvals_router
 from agent_platform.api.routes.artifacts import router as artifacts_router
 from agent_platform.api.routes.audit import router as audit_router
 from agent_platform.api.routes.auth import router as auth_router
@@ -40,6 +41,9 @@ from agent_platform.bootstrap.capabilities import resolve_installed_backend_regi
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
 from agent_platform.infrastructure.database.engine import create_database_engine
+from agent_platform.infrastructure.database.repositories.approvals import (
+    expire_overdue_approvals,
+)
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyArtifactRepository,
     SqlAlchemyArtifactStorageOperationRepository,
@@ -224,6 +228,31 @@ def create_app(
                 logger.exception("artifact_storage_reconciliation_failed")
             await asyncio.sleep(5)
 
+    async def sweep_approval_expiry() -> None:
+        await _wait_for_database_ready(configured_session_factory)
+        while True:
+            try:
+                result = await expire_overdue_approvals(
+                    configured_session_factory,
+                    now=datetime.now(UTC),
+                    limit=app_settings.approval_expiry_sweep_batch_limit,
+                )
+                if result.expired:
+                    logger.info(
+                        "approval_expiry_sweep_expired",
+                        extra={"expired": result.expired},
+                    )
+                if result.failed:
+                    logger.warning(
+                        "approval_expiry_sweep_partial_failure",
+                        extra={"failed": result.failed},
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("approval_expiry_sweep_failed")
+            await asyncio.sleep(app_settings.approval_expiry_sweep_interval_seconds)
+
     async def sweep_audit_retention() -> None:
         await _wait_for_database_ready(configured_session_factory)
         while True:
@@ -254,11 +283,15 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         reconciliation_task = asyncio.create_task(reconcile_artifact_storage())
         audit_retention_task = asyncio.create_task(sweep_audit_retention())
+        approval_expiry_task = asyncio.create_task(sweep_approval_expiry())
         try:
             yield
         finally:
+            approval_expiry_task.cancel()
             audit_retention_task.cancel()
             reconciliation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await approval_expiry_task
             with suppress(asyncio.CancelledError):
                 await audit_retention_task
             with suppress(asyncio.CancelledError):
@@ -336,6 +369,7 @@ def create_app(
     app.include_router(employees_router)
     app.include_router(conversations_router)
     app.include_router(runs_router)
+    app.include_router(approvals_router)
     app.include_router(artifacts_router)
     app.include_router(dead_letters_router)
     app.include_router(knowledge_router)
