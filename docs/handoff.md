@@ -38,7 +38,17 @@ docker ps -a --format "{{.Names}}\t{{.Status}}"
 
 给两者的共同要求：审 `git diff cc25cd3..322ebc1` **全分支**；不得采信开发代理汇报；**自己重做变异验证**（删掉 `runs.py` 的 fail-closed → 新门禁必须转红）。核心风险点是**"改测试去迎合生产"把真缺陷洗白**，以及 `.get(k, [])` 类写法造成的空断言。
 
-**跑完我要做**：两者皆 PASS → 合并 → roadmap 第 6 节「当前已知失败」按复审建议改写（**注意采集口径盲区**：历史"全量 X passed"都是没设 `TEST_DATABASE_URL` 采的，红线就藏在 skipped 里）→ 删掉 `wt/t8-review` 工作树。任一 FAIL → 退回实现，**汇总同类根因后集中修**，不许逐条打补丁。
+**规格复审已 PASS**（2026-07-17）：三条红线经二分实测**独立证实均为真回归**（`ee2b624`/`30e64ac`/`b319bc2` 三次有意加固均漏改对应测试）；被删旧断言逐条有严格不弱的替代；两次变异自行重做通过。等质量复审。
+
+**合并后写第 6 节，照这个来（复审的强制建议，别再写错）**：
+- ❌ **绝不能写「当前已知失败：0/无」**——真实 PG 全量仍有 **5 failed + 13 errors**，全部归属 [T9] 夹具缺陷。第 6 节自己刚痛斥过「长期声明『无』与红线共存属台账失真」，清零 = 同一个错误犯第二次。
+- ✅ 诚实写法：`3 条红线已收口；余 5 failed / 13 errors 全部归属 [T9] 夹具隔离缺陷（非产品缺陷，根因：users 清理未覆盖 tenant_model_gateway_policies）`。
+- ✅ **必须注明采集条件**：`TEST_DATABASE_URL=真实 PG → 1850 passed / 22 skipped / 5 failed / 13 errors`。
+- ⚠️ 「全量」措辞要收紧：22 skipped 全是外部依赖门禁（Redis 3 / COS 5 / MinIO 2 / Docker sandbox 1…），**无一条与 PG 相关**（即 PG 门禁本轮确已全跑），但 1850 仍不含 Redis/COS/MinIO——别让它变成下一个盲区。
+
+**其余待办**（合并后单开 docs-only 提交，不夹带）：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** stale docstring（都写「调用方走原有流程」，但调用方现在是 409 fail-closed；复审三重论证确认**无 fail-open 旁路**，仅注释腐烂）。
+
+**跑完我要做**：质量复审 PASS → 合并（**同一提交带 roadmap 状态改动**）→ 删掉 `wt/t8-review` 工作树。任一 FAIL → 退回实现，**汇总同类根因后集中修**，不许逐条打补丁。
 
 ### [T3] `wt/c12-fe` / `task/c12-frontend` —— C12 阶段二：定时任务前端 + Playwright E2E
 
