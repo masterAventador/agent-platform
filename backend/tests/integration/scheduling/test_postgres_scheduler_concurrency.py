@@ -448,7 +448,6 @@ async def test_the_scheduler_loop_and_audit_sweep_coexist_on_real_postgres(
     assert await count(session_factory, RunRecord) >= 1
 
 
-@pytest.mark.asyncio
 async def _prepare_phase(
     session_factory: async_sessionmaker, phase: str
 ) -> None:

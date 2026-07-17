@@ -64,9 +64,15 @@ logger = logging.getLogger(__name__)
 # 只有「无人终结」的状态才需要调度侧超时兜底。其余非终态各自另有终结者，
 # 再加一层超时会误杀健康长跑 Run，且它真正完成时已不在 `list_dispatched` 集合里、
 # 永远不会被回填，用户历史里会留下与事实相反的失败记录：
-# - running            -> Worker `recover_incomplete_runs` 判孤儿失败；
-# - queued             -> 命令进死信后由死信结算驱动 run 失败；
-# - waiting_for_approval -> C13 审批超时驱动 reject。
+# - running              -> Worker `recover_incomplete_runs` 判孤儿失败；
+# - queued               -> 命令重投失败后进死信，死信结算驱动 run FAILED。
+#                           **该论证条件于队列消息未丢失**：若 Redis 整体丢数据
+#                           （无持久化重启），命令已离开 pending()、DLQ 也无记录，
+#                           run 会永久停在 queued。那是基础设施级故障，修复归属
+#                           队列层（QUEUED 对账器）而非调度器，不在 C12 范围内；
+#                           见 roadmap C12「已知局限」。
+# - waiting_for_approval -> C13 审批超时清扫（`sweep_approval_expiry`，已在
+#                           `api/app.py` 的 lifespan 生产装配）驱动 reject。
 _UNTERMINATED_RUN_STATUSES = frozenset({RunStatus.WAITING_FOR_INPUT})
 
 _TERMINAL_RUN_SETTLEMENTS = {
@@ -155,12 +161,19 @@ async def _settle_one(
 ) -> bool:
     tasks, executions = _repositories(session)
     if execution.run_id is None:
+        # DISPATCHED 的执行必然带 run_id（`dispatched()` 保证），当前不可达，防御性分支。
+        # 前向门禁：runs 的 FK 是 ondelete=SET NULL，将来一旦引入 Run 删除/保留清理，
+        # 被删 Run 的执行会落到这里并永久停在 DISPATCHED（超时也兜不住），G1 的永久
+        # 静默停摆会原样复发。届时必须一并处理（未必是加超时——级联删执行记录、或
+        # 删 Run 时就地结算执行，可能是更好的答案）。见 roadmap C20 门禁来源说明。
         return False
     run = await SqlAlchemyRunRepository(session).get(
         tenant_id=execution.tenant_id, run_id=execution.run_id
     )
     if run is None:
-        # run 引用已丢失（FK ondelete=SET NULL / 记录已删）：没有任何东西会再让它终态。
+        # run 行已消失而 run_id 仍非空：没有任何东西会再让它终态。当前全仓没有删除
+        # Run 的代码路径，且 FK 的 SET NULL 恰恰阻止这种形态（它产生的是 run_id IS
+        # NULL，命中上面那个更早的分支），因此这也是防御性分支、当前不可达。
         return await _settle_if_timed_out(
             session,
             execution=execution,
