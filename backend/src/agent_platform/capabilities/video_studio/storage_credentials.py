@@ -32,10 +32,18 @@ class IssuedUploadCredentials:
 
 @dataclass(frozen=True, slots=True)
 class StoredMaterialObject:
-    """Trusted object metadata returned by the configured storage provider."""
+    """Trusted object metadata returned by the configured storage provider.
+
+    ``crc64ecma`` is the server-computed ``x-cos-hash-crc64ecma`` value and is
+    the trusted content fingerprint. ``sha256`` is the client-written
+    ``x-cos-meta-sha256`` metadata: it can be forged by a malicious client and
+    must NOT be used as a security gate; it is retained only for display and
+    accidental-corruption diagnostics.
+    """
 
     size_bytes: int
     sha256: str
+    crc64ecma: str = ""
 
 
 @dataclass(frozen=True, slots=True)

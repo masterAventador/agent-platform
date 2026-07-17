@@ -73,7 +73,11 @@ class PlaywrightObjectVerifier:
                     )
                 )
             ).scalar_one()
-        return StoredMaterialObject(size_bytes=record.size_bytes, sha256=record.sha256)
+        return StoredMaterialObject(
+            size_bytes=record.size_bytes,
+            sha256=record.sha256,
+            crc64ecma=record.crc64ecma or "",
+        )
 
 
 class PlaywrightPreviewIssuer:

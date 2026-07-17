@@ -177,6 +177,7 @@ async def test_execute_permission_scopes_download_task_actions(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "a" * 64,
+            "crc64ecma": "700",
         },
     )
     assert denied.status_code == 403

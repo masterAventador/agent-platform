@@ -20,7 +20,7 @@ import {
   type MaterialPreview,
   type VideoMaterial,
 } from '../api/media-library'
-import { sha256File, uploadMaterialFile } from '../direct-upload'
+import { crc64ecmaFile, sha256File, uploadMaterialFile } from '../direct-upload'
 
 const kindLabels: Record<MaterialKind, string> = {
   video: '视频',
@@ -99,13 +99,17 @@ export function MediaLibraryPage({ workspaceId }: MediaLibraryPageProps) {
     if (selectedFile === undefined) throw new Error('missing material file')
     setDraft(undefined)
     setUploadProgress(0)
-    const sha256 = await sha256File(selectedFile)
+    const [sha256, crc64ecma] = await Promise.all([
+      sha256File(selectedFile),
+      crc64ecmaFile(selectedFile),
+    ])
     const response = await requestMaterialUploadCredentials(workspaceId, {
       name: selectedFile.name,
       kind,
       media_type: selectedFile.type || defaultMediaType(kind),
       size_bytes: selectedFile.size,
       sha256,
+      crc64ecma,
       folder_id: selectedFolderId || null,
       tag_names: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
     })

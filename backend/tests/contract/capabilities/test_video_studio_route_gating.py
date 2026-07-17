@@ -124,6 +124,7 @@ async def test_entitled_owner_gets_video_permissions_and_full_chain(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "c" * 64,
+            "crc64ecma": "700",
         },
     )
     assert credential_response.status_code == 201
@@ -136,6 +137,7 @@ async def test_entitled_owner_gets_video_permissions_and_full_chain(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=1000,
         sha256="c" * 64,
+        crc64ecma="700",
     )
     completed = await video_harness.client.post(
         f"/api/v1/video-studio/materials/{material['id']}/complete-upload",
@@ -272,6 +274,7 @@ async def test_video_material_operations_bridge_audit_to_core_protocol(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "d" * 64,
+            "crc64ecma": "700",
         },
     )
     assert credential_response.status_code == 201
@@ -284,6 +287,7 @@ async def test_video_material_operations_bridge_audit_to_core_protocol(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=1000,
         sha256="d" * 64,
+        crc64ecma="700",
     )
     assert (
         await video_harness.client.post(

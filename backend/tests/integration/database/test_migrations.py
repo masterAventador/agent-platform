@@ -442,6 +442,7 @@ def test_tenant_migration_can_upgrade_and_downgrade(tmp_path: Path) -> None:
         "media_type",
         "size_bytes",
         "sha256",
+        "crc64ecma",
         "storage_key",
         "status",
         "tag_names",
@@ -740,7 +741,7 @@ def test_sandbox_epoch_is_added_by_forward_only_migration(tmp_path: Path) -> Non
 
 def test_migration_head_is_current_forward_only_revision() -> None:
     config = Config(BACKEND_ROOT / "alembic.ini")
-    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0029"
+    assert ScriptDirectory.from_config(config).get_current_head() == "20260716_0033"
 
 
 def test_autogenerate_detects_no_drift_between_head_and_runtime_metadata(

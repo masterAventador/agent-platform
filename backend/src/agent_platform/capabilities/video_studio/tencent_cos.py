@@ -1,10 +1,13 @@
 """生产腾讯 COS 素材对象核验 / 预签名预览 / 清理 Provider（M-3）。
 
-核验选型：COS 的 ETag 对多段上传不是内容 MD5，也没有服务端 sha256；
-平台以「前端直传时写入的自定义元数据头 ``x-cos-meta-sha256`` + 服务端可信的
-``Content-Length``」与草稿声明比对。元数据由声明同一 sha256 的客户端写入，
-可防意外损坏与换文件；对抗恶意客户端伪造摘要需升级为草稿声明 crc64ecma 并
-与 COS 服务端计算的 ``x-cos-hash-crc64ecma`` 比对（记录为后续硬化项）。
+核验信任边界：
+- 可信内容指纹 = COS 服务端计算的 ``x-cos-hash-crc64ecma``（对简单上传与
+  分段上传都由 COS 服务端基于实际落盘字节计算，客户端无法伪造）；complete-upload
+  以「服务端 crc64ecma + 服务端可信 ``Content-Length``」与草稿声明比对，任一不符即
+  失败关闭。恶意客户端即便伪造自定义元数据，也无法让 COS 计算出与错误内容不符的
+  crc64，故录入的 crc64 恒等于实际落盘内容的 crc64。
+- ``x-cos-meta-sha256`` 是客户端写入的自定义元数据，可被恶意客户端伪造，**不**作为
+  安全门禁，仅用于展示与意外损坏诊断。
 
 SDK（cos-python-sdk-v5，已锁定）只在默认客户端工厂内使用；404 转换为
 ``MaterialObjectMissing``，其余上游故障转换为 ``MaterialStorageUnavailable``。
@@ -26,6 +29,8 @@ from agent_platform.capabilities.video_studio.storage_credentials import (
 )
 
 SHA256_METADATA_HEADER = "x-cos-meta-sha256"
+# COS 服务端计算的内容 CRC64（ECMA-182 / CRC-64/XZ），十进制 uint64 字符串。
+CRC64_HASH_HEADER = "x-cos-hash-crc64ecma"
 
 
 class CosObjectClient(Protocol):
@@ -89,9 +94,12 @@ class TencentCosMaterialObjectVerifier:
             raise
         except Exception as error:
             raise _translate_error(error, object_key=object_key) from error
-        # 元数据缺失 → 空摘要，由服务层按「与声明不一致」失败关闭。
+        # crc64 缺失 → 空串，由服务层按「与声明不一致」失败关闭。
         sha256 = str(headers.get(SHA256_METADATA_HEADER, ""))
-        return StoredMaterialObject(size_bytes=size_bytes, sha256=sha256)
+        crc64ecma = str(headers.get(CRC64_HASH_HEADER, ""))
+        return StoredMaterialObject(
+            size_bytes=size_bytes, sha256=sha256, crc64ecma=crc64ecma
+        )
 
 
 class TencentCosMaterialPreviewUrlIssuer:

@@ -122,6 +122,7 @@ async def test_upload_credentials_are_short_lived_and_scoped_to_tenant_material_
         media_type="video/mp4",
         size_bytes=256 * 1024 * 1024,
         sha256="a" * 64,
+        crc64ecma="700",
         tag_names=("广告", "7月"),
     )
 
@@ -186,6 +187,7 @@ async def test_material_folders_are_tenant_scoped_and_upload_requires_existing_f
         media_type="video/mp4",
         size_bytes=256 * 1024 * 1024,
         sha256="a" * 64,
+        crc64ecma="700",
         folder_id=child.id,
     )
     assert draft.material.folder_id == child.id
@@ -199,6 +201,7 @@ async def test_material_folders_are_tenant_scoped_and_upload_requires_existing_f
             media_type="video/mp4",
             size_bytes=1024,
             sha256="b" * 64,
+            crc64ecma="700",
             folder_id=child.id,
         )
 
@@ -224,10 +227,12 @@ async def test_complete_upload_rejects_cross_tenant_and_expired_credentials() ->
         media_type="audio/mpeg",
         size_bytes=12_345,
         sha256="b" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=12_345,
         sha256="b" * 64,
+        crc64ecma="700",
     )
 
     with pytest.raises(MaterialNotFoundError):
@@ -267,10 +272,12 @@ async def test_referenced_material_cannot_be_deleted_until_reference_is_removed(
         media_type="image/png",
         size_bytes=4096,
         sha256="c" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=4096,
         sha256="c" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -311,10 +318,12 @@ async def test_download_task_progress_resume_failure_and_retry_state_machine() -
         media_type="video/mp4",
         size_bytes=1000,
         sha256="d" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="d" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -383,10 +392,12 @@ async def test_complete_upload_uses_trusted_object_metadata_instead_of_client_cl
         media_type="image/png",
         size_bytes=2048,
         sha256="e" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=2048,
         sha256="e" * 64,
+        crc64ecma="700",
     )
 
     completed = await service.complete_upload(
@@ -417,10 +428,12 @@ async def test_download_task_can_complete_or_cancel_without_forging_terminal_sta
         media_type="video/mp4",
         size_bytes=1000,
         sha256="f" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="f" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -486,10 +499,12 @@ async def test_download_progress_rejects_corrupt_or_regressive_worker_updates() 
         media_type="video/mp4",
         size_bytes=1000,
         sha256="1" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="1" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -552,10 +567,12 @@ async def test_download_task_user_actions_are_owner_scoped() -> None:
         media_type="video/mp4",
         size_bytes=1000,
         sha256="2" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="2" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -603,10 +620,12 @@ async def test_failed_upload_cleanup_remains_durable_and_can_be_retried() -> Non
         media_type="image/png",
         size_bytes=1000,
         sha256="3" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=999,
         sha256="4" * 64,
+        crc64ecma="700",
     )
     with pytest.raises(InvalidMaterialInput):
         await service.complete_upload(
@@ -658,10 +677,12 @@ async def test_preview_url_is_short_lived_and_scoped_to_material_storage_key() -
         media_type="image/jpeg",
         size_bytes=1000,
         sha256="5" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="5" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -703,6 +724,7 @@ async def test_aborted_and_expired_upload_drafts_are_marked_for_cleanup() -> Non
         media_type="video/mp4",
         size_bytes=1000,
         sha256="6" * 64,
+        crc64ecma="700",
     )
     aborted = await service.abort_upload(
         tenant_id=tenant_id,
@@ -720,6 +742,7 @@ async def test_aborted_and_expired_upload_drafts_are_marked_for_cleanup() -> Non
         media_type="video/mp4",
         size_bytes=1000,
         sha256="7" * 64,
+        crc64ecma="700",
     )
     current_time = expired_draft.credentials.expires_at + timedelta(seconds=1)
     expired = await service.expire_upload_drafts(limit=10)
@@ -748,10 +771,12 @@ async def test_download_state_transition_fails_on_concurrent_revision_change() -
         media_type="video/mp4",
         size_bytes=1000,
         sha256="9" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="9" * 64,
+        crc64ecma="700",
     )
     material = await service.complete_upload(
         tenant_id=tenant_id,
@@ -793,10 +818,12 @@ async def test_list_references_is_tenant_scoped_and_ordered_by_creation() -> Non
             media_type="video/mp4",
             size_bytes=1024,
             sha256="d" * 64,
+            crc64ecma="700",
         )
         verifier.objects[(target_tenant_id, draft.material.storage_key)] = StoredMaterialObject(
             size_bytes=1024,
             sha256="d" * 64,
+            crc64ecma="700",
         )
         return await service.complete_upload(
             tenant_id=target_tenant_id,
@@ -855,6 +882,7 @@ async def test_upload_credentials_reject_materials_over_size_limit() -> None:
             media_type="video/mp4",
             size_bytes=MAX_MATERIAL_SIZE_BYTES + 1,
             sha256="a" * 64,
+            crc64ecma="700",
         )
 
     boundary = await service.request_upload_credentials(
@@ -865,6 +893,7 @@ async def test_upload_credentials_reject_materials_over_size_limit() -> None:
         media_type="video/mp4",
         size_bytes=MAX_MATERIAL_SIZE_BYTES,
         sha256="b" * 64,
+        crc64ecma="700",
     )
     assert boundary.material.size_bytes == MAX_MATERIAL_SIZE_BYTES
 
@@ -900,11 +929,13 @@ async def test_key_material_and_download_operations_record_sanitized_audit_event
         media_type="video/mp4",
         size_bytes=1000,
         sha256="a" * 64,
+        crc64ecma="700",
     )
     material = draft.material
     verifier.objects[(tenant_id, material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="a" * 64,
+        crc64ecma="700",
     )
     await service.complete_upload(
         tenant_id=tenant_id, actor_id=actor_id, material_id=material.id
@@ -969,6 +1000,7 @@ async def test_key_material_and_download_operations_record_sanitized_audit_event
         media_type="video/mp4",
         size_bytes=1000,
         sha256="b" * 64,
+        crc64ecma="700",
     )
     await service.delete_material(
         tenant_id=tenant_id, actor_id=actor_id, material_id=disposable.material.id
@@ -998,10 +1030,12 @@ async def test_failed_complete_upload_does_not_record_success_audit() -> None:
         media_type="video/mp4",
         size_bytes=1000,
         sha256="a" * 64,
+        crc64ecma="700",
     )
     verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
         size_bytes=999,
         sha256="b" * 64,
+        crc64ecma="700",
     )
     with pytest.raises(InvalidMaterialInput):
         await service.complete_upload(
@@ -1123,6 +1157,7 @@ async def test_upload_credentials_replay_reuses_active_draft_by_content_key() ->
         "media_type": "video/mp4",
         "size_bytes": 1000,
         "sha256": "a" * 64,
+        "crc64ecma": "700",
     }
 
     first = await service.request_upload_credentials(**request_kwargs)
@@ -1163,6 +1198,7 @@ async def test_upload_credentials_replay_ignores_expired_or_completed_drafts() -
         "media_type": "video/mp4",
         "size_bytes": 1000,
         "sha256": "c" * 64,
+        "crc64ecma": "700",
     }
 
     first = await service.request_upload_credentials(**request_kwargs)
@@ -1175,6 +1211,7 @@ async def test_upload_credentials_replay_ignores_expired_or_completed_drafts() -
     verifier.objects[(tenant_id, second.material.storage_key)] = StoredMaterialObject(
         size_bytes=1000,
         sha256="c" * 64,
+        crc64ecma="700",
     )
     await service.complete_upload(
         tenant_id=tenant_id, actor_id=actor_id, material_id=second.material.id
@@ -1216,6 +1253,7 @@ async def test_complete_upload_handles_missing_object_and_storage_outage() -> No
             media_type="video/mp4",
             size_bytes=1000,
             sha256=sha,
+            crc64ecma="700",
         )
 
     missing = await new_draft("missing.mp4", "a" * 64)
@@ -1241,3 +1279,109 @@ async def test_complete_upload_handles_missing_object_and_storage_outage() -> No
     # 存储故障不是客户端问题：保持 pending_upload，客户端稍后重试确认。
     assert untouched.status == "pending_upload"
     assert untouched.cleanup_required is False
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_rejects_forged_sha256_when_server_crc64_mismatches() -> None:
+    """A: crc64 抗伪造硬化（RED→GREEN）。
+
+    恶意客户端可在 COS 对象上写入与草稿声明一致的 ``x-cos-meta-sha256`` 元数据
+    （客户端自定义元数据，可伪造），但无法伪造 COS 服务端基于实际落盘字节计算的
+    ``x-cos-hash-crc64ecma``。此处 stored 对象的 size 与 sha256 都与声明一致（模拟
+    伪造），仅服务端 crc64 与声明不符——旧的「size + 客户端 sha256」门禁会误放行，
+    升级为「size + 服务端 crc64」门禁后必须失败关闭。
+    """
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 17, 9, 0, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="forged.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="12345",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="a" * 64,  # 伪造：与声明一致
+        crc64ecma="99999",  # 服务端可信值：反映了不同的真实字节
+    )
+
+    with pytest.raises(InvalidMaterialInput):
+        await service.complete_upload(
+            tenant_id=tenant_id,
+            actor_id=owner_id,
+            material_id=draft.material.id,
+        )
+    failed = await service.get_material(tenant_id=tenant_id, material_id=draft.material.id)
+    assert failed.status == "upload_failed"
+    assert failed.cleanup_required is True
+
+
+@pytest.mark.asyncio
+async def test_complete_upload_trusts_server_crc64_not_client_sha256() -> None:
+    """GREEN 对偶：门禁只信任服务端 crc64 + size，不信任可伪造的 sha256 元数据。
+
+    stored sha256 是完全不同的垃圾值（模拟客户端未写/写错元数据），但服务端 crc64
+    与声明一致 → 应放行为 available。证明 sha256 不再是安全门禁。
+    """
+    tenant_id = uuid4()
+    owner_id = uuid4()
+    verifier = RecordingObjectVerifier()
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=verifier,
+        clock=lambda: datetime(2026, 7, 17, 9, 30, tzinfo=UTC),
+    )
+    draft = await service.request_upload_credentials(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        name="trusted-crc64.mp4",
+        kind=MaterialKind.VIDEO,
+        media_type="video/mp4",
+        size_bytes=1000,
+        sha256="a" * 64,
+        crc64ecma="12345",
+    )
+    verifier.objects[(tenant_id, draft.material.storage_key)] = StoredMaterialObject(
+        size_bytes=1000,
+        sha256="unwritten-or-forgeable-metadata",
+        crc64ecma="12345",
+    )
+
+    completed = await service.complete_upload(
+        tenant_id=tenant_id,
+        actor_id=owner_id,
+        material_id=draft.material.id,
+    )
+    assert completed.status == "available"
+
+
+@pytest.mark.asyncio
+async def test_upload_credentials_reject_malformed_crc64() -> None:
+    """crc64 声明必须是十进制 uint64；非法值失败关闭。"""
+    service = MediaLibraryService.in_memory(
+        credential_issuer=RecordingCredentialIssuer(),
+        object_verifier=RecordingObjectVerifier(),
+        clock=lambda: datetime(2026, 7, 17, 9, 45, tzinfo=UTC),
+    )
+    for bad in ("", "abc", "-1", "1" * 21, str(2**64)):
+        with pytest.raises(InvalidMaterialInput):
+            await service.request_upload_credentials(
+                tenant_id=uuid4(),
+                actor_id=uuid4(),
+                name="bad-crc64.mp4",
+                kind=MaterialKind.VIDEO,
+                media_type="video/mp4",
+                size_bytes=1000,
+                sha256="a" * 64,
+                crc64ecma=bad,
+            )

@@ -32,6 +32,8 @@ MATERIAL_UPLOAD_ACTIONS = (
 )
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_CRC64_RE = re.compile(r"^[0-9]{1,20}$")
+_MAX_UINT64 = 2**64 - 1
 _DOWNLOAD_ERROR_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 MAX_RESUME_TOKEN_LENGTH = 500
 _MEDIA_EXTENSIONS: dict[str, frozenset[str]] = {
@@ -134,6 +136,7 @@ class Material:
     media_type: str
     size_bytes: int
     sha256: str
+    crc64ecma: str
     storage_key: str
     status: str
     tags: tuple[str, ...]
@@ -155,6 +158,7 @@ class Material:
         media_type: str,
         size_bytes: int,
         sha256: str,
+        crc64ecma: str,
         tag_names: tuple[str, ...],
         folder_id: UUID | None,
         upload_expires_at: datetime,
@@ -167,6 +171,7 @@ class Material:
             media_type=media_type,
             size_bytes=size_bytes,
             sha256=sha256,
+            crc64ecma=crc64ecma,
         )
         material_id = uuid4()
         return cls(
@@ -179,6 +184,7 @@ class Material:
             media_type=media_type,
             size_bytes=size_bytes,
             sha256=sha256,
+            crc64ecma=crc64ecma,
             storage_key=f"materials/{tenant_id}/{material_id}/{safe_name}",
             status="pending_upload",
             tags=_normalize_tags(tag_names),
@@ -613,6 +619,7 @@ class MediaLibraryService:
         media_type: str,
         size_bytes: int,
         sha256: str,
+        crc64ecma: str,
         tag_names: tuple[str, ...] = (),
         folder_id: UUID | None = None,
     ) -> MaterialUploadDraft:
@@ -659,6 +666,7 @@ class MediaLibraryService:
             media_type=media_type,
             size_bytes=size_bytes,
             sha256=sha256,
+            crc64ecma=crc64ecma,
             tag_names=tag_names,
             folder_id=folder_id,
             upload_expires_at=expires_at,
@@ -756,9 +764,12 @@ class MediaLibraryService:
                 )
             )
             raise InvalidMaterialInput("上传对象不存在或未完成直传") from None
+        # 信任边界：只比对服务端可信值（size + COS 计算的 crc64ecma）。
+        # sha256 是客户端写入的自定义元数据、可被恶意客户端伪造，不作为安全门禁。
         if (
             stored_object.size_bytes != material.size_bytes
-            or stored_object.sha256 != material.sha256
+            or not material.crc64ecma
+            or stored_object.crc64ecma != material.crc64ecma
         ):
             await self._repository.update_material(
                 replace(
@@ -1176,6 +1187,7 @@ def _validate_material_input(
     media_type: str,
     size_bytes: int,
     sha256: str,
+    crc64ecma: str,
 ) -> str:
     normalized = name.strip()
     if (
@@ -1201,6 +1213,8 @@ def _validate_material_input(
         raise InvalidMaterialInput("素材大小无效")
     if _SHA256_RE.fullmatch(sha256) is None:
         raise InvalidMaterialInput("素材摘要无效")
+    if _CRC64_RE.fullmatch(crc64ecma) is None or int(crc64ecma) > _MAX_UINT64:
+        raise InvalidMaterialInput("素材 CRC64 无效")
     return normalized
 
 

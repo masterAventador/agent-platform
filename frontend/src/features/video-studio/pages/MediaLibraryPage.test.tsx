@@ -16,7 +16,7 @@ import {
   retryDownloadTask,
   type VideoMaterial,
 } from '../api/media-library'
-import { sha256File, uploadMaterialFile } from '../direct-upload'
+import { crc64ecmaFile, sha256File, uploadMaterialFile } from '../direct-upload'
 import { MediaLibraryPage } from './MediaLibraryPage'
 
 vi.mock('../api/media-library', () => ({
@@ -35,6 +35,7 @@ vi.mock('../api/media-library', () => ({
 
 vi.mock('../direct-upload', () => ({
   sha256File: vi.fn(),
+  crc64ecmaFile: vi.fn(),
   uploadMaterialFile: vi.fn(),
 }))
 
@@ -52,6 +53,7 @@ const material: VideoMaterial = {
   media_type: 'video/mp4',
   size_bytes: 1024,
   sha256: 'a'.repeat(64),
+  crc64ecma: '11051210869376104954',
   storage_key: `materials/${workspaceId}/${materialId}/campaign.mp4`,
   status: 'available',
   tags: ['7月', '广告'],
@@ -113,6 +115,7 @@ describe('B04 素材库页面', () => {
       cleanup_required: true,
     })
     vi.mocked(sha256File).mockResolvedValue('b'.repeat(64))
+    vi.mocked(crc64ecmaFile).mockResolvedValue('11051210869376104954')
     vi.mocked(uploadMaterialFile).mockResolvedValue()
     vi.mocked(requestMaterialPreview).mockResolvedValue({
       url: 'https://preview.invalid/campaign.mp4',
@@ -195,6 +198,7 @@ describe('B04 素材库页面', () => {
         media_type: 'video/mp4',
         size_bytes: uploadFile.size,
         sha256: 'b'.repeat(64),
+        crc64ecma: '11051210869376104954',
         folder_id: folderId,
         tag_names: ['广告', '7月'],
       }),

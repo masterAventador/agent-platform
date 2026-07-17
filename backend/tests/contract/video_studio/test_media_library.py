@@ -169,6 +169,7 @@ async def test_material_upload_complete_list_and_cross_tenant_rejection(
             "media_type": "video/mp4",
             "size_bytes": 128 * 1024 * 1024,
             "sha256": "e" * 64,
+            "crc64ecma": "700",
             "folder_id": folder["id"],
             "tag_names": ["广告", "7月"],
         },
@@ -185,6 +186,7 @@ async def test_material_upload_complete_list_and_cross_tenant_rejection(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=128 * 1024 * 1024,
         sha256="e" * 64,
+        crc64ecma="700",
     )
 
     completed = await owner.post(
@@ -222,6 +224,7 @@ async def test_material_upload_complete_list_and_cross_tenant_rejection(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "8" * 64,
+            "crc64ecma": "700",
         },
     )
     abort_material = abort_draft_response.json()["material"]
@@ -257,6 +260,7 @@ async def test_download_task_create_progress_and_retry_api(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "f" * 64,
+            "crc64ecma": "700",
         },
     )
     assert credential_response.status_code == 201
@@ -264,6 +268,7 @@ async def test_download_task_create_progress_and_retry_api(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=1000,
         sha256="f" * 64,
+        crc64ecma="700",
     )
     assert (
         await owner.post(
@@ -360,6 +365,7 @@ async def test_storage_ports_fail_closed_instead_of_issuing_fake_credentials(
         "media_type": "video/mp4",
         "size_bytes": 1000,
         "sha256": "a" * 64,
+        "crc64ecma": "700",
     }
 
     issuer = app.state.video_material_upload_credential_issuer
@@ -383,6 +389,7 @@ async def test_storage_ports_fail_closed_instead_of_issuing_fake_credentials(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=1000,
         sha256="a" * 64,
+        crc64ecma="700",
     )
     del app.state.video_material_object_verifier
     missing_storage = await owner.post(
@@ -414,6 +421,7 @@ async def create_available_material(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": sha * 64,
+            "crc64ecma": "700",
         },
     )
     assert credential_response.status_code == 201
@@ -421,6 +429,7 @@ async def create_available_material(
     verifier.objects[(UUID(tenant_id), material["storage_key"])] = StoredMaterialObject(
         size_bytes=1000,
         sha256=sha * 64,
+        crc64ecma="700",
     )
     completed = await client.post(
         f"/api/v1/video-studio/materials/{material['id']}/complete-upload",
@@ -617,6 +626,7 @@ async def test_upload_credentials_reject_oversized_material_with_precise_error(
             "media_type": "video/mp4",
             "size_bytes": MAX_MATERIAL_SIZE_BYTES + 1,
             "sha256": "9" * 64,
+            "crc64ecma": "700",
         },
     )
     assert rejected.status_code == 422
@@ -656,6 +666,7 @@ async def test_upload_credentials_accept_material_at_exact_size_limit(
             "media_type": "video/mp4",
             "size_bytes": MAX_MATERIAL_SIZE_BYTES,
             "sha256": "7" * 64,
+            "crc64ecma": "700",
         },
     )
     assert accepted.status_code == 201
@@ -815,6 +826,7 @@ async def test_sts_issue_failure_maps_to_controlled_503(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "e" * 64,
+            "crc64ecma": "700",
         },
     )
     assert response.status_code == 503
@@ -853,6 +865,7 @@ async def test_upload_credentials_retry_after_audit_flush_failure_reuses_draft(
         "media_type": "video/mp4",
         "size_bytes": 1000,
         "sha256": "d" * 64,
+        "crc64ecma": "700",
     }
 
     async def broken_emit(*args: Any, **kwargs: Any) -> None:
@@ -923,6 +936,7 @@ async def test_sts_issuance_is_rate_limited_per_tenant(
             "media_type": "video/mp4",
             "size_bytes": 1000 + index,
             "sha256": str(index) * 64,
+            "crc64ecma": "700",
         }
 
     for index in range(2):
@@ -982,6 +996,7 @@ async def test_complete_upload_maps_storage_outage_to_controlled_503(
             "media_type": "video/mp4",
             "size_bytes": 1000,
             "sha256": "9" * 64,
+            "crc64ecma": "700",
         },
     )
     material = draft.json()["material"]

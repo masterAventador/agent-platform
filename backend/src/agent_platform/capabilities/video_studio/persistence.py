@@ -83,6 +83,8 @@ class VideoMaterialRecord(Base):
     media_type: Mapped[str] = mapped_column(String(255))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     sha256: Mapped[str] = mapped_column(String(64))
+    # 服务端可信内容指纹（COS x-cos-hash-crc64ecma，十进制 uint64 串）。
+    crc64ecma: Mapped[str] = mapped_column(String(20), default="")
     storage_key: Mapped[str] = mapped_column(String(700), unique=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     tag_names: Mapped[str] = mapped_column(String(2000), default="[]")
@@ -426,6 +428,7 @@ def _record_to_material(record: VideoMaterialRecord) -> Material:
         media_type=record.media_type,
         size_bytes=record.size_bytes,
         sha256=record.sha256,
+        crc64ecma=record.crc64ecma or "",
         storage_key=record.storage_key,
         status=record.status,
         tags=tuple(json.loads(record.tag_names or "[]")),

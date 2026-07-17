@@ -87,6 +87,7 @@ class MaterialResponse(BaseModel):
     media_type: str
     size_bytes: int
     sha256: str
+    crc64ecma: str
     storage_key: str
     status: str
     tags: list[str]
@@ -105,6 +106,7 @@ class MaterialResponse(BaseModel):
             media_type=material.media_type,
             size_bytes=material.size_bytes,
             sha256=material.sha256,
+            crc64ecma=material.crc64ecma,
             storage_key=material.storage_key,
             status=material.status,
             tags=list(material.tags),
@@ -136,6 +138,8 @@ class MaterialUploadCredentialRequest(BaseModel):
     media_type: str
     size_bytes: int = Field(gt=0)
     sha256: str
+    # 服务端可信内容指纹（COS x-cos-hash-crc64ecma，十进制 uint64）。
+    crc64ecma: str = Field(pattern=r"^[0-9]{1,20}$")
     folder_id: UUID | None = None
     tag_names: list[str] = Field(default_factory=list, max_length=50)
 
@@ -405,6 +409,7 @@ async def request_material_upload_credentials(
                 media_type=payload.media_type,
                 size_bytes=payload.size_bytes,
                 sha256=payload.sha256,
+                crc64ecma=payload.crc64ecma,
                 tag_names=tuple(payload.tag_names),
                 folder_id=payload.folder_id,
             )

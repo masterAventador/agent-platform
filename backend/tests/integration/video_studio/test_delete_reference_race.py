@@ -109,6 +109,7 @@ async def test_concurrent_add_reference_and_delete_cannot_strand_reference(
                 media_type="video/mp4",
                 size_bytes=1000,
                 sha256="a" * 64,
+                crc64ecma="700",
                 storage_key=f"materials/{tenant_id}/{material_id}/race.mp4",
                 status="available",
                 tags=(),

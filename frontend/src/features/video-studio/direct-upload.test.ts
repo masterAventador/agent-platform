@@ -11,7 +11,7 @@ vi.mock('cos-js-sdk-v5', () => ({
 }))
 
 import type { MaterialUploadCredentialResponse } from './api/media-library'
-import { sha256File, uploadMaterialFile } from './direct-upload'
+import { crc64ecmaFile, sha256File, uploadMaterialFile } from './direct-upload'
 
 describe('B04 COS 直传', () => {
   it('分块计算文件 SHA256', async () => {
@@ -20,6 +20,13 @@ describe('B04 COS 直传', () => {
     await expect(sha256File(file)).resolves.toBe(
       'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
     )
+  })
+
+  it('分块计算文件 CRC-64/XZ（十进制，与 COS x-cos-hash-crc64ecma 一致）', async () => {
+    // 已知向量 CRC-64/XZ("123456789") = 0x995DC9BBDF1939FA = 11051210869376104954。
+    const file = new File(['123456789'], 'vector.bin', { type: 'application/octet-stream' })
+
+    await expect(crc64ecmaFile(file)).resolves.toBe('11051210869376104954')
   })
 
   it('在请求 COS 前拒绝已过期的临时凭证', async () => {
@@ -34,6 +41,7 @@ describe('B04 COS 直传', () => {
         media_type: 'video/mp4',
         size_bytes: 3,
         sha256: 'a'.repeat(64),
+        crc64ecma: '12345',
         storage_key: 'materials/tenant/material/expired.mp4',
         status: 'pending_upload',
         tags: [],
@@ -79,6 +87,7 @@ describe('B04 COS 直传元数据', () => {
         media_type: 'video/mp4',
         size_bytes: 3,
         sha256: sha,
+        crc64ecma: '12345',
         storage_key: 'materials/tenant/material/meta.mp4',
         status: 'pending_upload',
         tags: [],

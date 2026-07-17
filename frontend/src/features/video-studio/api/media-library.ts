@@ -22,6 +22,7 @@ const materialSchema = z.object({
   media_type: z.string().min(1).max(255),
   size_bytes: z.number().int().positive(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  crc64ecma: z.string().regex(/^[0-9]{1,20}$/),
   storage_key: z.string().min(1).max(700),
   status: z.enum(['pending_upload', 'available', 'upload_failed', 'deleted']),
   tags: z.array(z.string()),
@@ -82,6 +83,7 @@ export interface MaterialUploadCredentialInput {
   media_type: string
   size_bytes: number
   sha256: string
+  crc64ecma: string
   folder_id?: string | null
   tag_names?: string[]
 }
