@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Index, Integer, String, Uuid, select, update
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Uuid, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +34,7 @@ class CapabilityEntitlementRecord(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True))
+    tenant_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("tenants.id"))
     capability_id: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16))
     source: Mapped[str] = mapped_column(String(64))

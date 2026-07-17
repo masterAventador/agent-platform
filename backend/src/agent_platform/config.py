@@ -114,6 +114,14 @@ class AppSettings(BaseSettings):
     # token 明文。生产/预发必须关闭，公共请求端点始终保持防用户枚举。
     expose_dev_account_tokens: bool = True
     installed_capabilities: tuple[str, ...] = ("social-operations",)
+    # video-studio 素材直传桶：配置后（连同 cos_region/cos_secret_id/cos_secret_key）
+    # 生产装配注入真实腾讯 CAM/STS 签发器；缺省时素材上传凭证端点保持 503 失败关闭。
+    video_material_cos_bucket: str | None = None
+    # 租户级 STS 签发频控（每分钟）；防止对真实腾讯 STS 的无界调用成本。
+    video_sts_issue_limit_per_minute: int = Field(default=30, ge=1, le=10_000)
+    # 素材库回收清扫：过期草稿止血 + cleanup_required 对象回收（M-2）。
+    video_media_maintenance_interval_seconds: float = Field(default=300.0, ge=1, le=86_400)
+    video_media_maintenance_batch_limit: int = Field(default=100, ge=1, le=1_000)
     social_operations_offline_after_seconds: int = Field(default=90, ge=5, le=3_600)
     social_operations_claim_lease_seconds: int = Field(default=60, ge=5, le=3_600)
     social_operations_state_path: str | None = None

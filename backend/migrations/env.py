@@ -6,8 +6,9 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from agent_platform.bootstrap.capabilities import load_all_database_models
 from agent_platform.infrastructure.database.base import Base
-from agent_platform.infrastructure.database.models import load_database_models
+from agent_platform.infrastructure.database.models import include_name_for_autogenerate
 
 config = context.config
 
@@ -19,7 +20,9 @@ if config.config_file_name is not None:
     # 不应因执行迁移而被静默禁用。
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-load_database_models()
+# 迁移 metadata 必须与运行时同源：Core + 全部能力包模型无条件聚合，
+# 否则 autogenerate 会把能力包表误判为需要 DROP 的漂移。
+load_all_database_models()
 target_metadata = Base.metadata
 
 
@@ -29,6 +32,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=include_name_for_autogenerate,
     )
 
     with context.begin_transaction():
@@ -36,7 +40,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: object) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_name=include_name_for_autogenerate,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

@@ -449,9 +449,9 @@ def _build_runtime_resolver(
         sandbox_manager=adapters.sandbox_manager,
         gateway=gateway,
         runtime_selector=PlatformRuntimeSelector(
-            workflow_factory=adapters.workflow_factory,
             checkpointer=checkpointer,
         ),
+        workflow_spec_loader=adapters.workflow_spec_loader,
         sandbox_ttl=timedelta(seconds=settings.sandbox_ttl_seconds),
         artifact_operation_lease_duration=timedelta(
             seconds=settings.artifact_storage_operation_lease_seconds

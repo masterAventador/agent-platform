@@ -16,6 +16,9 @@ from agent_platform.infrastructure.database.repositories.knowledge import (
 )
 from agent_platform.infrastructure.database.repositories.skills import SqlAlchemySkillRepository
 from agent_platform.infrastructure.database.repositories.tools import SqlAlchemyToolRepository
+from agent_platform.infrastructure.database.repositories.workflows import (
+    SqlAlchemyEmployeeWorkflowPolicy,
+)
 from agent_platform.platform.dynamic_io import InvalidDynamicSchema, validate_employee_io_schemas
 from agent_platform.platform.employees.entities import (
     Employee,
@@ -32,6 +35,7 @@ from agent_platform.platform.employees.errors import (
     EmployeeNotFound,
     EmployeeSkillNotBindable,
     EmployeeToolNotBindable,
+    EmployeeWorkflowNotBindable,
 )
 from agent_platform.platform.employees.services import EmployeeService
 from agent_platform.platform.knowledge.retrieval import (
@@ -86,33 +90,73 @@ class EmployeeDefinitionBase(BaseModel):
     knowledge_retrieval: object = Field(default_factory=dict)
     approval_policy: dict[str, object] = Field(default_factory=dict)
     release_strategy: dict[str, object] = Field(default_factory=_default_release_strategy)
+    # workflow_id 仅对流程/混合员工有意义；workflow_version 为服务端发布时固化的只读字段，
+    # 写入时被忽略（放在 base 让响应能原样回传给更新请求）。
+    workflow_id: UUID | None = None
+    workflow_version: int | None = None
 
 
-class EmployeeDefinitionRequest(EmployeeDefinitionBase):
-    work_mode: Literal[RuntimeType.AUTONOMOUS]
+def _build_draft(
+    *,
+    base: "EmployeeDefinitionBase",
+    runtime_type: RuntimeType,
+    capabilities: EmployeeCapabilities,
+    workflow_id: UUID | None,
+) -> EmployeeDraft:
+    return EmployeeDraft(
+        name=base.name,
+        avatar_url=str(base.avatar_url) if base.avatar_url is not None else None,
+        role_description=base.role_description,
+        visibility=base.visibility,
+        runtime_type=runtime_type,
+        system_prompt=base.system_prompt,
+        model_settings=base.model.model_dump(),
+        input_schema=base.input_schema,
+        output_schema=base.output_schema,
+        capabilities=capabilities.model_dump(),
+        skill_ids=base.skill_ids,
+        tool_ids=base.tool_ids,
+        knowledge_base_ids=base.knowledge_base_ids,
+        knowledge_retrieval=validate_knowledge_retrieval_config(
+            base.knowledge_retrieval
+        ).model_dump(mode="json"),
+        approval_policy=base.approval_policy,
+        release_strategy=base.release_strategy,
+        workflow_id=workflow_id,
+    )
+
+
+class AutonomousEmployeeDefinitionRequest(EmployeeDefinitionBase):
+    work_mode: Literal[RuntimeType.AUTONOMOUS] = RuntimeType.AUTONOMOUS
     capabilities: EmployeeCapabilities
 
     def to_draft(self) -> EmployeeDraft:
-        return EmployeeDraft(
-            name=self.name,
-            avatar_url=str(self.avatar_url) if self.avatar_url is not None else None,
-            role_description=self.role_description,
-            visibility=self.visibility,
+        return _build_draft(
+            base=self,
             runtime_type=self.work_mode,
-            system_prompt=self.system_prompt,
-            model_settings=self.model.model_dump(),
-            input_schema=self.input_schema,
-            output_schema=self.output_schema,
-            capabilities=self.capabilities.model_dump(),
-            skill_ids=self.skill_ids,
-            tool_ids=self.tool_ids,
-            knowledge_base_ids=self.knowledge_base_ids,
-            knowledge_retrieval=validate_knowledge_retrieval_config(
-                self.knowledge_retrieval
-            ).model_dump(mode="json"),
-            approval_policy=self.approval_policy,
-            release_strategy=self.release_strategy,
+            capabilities=self.capabilities,
+            workflow_id=None,
         )
+
+
+class WorkflowEmployeeDefinitionRequest(EmployeeDefinitionBase):
+    work_mode: Literal[RuntimeType.WORKFLOW, RuntimeType.HYBRID]
+    capabilities: EmployeeCapabilities = Field(default_factory=EmployeeCapabilities)
+    workflow_id: UUID
+
+    def to_draft(self) -> EmployeeDraft:
+        return _build_draft(
+            base=self,
+            runtime_type=self.work_mode,
+            capabilities=self.capabilities,
+            workflow_id=self.workflow_id,
+        )
+
+
+EmployeeDefinitionRequest = Annotated[
+    AutonomousEmployeeDefinitionRequest | WorkflowEmployeeDefinitionRequest,
+    Field(discriminator="work_mode"),
+]
 
 
 class EmployeeDefinitionResponse(EmployeeDefinitionBase):
@@ -165,6 +209,7 @@ def _service(database_session: AsyncSession) -> EmployeeService:
         skills=SqlAlchemySkillRepository(database_session),
         tools=SqlAlchemyToolRepository(database_session),
         knowledge_bases=SqlAlchemyKnowledgeBaseRepository(database_session),
+        workflows=SqlAlchemyEmployeeWorkflowPolicy(database_session),
     )
 
 
@@ -195,6 +240,14 @@ def _raise_employee_error(error: Exception) -> None:
             detail={
                 "code": "employee_knowledge_base_not_bindable",
                 "message": "数字员工只能绑定当前企业可用的知识库",
+            },
+        ) from error
+    if isinstance(error, EmployeeWorkflowNotBindable):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "employee_workflow_not_bindable",
+                "message": "流程/混合数字员工只能引用本企业已注册的工作流",
             },
         ) from error
     if isinstance(error, EmployeeConfigurationUnavailable):
@@ -293,6 +346,7 @@ async def create_employee(
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
             EmployeeKnowledgeBaseNotBindable,
+            EmployeeWorkflowNotBindable,
             InvalidDynamicSchema,
             InvalidKnowledgeRetrievalConfig,
         ) as error:
@@ -380,6 +434,7 @@ async def update_employee(
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
             EmployeeKnowledgeBaseNotBindable,
+            EmployeeWorkflowNotBindable,
             InvalidDynamicSchema,
             InvalidKnowledgeRetrievalConfig,
         ) as error:
@@ -435,6 +490,7 @@ async def publish_employee(
             EmployeeSkillNotBindable,
             EmployeeToolNotBindable,
             EmployeeKnowledgeBaseNotBindable,
+            EmployeeWorkflowNotBindable,
             InvalidDynamicSchema,
             InvalidKnowledgeRetrievalConfig,
         ) as error:

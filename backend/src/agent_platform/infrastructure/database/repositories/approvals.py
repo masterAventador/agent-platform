@@ -10,9 +10,9 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
-    UniqueConstraint,
     Uuid,
     func,
     or_,
@@ -88,7 +88,10 @@ class ApprovalRecord(Base):
     transferred_to_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "request_key", name="uq_approvals_tenant_request_key"),
+        # 与迁移 0030 对齐：唯一键为 unique Index（非 UniqueConstraint），并显式声明
+        # 复合索引，避免 autogenerate 漂移守卫误判为需要增删索引。
+        Index("uq_approvals_tenant_request_key", "tenant_id", "request_key", unique=True),
+        Index("ix_approvals_status_expires_at", "status", "expires_at"),
     )
 
 

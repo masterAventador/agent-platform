@@ -27,6 +27,23 @@ vi.mock('../../knowledge/api/queries', () => ({
   useKnowledgeBases: vi.fn(() => ({ data: [], isPending: false })),
 }))
 
+vi.mock('../../workflows/api/queries', () => ({
+  useWorkflows: vi.fn(() => ({
+    data: [
+      {
+        id: 'wf-1',
+        tenant_id: 'tenant-1',
+        name: '客服流程',
+        description: '',
+        latest_version: 1,
+        published_version: 1,
+        status: 'published',
+      },
+    ],
+    isPending: false,
+  })),
+}))
+
 const createMutateAsync = vi.fn()
 const updateMutateAsync = vi.fn()
 
@@ -113,7 +130,7 @@ describe('EmployeeEditorPage configuration availability', () => {
     updateMutateAsync.mockResolvedValue(employee)
   })
 
-  it('shows unavailable modes, enables file uploads and keeps scheduling disabled', async () => {
+  it('opens workflow and hybrid modes, enables file uploads and keeps scheduling disabled', async () => {
     const user = userEvent.setup()
     renderEditor()
 
@@ -126,18 +143,32 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(screen.getByText(/文件上传已接通/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('combobox', { name: '工作模式' }))
-    expect(screen.getByRole('option', { name: '自主执行' })).not.toHaveAttribute(
-      'aria-disabled',
-      'true',
-    )
-    expect(screen.getByRole('option', { name: /固定流程.*尚未开放/ })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    )
-    expect(screen.getByRole('option', { name: /混合协作.*尚未开放/ })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    )
+    for (const name of ['自主执行', '固定流程', '混合协作']) {
+      expect(screen.getByRole('option', { name })).not.toHaveAttribute('aria-disabled', 'true')
+    }
+  })
+
+  it('requires a published workflow reference for workflow employees', async () => {
+    const user = userEvent.setup()
+    renderEditor()
+
+    await user.type(screen.getByRole('textbox', { name: '员工名称' }), '流程员工')
+    await user.type(screen.getByRole('textbox', { name: '岗位说明' }), '跑固定流程')
+    await user.type(screen.getByRole('textbox', { name: '系统指令' }), '按流程执行')
+
+    // 切换到固定流程后出现引用工作流选择器。
+    await user.click(screen.getByRole('combobox', { name: '工作模式' }))
+    await user.click(screen.getByRole('option', { name: '固定流程' }))
+    const workflowSelect = await screen.findByRole('combobox', { name: '引用工作流' })
+    await user.click(workflowSelect)
+    await user.click(screen.getByRole('option', { name: '客服流程（v1）' }))
+
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1))
+    expect(createMutateAsync.mock.calls[0][0]).toMatchObject({
+      work_mode: 'workflow',
+      workflow_id: 'wf-1',
+    })
   })
 
   it('hard-codes the create payload to the configurations the runtime supports', async () => {
@@ -393,13 +424,15 @@ describe('EmployeeEditorPage configuration availability', () => {
     expect(screen.queryByRole('textbox', { name: /模型/ })).not.toBeInTheDocument()
   })
 
-  it('requires an explicit repair before a legacy employee can be saved', async () => {
+  it('edits a published workflow employee and keeps scheduling reset while preserving the reference', async () => {
     const user = userEvent.setup()
-    const legacyEmployee: Employee = {
+    const workflowEmployee: Employee = {
       ...employee,
       definition: {
         ...employee.definition,
         work_mode: 'workflow',
+        workflow_id: 'wf-1',
+        workflow_version: 1,
         capabilities: {
           conversation: true,
           scheduled_tasks: true,
@@ -407,24 +440,20 @@ describe('EmployeeEditorPage configuration availability', () => {
         },
       },
     }
-    vi.mocked(useEmployee).mockReturnValue({ data: legacyEmployee, isPending: false } as never)
+    vi.mocked(useEmployee).mockReturnValue({ data: workflowEmployee, isPending: false } as never)
     renderEditor('/employees/employee-1/edit')
 
-    expect(await screen.findByText(/历史配置使用了尚未开放的工作模式/)).toBeInTheDocument()
-    expect(screen.getByText(/历史配置使用了尚未接通的定时任务/)).toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeEnabled()
-    expect(screen.getByRole('checkbox', { name: /文件上传/ })).toBeChecked()
+    // 定时任务仍未接通：提示并在保存时复位；工作流引用被保留。
+    expect(await screen.findByText(/历史配置使用了尚未接通的定时任务/)).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).toBeDisabled()
     expect(screen.getByRole('checkbox', { name: /定时任务/ })).not.toBeChecked()
-    expect(screen.getByRole('button', { name: '保存草稿' })).toBeDisabled()
-
-    await user.click(screen.getByRole('button', { name: '切换为自主执行' }))
     expect(screen.getByRole('button', { name: '保存草稿' })).toBeEnabled()
-    await user.click(screen.getByRole('button', { name: '保存草稿' }))
 
+    await user.click(screen.getByRole('button', { name: '保存草稿' }))
     await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1))
     expect(updateMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
-      work_mode: 'autonomous',
+      work_mode: 'workflow',
+      workflow_id: 'wf-1',
       capabilities: {
         conversation: true,
         scheduled_tasks: false,

@@ -22,6 +22,8 @@ from agent_platform.platform.tenants.memberships import TenantRole
 class TenantInvitationRecord(Base):
     __tablename__ = "tenant_invitations"
     __table_args__ = (
+        # 与迁移 0034 对齐：唯一索引显式命名 uq_...（而非列级 index=True 自动名 ix_...）。
+        Index("uq_tenant_invitations_token_digest", "token_digest", unique=True),
         Index("ix_tenant_invitations_tenant_status", "tenant_id", "status"),
         Index("ix_tenant_invitations_email", "email"),
     )
@@ -34,7 +36,7 @@ class TenantInvitationRecord(Base):
     )
     email: Mapped[str] = mapped_column(String(320))
     role: Mapped[str] = mapped_column(String(32))
-    token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_digest: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16))
     invited_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

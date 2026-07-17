@@ -20,6 +20,9 @@ from agent_platform.platform.accounts.tokens import (
 class AccountTokenRecord(Base):
     __tablename__ = "account_tokens"
     __table_args__ = (
+        # 与迁移 0034 对齐：唯一索引显式命名 uq_...（而非列级 index=True 自动名 ix_...），
+        # 避免 autogenerate 漂移守卫误判需增删索引。
+        Index("uq_account_tokens_token_digest", "token_digest", unique=True),
         Index("ix_account_tokens_user_purpose", "user_id", "purpose"),
     )
 
@@ -30,7 +33,7 @@ class AccountTokenRecord(Base):
         index=True,
     )
     purpose: Mapped[str] = mapped_column(String(32))
-    token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_digest: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

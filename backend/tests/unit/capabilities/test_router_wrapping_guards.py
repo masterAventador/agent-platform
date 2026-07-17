@@ -6,14 +6,77 @@
 
 from __future__ import annotations
 
-import pytest
-from fastapi import APIRouter, Depends
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
+import pytest
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.testclient import TestClient
+
+import agent_platform.api.dependencies.capabilities as capability_dependencies
 from agent_platform.api.dependencies.capabilities import wrap_capability_router
+from agent_platform.capabilities.request_context import (
+    CapabilityRequestContext,
+    bind_capability_request_context,
+    require_capability_request_context,
+    reset_capability_request_context,
+)
 
 
 def _noop_dependency() -> None:  # pragma: no cover - 仅用于路由声明
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditEvent:
+    event_id: UUID
+    action: str
+    tenant_id: UUID
+    actor_user_id: UUID
+    resource_id: UUID
+    occurred_at: datetime
+    details: tuple[tuple[str, str], ...] = ()
+
+
+class _FakeSession:
+    async def commit(self) -> None:
+        return None
+
+
+@asynccontextmanager
+async def _fake_session_factory():
+    yield _FakeSession()
+
+
+@dataclass(slots=True)
+class _ContextProbe:
+    tenant_id: UUID = field(default_factory=uuid4)
+    user_id: UUID = field(default_factory=uuid4)
+
+    def build(self) -> CapabilityRequestContext:
+        return CapabilityRequestContext(
+            capability_id="video-studio",
+            tenant_id=self.tenant_id,
+            user_id=self.user_id,
+            permissions=frozenset({"video.read"}),
+            session_factory=_fake_session_factory,
+        )
+
+
+def _build_gated_app(router: APIRouter, probe: _ContextProbe) -> FastAPI:
+    async def bind_context():
+        context = probe.build()
+        token = bind_capability_request_context(context)
+        try:
+            yield
+        finally:
+            reset_capability_request_context(token)
+
+    app = FastAPI()
+    app.include_router(wrap_capability_router(router), dependencies=[Depends(bind_context)])
+    return app
 
 
 def test_wrap_keeps_plain_sync_routes() -> None:
@@ -27,17 +90,75 @@ def test_wrap_keeps_plain_sync_routes() -> None:
     assert len(wrapped.routes) == 1
 
 
-def test_wrap_rejects_async_endpoints_at_assembly_time() -> None:
-    """async 端点经 run_in_threadpool 会返回未 await 的协程，必须装配期拒绝。"""
+def test_wrap_supports_async_endpoints_and_flushes_audit_before_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B04 能力路由是 async 端点：包装器必须 await 后在响应前落库审计。"""
+
+    emitted: list[str] = []
+
+    async def recording_emit(session: object, **kwargs: object) -> None:
+        emitted.append(str(kwargs["action"]))
+
+    monkeypatch.setattr(capability_dependencies, "emit_audit_event", recording_emit)
 
     router = APIRouter()
+    probe = _ContextProbe()
 
-    @router.get("/things")
-    async def list_things() -> dict[str, str]:  # pragma: no cover - 不应被调用
+    @router.post("/things", status_code=201)
+    async def create_thing() -> dict[str, str]:
+        context = require_capability_request_context()
+        context.audit_events.append(
+            _AuditEvent(
+                event_id=uuid4(),
+                action="video.material.created",
+                tenant_id=probe.tenant_id,
+                actor_user_id=probe.user_id,
+                resource_id=uuid4(),
+                occurred_at=datetime.now(UTC),
+            )
+        )
         return {"ok": "yes"}
 
-    with pytest.raises(TypeError, match="async"):
-        wrap_capability_router(router)
+    client = TestClient(_build_gated_app(router, probe))
+    response = client.post("/things")
+    assert response.status_code == 201
+    assert response.json() == {"ok": "yes"}
+    assert emitted == ["video.material.created"]
+
+
+def test_wrap_async_endpoint_returns_500_when_audit_flush_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """async 端点业务成功但审计桥接失败时必须显式 500，禁止静默丢审计。"""
+
+    async def broken_emit(session: object, **kwargs: object) -> None:
+        raise RuntimeError("audit store unavailable")
+
+    monkeypatch.setattr(capability_dependencies, "emit_audit_event", broken_emit)
+
+    router = APIRouter()
+    probe = _ContextProbe()
+
+    @router.post("/things", status_code=201)
+    async def create_thing() -> dict[str, str]:
+        context = require_capability_request_context()
+        context.audit_events.append(
+            _AuditEvent(
+                event_id=uuid4(),
+                action="video.material.created",
+                tenant_id=probe.tenant_id,
+                actor_user_id=probe.user_id,
+                resource_id=uuid4(),
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        return {"ok": "yes"}
+
+    client = TestClient(_build_gated_app(router, probe), raise_server_exceptions=False)
+    response = client.post("/things")
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "capability_audit_flush_failed"
 
 
 def test_wrap_rejects_per_route_dependencies() -> None:

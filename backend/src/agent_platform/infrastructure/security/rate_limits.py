@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Mapping
 
 from redis.asyncio import Redis
 
@@ -13,6 +14,7 @@ class RedisAuthRateLimiter:
         register_limit: int,
         login_limit: int,
         password_reset_limit: int | None = None,
+        extra_limits: Mapping[str, int] | None = None,
     ) -> None:
         self._redis = redis
         # 找回密码限流缺省回退到登录限流额度，保证既有调用方无需改造即可注册该 scope。
@@ -24,6 +26,8 @@ class RedisAuthRateLimiter:
             "login_ip": login_limit,
             "password_reset": reset_limit,
             "password_reset_ip": reset_limit,
+            # 能力包扩展限流作用域（如 video_sts_issue），由组合根按部署配置注入。
+            **dict(extra_limits or {}),
         }
 
     async def ensure_allowed(self, *, scope: str, key: str) -> None:
