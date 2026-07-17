@@ -11,6 +11,7 @@ Deep Agents 子智能体通过注入的 ``subagent_runner`` 回调调用（在 w
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypedDict
@@ -77,6 +78,9 @@ def _store(node: WorkflowNode, state: WorkflowState, result: JsonValue) -> dict[
     return update
 
 
+_PLACEHOLDER_PATTERN = re.compile(r"\{(input|values)\}")
+
+
 def _render_prompt(prompt: str, state: WorkflowState) -> str:
     """按白名单占位符做纯字符串替换。
 
@@ -87,13 +91,14 @@ def _render_prompt(prompt: str, state: WorkflowState) -> str:
 
     input_data = state.get("input") or {}
     values = state.get("values") or {}
-    rendered = prompt.replace(
-        "{input}", json.dumps(input_data, ensure_ascii=False, sort_keys=True, default=str)
-    )
-    rendered = rendered.replace(
-        "{values}", json.dumps(values, ensure_ascii=False, sort_keys=True, default=str)
-    )
-    return rendered
+    replacements = {
+        "input": json.dumps(input_data, ensure_ascii=False, sort_keys=True, default=str),
+        "values": json.dumps(values, ensure_ascii=False, sort_keys=True, default=str),
+    }
+    # 单遍替换：一次扫描内各占位互不回灌，避免先内联的数据里字面 {values}/{input}
+    # 在第二遍被再次替换（占位符注入）。仅精确匹配 {input}/{values}，含点号的
+    # 占位（如 {input.foo}）不匹配、保持字面量。
+    return _PLACEHOLDER_PATTERN.sub(lambda match: replacements[match.group(1)], prompt)
 
 
 def _coerce_str(value: object) -> str:

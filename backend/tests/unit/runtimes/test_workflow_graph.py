@@ -257,6 +257,23 @@ def test_render_prompt_does_not_traverse_attributes() -> None:
     assert '"topic": "x"' in rendered
 
 
+def test_render_prompt_does_not_reinject_values_from_input_literal() -> None:
+    """单遍替换：input 数据里字面出现的 {values} 不得触发 values 注入。
+
+    模板作者只暴露 {input}、故意不含 {values}；若顺序 replace，先内联 input 后
+    第二遍会把 input 里的字面 {values} 换成上游节点输出，绕过作者意图。
+    """
+
+    state: dict[str, object] = {
+        "input": {"note": "see {values}"},
+        "values": {"secret": "leak"},
+    }
+    rendered = _render_prompt("Task: {input}", state)  # type: ignore[arg-type]
+    # input 里的字面 {values} 必须原样保留，绝不内联上游 values 数据。
+    assert "{values}" in rendered
+    assert "leak" not in rendered
+
+
 @pytest.mark.asyncio
 async def test_retry_recovers_from_transient_failure() -> None:
     attempts = {"count": 0}
