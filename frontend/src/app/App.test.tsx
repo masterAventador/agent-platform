@@ -112,6 +112,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: '任务中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '会话中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '记忆中心' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '定时任务' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Skill 中心' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '工具与 MCP' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '任务运维' })).toBeInTheDocument()
@@ -557,6 +558,23 @@ describe('App', () => {
 
       expect(await screen.findByText('无权访问任务中心')).toBeInTheDocument()
       expect(screen.queryByRole('link', { name: '任务中心' })).not.toBeInTheDocument()
+    },
+  )
+
+  it.each(['/scheduled-tasks', '/scheduled-tasks/task-1'])(
+    '缺少 runs.execute 时隐藏定时任务入口且直达 %s 显示统一 403',
+    async (path) => {
+      authState.workspaces = [noRunWorkspace]
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[path]}><App /></MemoryRouter>
+        </QueryClientProvider>,
+      )
+
+      expect(await screen.findByText('无权访问定时任务中心')).toBeInTheDocument()
+      expect(screen.queryByRole('link', { name: '定时任务' })).not.toBeInTheDocument()
     },
   )
 

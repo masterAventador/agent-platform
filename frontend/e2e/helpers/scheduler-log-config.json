@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "c12-scheduler": {
+      "format": "%(message)s dispatched=%(dispatched)s skipped=%(skipped)s settled=%(settled)s",
+      "defaults": {
+        "dispatched": "-",
+        "skipped": "-",
+        "settled": "-"
+      }
+    }
+  },
+  "handlers": {
+    "stdout": {
+      "class": "logging.StreamHandler",
+      "formatter": "c12-scheduler",
+      "stream": "ext://sys.stdout"
+    }
+  },
+  "root": {
+    "handlers": ["stdout"],
+    "level": "INFO"
+  }
+}

@@ -70,8 +70,9 @@ test('owner 创建员工时只能选择已接通的真实配置', async ({ page 
   await expect(page.getByRole('checkbox', { name: '支持对话' })).toBeEnabled()
   await expect(page.getByRole('checkbox', { name: '支持文件上传' })).toBeEnabled()
   await expect(page.getByRole('checkbox', { name: '支持文件上传' })).not.toBeChecked()
-  await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).toBeDisabled()
-  await expect(page.getByRole('checkbox', { name: '支持定时任务（尚未接通）' })).not.toBeChecked()
+  // C12 阶段二：定时任务能力已接通，复选框可用且默认关闭（不再是「尚未接通」的禁用项）。
+  await expect(page.getByRole('checkbox', { name: '支持定时任务' })).toBeEnabled()
+  await expect(page.getByRole('checkbox', { name: '支持定时任务' })).not.toBeChecked()
 })
 
 test('工作区写请求进行中阻止切换，结算后允许重试', async ({ page }) => {

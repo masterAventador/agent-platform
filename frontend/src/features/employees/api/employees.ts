@@ -15,7 +15,7 @@ export interface EmployeeCapabilities {
 
 export interface EmployeeWriteCapabilities {
   conversation: boolean
-  scheduled_tasks: false
+  scheduled_tasks: boolean
   file_upload: boolean
   memory: boolean
 }
@@ -123,9 +123,6 @@ export interface Employee {
 }
 
 export function isEmployeeConfigurationAvailable(definition: EmployeeDefinition): boolean {
-  if (definition.capabilities.scheduled_tasks) {
-    return false
-  }
   if (definition.work_mode === 'autonomous') {
     return true
   }
