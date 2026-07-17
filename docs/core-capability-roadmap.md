@@ -56,6 +56,7 @@
 - 平台级长期记忆：四级命名空间、运行时数据通道注入与受控提取、用户记忆中心；
 - 独立审批中心：审批状态机、Tool 风险审批统一协议接入、待办/批准/拒绝/转交/超时、审批中心页面；
 - 固定/混合工作流数字员工：Workflow 注册与版本固化、LangGraph 编排内核、人工节点接审批中心；
+- 企业成员与完整账号体系：成员邀请/角色/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理；
 - React Web 的认证、工作区切换、员工、任务、知识、Skill、Tool 和死信页面。
 
 ### 3.2 仍不完整或尚未实现的能力
@@ -76,7 +77,7 @@
 | 定时任务 | 未实现 | 配置字段存在但强制关闭，无调度、历史和失败治理 | C12 |
 | 审批中心 | 已完成 | 独立审批记录/状态机/待办/批准/拒绝/转交/超时/幂等、Tool 风险审批接入统一协议、审批中心页面 + 工作台卡片已合入并通过双复审与真实 PG 并发门禁及审批 E2E | C13 |
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
-| 企业与账号管理 | 进行中 | 缺成员邀请、角色管理、密码找回、验证、SSO/MFA（分支 `task/c15-account-management` 实施中） | C15 |
+| 企业与账号管理 | 已完成 | 成员邀请/角色/移除/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理已合入并通过三轮双复审与真实 PG + Playwright 完成门；OIDC/MFA 保留扩展边界 | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
 | Capability/Entitlement | 🧪 待集成（已合入主线，待 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已合入主线；Core+视频组合与 Worker 侧接线待 B04 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
@@ -437,11 +438,15 @@
 
 ### C15 企业、成员与完整账号体系
 
-**状态：`🚧 进行中`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-17**
 
-开工说明：前置 C14 已完成合入。与 C11 并行（边界隔离见 C11 开工说明）。分支 `task/c15-account-management`（worktree `wt/c15`），迁移编号占用 `20260716_0031`（down_revision 暂指 `20260716_0030`，主代理合并时统一重链）。所有成员/角色/账号管理操作接入 C14 平台审计。
+**完成日期：2026-07-17**
+
+开工说明：前置 C14 已完成合入。与 C11 并行。分支 `task/c15-account-management`；迁移合入时按「先合入者保留编号」重链——前序 B04/C11 占 0031-0033，本 account 迁移重编为 `20260716_0034`（接 0033 单头）。
+
+2026-07-17 完成记录（本任务提交，merge 合入，先 RED 后 GREEN）：企业设置 + 成员邀请（受控 token、有效期、接受/拒绝）+ 成员列表 + 角色变更 + 移除 + Owner 转移（迁移 `20260716_0034` 建 tenant_invitations/account_tokens 表 + user display_name / session user_agent）；服务端强制 Owner 唯一性与最后一个 Owner 保护（lock_members 全成员行 FOR UPDATE 锁内校验，真实 PG 并发门禁验证并发降级不归零 Owner）；**change_member_role 拒绝直接授 Owner（422，Owner 只能经转移产生）**。账号体系：资料/改密（校验旧密码）/邮箱验证/找回密码/会话设备管理（列出、撤销单个/全部，撤销后 token 立即失效）；**找回密码防枚举**——响应体恒等 202 为主防线 + `password_reset`/`password_reset_ip` 端点限流（5/min，Redis 故障 fail-closed）为真实兜底，诚实降级不声称严格 constant-time；token 仅存 SHA256 digest，明文仅 dev 通道且 staging/production 强制 fail-closed。全部管理操作服务端 Owner-only RBAC + 接入 C14 审计（脱敏）。保留 OIDC/SSO 扩展边界（未锁死为仅 OIDC）+ MFA 挂载点。前端成员管理页 + 账号设置页。Demo Seed 幂等补 pending 邀请 + admin/member 演示账号。双复审：首轮 + 主代理判定修 4 项（M2 Owner 授予不变式、M1 时序枚举、L1 审计缺口、L2 仓储回滚边界）；二轮质量复审 FAIL 于 M1 修复不到位（补偿不对称、无限流、测试假通过），三轮改为「端点限流 + 诚实降级 + 改写真限流测试」+ L2 补真实 PG 无半状态门禁；三轮双复审均 PASS。验证：`cd backend && uv run pytest -q`（合并后全量 1596 passed, 52 skipped）；`uv run ruff check . && uv run mypy`（240 文件）；`cd frontend && pnpm test`（55 文件 273）+ lint/typecheck/build；真实 PG 并发/无半状态门禁通过；members/account Playwright 7/7（邀请闭环/角色/移除/Owner 转移失权/越权 403/改密撤销他端/找回密码闭环/会话撤销即时失效，真实 Redis 限流下通过）。登记 follow-up（非阻断，诚实披露）：找回密码残余时序旁道（已诚实降级、限流兜底，未强求完全消除）；reset 端点 IP 限流强度依赖可信客户端 IP 提取（反代部署需 proxy-headers 配置说明）；dev-token 端点仅 dev、staging/prod fail-closed；MFA/OIDC 全流程为扩展边界待后续条目。
 
 完成定义：
 
@@ -569,12 +574,12 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 
 | 验证项 | 当前结果 |
 | --- | --- |
-| 后端 Pytest | C11 合入后默认环境 1536 通过、42 跳过、0 失败；条件跳过均明确标注缺少真实 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱、真实腾讯云 COS 或真实 RAGFlow 凭据 |
+| 后端 Pytest | C15 合入后默认环境 1596 通过、42 跳过、0 失败；条件跳过均明确标注缺少真实 PostgreSQL、Redis、MinIO、破坏性本地 Docker 沙箱、真实腾讯云 COS 或真实 RAGFlow 凭据 |
 | 后端 Unit + Contract | 863 项通过；新增覆盖动态输入输出契约、前端不可表达 JSON Schema 关键字拒绝、动态 properties 必须关闭 additionalProperties、历史已发布动态 Schema 运行入口 fail-closed、历史已发布文件字段 Schema 未启用 `file_upload` 时即使文件字段可选且本次未提交文件也 fail-closed、legacy 自由输入与零字段动态空输入兼容、浏览器 RegExp 不兼容 pattern 拒绝、文件控件约束收窄、数组文件语义拒绝、动态文件字段与本次附件绑定、幂等重放固定原员工版本 Schema、前置请求体限流与重复长度头、9 MiB/25 MiB 上传到物化、未绑定文件补偿/TTL 节流、Run 幂等与任务意图换键、SDK 硬超时/有界 tombstone 退休、Worker 首次物化异常/取消回收和 CORS 幂等头，并保留既有 Saga phase/lease/CAS/heartbeat、取消与提交失败回归 |
 | C04 真实依赖专项 | `bash infra/platform/test-c04-artifacts.sh` 先执行 46 项 C04 单元/契约/迁移门禁并按条件跳过 1 项无显式凭据的真实 COS 测试，再通过 1 项真实 Docker Sandbox 25 MiB 边界测试，然后以随机端口启动 PostgreSQL、Redis、MinIO、LiteLLM Stub、API、Dispatcher、Worker、Sandbox Controller/Janitor 和 Web。正式无头 Playwright 3 项通过；附件场景在上传请求被延迟时同步双击并断言仅 1 次上传、1 个 Run，随后真实 Agent 在实际 Sandbox 读取附件、发布产物并完成预览、下载、刷新、定位和删除。真实 PostgreSQL Saga 并发 2 项通过；随机 profile 容器、网络、Volume 均为 0，未触碰运行中的 `agent-platform-dev` 12 个服务 |
 | Ruff | 通过 |
 | Mypy | 200 个源码文件通过（C09 合入后） |
-| 前端 Vitest | C11 合入后 53 个测试文件、262 项测试通过 |
+| 前端 Vitest | C15 合入后 55 个测试文件、273 项测试通过 |
 | 前端 Lint | 通过 |
 | 前端 Typecheck | 通过 |
 | 前端 Build | 通过 |
@@ -610,7 +615,8 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C10 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；双复审 PASS；验证证据与登记的观察项见第 4 节 C10 完成记录（后端全量 1324、前端 230、隔离栈 Playwright 26、runtime E2E 9，均含记忆用例） |
 | C13 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；双复审（首轮质量复审 FAIL→集中修复 fail-closed/真实 PG 并发门禁/守卫→复跑 PASS）；修复 worker 审计 HMAC 生产缺口；验证见第 4 节 C13 完成记录（后端全量 1399、前端 242、真实 PG 并发 3/3、审批 runtime E2E 3 + 合并交叉 5） |
 | C11 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；零侵入硬门禁通过；双复审两轮（首轮质量 FAIL 四项 + 二轮质量抓修复自引入占位注入→均修复复跑 PASS）；验证见第 4 节 C11 完成记录（后端全量 1536、前端 262、真实栈 workflow E2E 2/2 含人工审批经审批中心闭环） |
-| C09、C12、C15-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
+| C15 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；三轮双复审（M1 时序枚举来回两轮修至端点限流+诚实降级、L2 真实 PG 无半状态门禁）均 PASS；验证见第 4 节 C15 完成记录（后端全量 1596、前端 273、真实 PG 门禁、members/account Playwright 7/7） |
+| C09、C12、C16-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
 
 C05 补充质量验证：代码复审发现会话失败投影除准备失败外，还需要显式覆盖续租失败和孤儿运行恢复失败；进一步复审发现会话投影与 Run 状态、事件、command、ownership/approval 收尾共处同一事务，若 `conversation_messages` 序号并发冲突或投影异常会拖垮核心运行收尾。已补充 RED 用例 `test_worker_completion_survives_conversation_projection_failure` 与 `test_recovered_snapshot_survives_conversation_projection_failure`，修复后投影改为核心事务提交后的独立安全事务，唯一约束冲突最多重试 3 次，最终失败只记录受控日志，不影响 Run 结果。已通过 `cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged tests/integration/queue/test_run_worker.py::test_renewal_failure_marks_running_run_failed_and_releases_environment tests/integration/queue/test_run_worker.py::test_started_tool_without_advanced_checkpoint_fails_uncertain_without_replay -q`（3 passed）、投影异常降级组（5 passed），并通过包含会话契约、迁移、正常输出、超长输出、三条失败投影和五条投影异常降级的综合后端目标回归（21 passed），确保三条直接失败路径都会写入 `conversation_messages` 的 error 消息，且投影失败不泄露底层异常细节、不阻断核心收尾。
 
