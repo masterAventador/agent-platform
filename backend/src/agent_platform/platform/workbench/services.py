@@ -29,4 +29,5 @@ class WorkbenchService:
             tenant_id=tenant_id,
             include_draft_and_private_employees=can_manage_employees,
             run_created_by=None if can_manage_runs else user_id,
+            approvals_visible_to=None if can_manage_runs else user_id,
         )

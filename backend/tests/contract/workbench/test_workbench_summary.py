@@ -160,6 +160,7 @@ async def test_owner_workbench_summary_aggregates_all_real_employee_and_run_stat
             "failed": 1,
             "cancelled": 1,
         },
+        "pending_approvals": 0,
     }
 
 
@@ -251,6 +252,7 @@ async def test_member_workbench_summary_matches_existing_resource_visibility_rul
             "failed": 0,
             "cancelled": 0,
         },
+        "pending_approvals": 0,
     }
 
 
@@ -267,6 +269,7 @@ def _valid_summary_payload() -> dict[str, Any]:
             "failed": 0,
             "cancelled": 0,
         },
+        "pending_approvals": 0,
     }
 
 
@@ -306,3 +309,75 @@ def test_workbench_response_rejects_string_counts_instead_of_coercing_them() -> 
 def test_workbench_response_rejects_unknown_fields(payload: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         WorkbenchSummaryResponse.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_workbench_summary_counts_pending_approvals_by_visibility(
+    workbench_api: tuple[FastAPI, async_sessionmaker[AsyncSession], AsyncClient],
+) -> None:
+    """管理员看到全部待审批；member 只看到指派给自己/自己发起的。"""
+
+    from datetime import timedelta
+
+    from agent_platform.infrastructure.database.repositories.approvals import (
+        SqlAlchemyApprovalRepository,
+    )
+    from agent_platform.platform.approvals.entities import Approval, ApprovalSource
+    from agent_platform.platform.runs.entities import Run
+
+    app, session_factory, owner_client = workbench_api
+    owner = await _register_and_login(owner_client, "approval-owner@example.com")
+    tenant_id = UUID(owner["workspaces"][0]["id"])
+    headers = {"X-Tenant-ID": str(tenant_id)}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as member_client:
+        member = await _register_and_login(member_client, "approval-member@example.com")
+        member_id = UUID(member["id"])
+        async with session_factory() as session:
+            session.add(
+                TenantMembershipRecord(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=member_id,
+                    role="member",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            run = Run.create(
+                tenant_id=tenant_id,
+                employee_id=uuid4(),
+                employee_version=1,
+                created_by=UUID(owner["id"]),
+                input_data={},
+            ).transition_to(RunStatus.RUNNING).transition_to(RunStatus.WAITING_FOR_APPROVAL)
+            await SqlAlchemyRunRepository(session).add(run)
+            repository = SqlAlchemyApprovalRepository(session)
+            for assignee in (None, member_id):
+                await repository.add_idempotent(
+                    Approval.create(
+                        tenant_id=tenant_id,
+                        source=ApprovalSource.TOOL_RISK,
+                        approval_type="tool.invocation",
+                        risk_level="external",
+                        requested_by=UUID(owner["id"]),
+                        request_key=f"tool:{run.id}:{uuid4()}",
+                        context={},
+                        run_id=run.id,
+                        invocation_id=uuid4(),
+                        assignee_id=assignee,
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    )
+                )
+            await session.commit()
+
+        owner_summary = await owner_client.get("/api/v1/workbench/summary", headers=headers)
+        assert owner_summary.status_code == 200
+        assert owner_summary.json()["pending_approvals"] == 2
+
+        member_summary = await member_client.get(
+            "/api/v1/workbench/summary", headers=headers
+        )
+        assert member_summary.status_code == 200
+        assert member_summary.json()["pending_approvals"] == 1

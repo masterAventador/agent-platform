@@ -62,6 +62,11 @@ const ConversationDetailPage = lazy(() =>
     default: module.ConversationDetailPage,
   })),
 )
+const MemoriesPage = lazy(() =>
+  import('../features/memories/pages/MemoriesPage').then((module) => ({
+    default: module.MemoriesPage,
+  })),
+)
 const RunDetailPage = lazy(() =>
   import('../features/runs/pages/RunDetailPage').then((module) => ({
     default: module.RunDetailPage,
@@ -90,6 +95,11 @@ const SkillDetailPage = lazy(() =>
 const ToolsPage = lazy(() =>
   import('../features/tools/pages/ToolsPage').then((module) => ({
     default: module.ToolsPage,
+  })),
+)
+const ApprovalCenterPage = lazy(() =>
+  import('../features/approvals/pages/ApprovalCenterPage').then((module) => ({
+    default: module.ApprovalCenterPage,
   })),
 )
 const DeadLettersPage = lazy(() =>
@@ -260,6 +270,8 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             <Link to="/employees">数字员工</Link>
             {capabilities.canExecuteRuns && <Link to="/runs">任务中心</Link>}
             {capabilities.canExecuteRuns && <Link to="/conversations">会话中心</Link>}
+            {capabilities.canExecuteRuns && <Link to="/approvals">审批中心</Link>}
+            {capabilities.canExecuteRuns && <Link to="/memories">记忆中心</Link>}
             <Link to="/knowledge-bases">知识库</Link>
             <Link to="/skills">Skill 中心</Link>
             {capabilities.canManageTools && <Link to="/tools">工具与 MCP</Link>}
@@ -365,6 +377,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
             )}
           />
           <Route
+            path="/memories"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.runsExecute}
+                title="无权访问记忆中心"
+              >
+                <MemoriesPage />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
             path="/conversations"
             element={(
               <WorkspaceCapabilityGate
@@ -388,6 +412,18 @@ function AuthenticatedPlatformShell({ user }: { user: CurrentUser }) {
                   currentUserId={user.id}
                   canManageRuns={capabilities.canManageRuns}
                 />
+              </WorkspaceCapabilityGate>
+            )}
+          />
+          <Route
+            path="/approvals"
+            element={(
+              <WorkspaceCapabilityGate
+                workspace={activeWorkspace}
+                permission={workspacePermissions.runsExecute}
+                title="无权访问审批中心"
+              >
+                <ApprovalCenterPage currentUserId={user.id} />
               </WorkspaceCapabilityGate>
             )}
           />

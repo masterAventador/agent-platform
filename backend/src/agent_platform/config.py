@@ -62,6 +62,10 @@ class AppSettings(BaseSettings):
     # 审计哈希链 HMAC 密钥：只经环境变量注入，绝不落数据库、绝不进日志。
     audit_hmac_key: SecretStr = SecretStr("")
     audit_retention_days: int = Field(default=180, ge=1, le=3_650)
+    # C13 审批中心：pending 审批的超时时长与过期清扫（配置驱动）
+    approval_pending_timeout_seconds: int = Field(default=86_400, ge=60, le=2_592_000)
+    approval_expiry_sweep_interval_seconds: int = Field(default=60, ge=5, le=86_400)
+    approval_expiry_sweep_batch_limit: int = Field(default=500, ge=1, le=10_000)
     audit_retention_sweep_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
     audit_retention_sweep_batch_limit: int = Field(default=1_000, ge=1, le=10_000)
     cos_region: str | None = None

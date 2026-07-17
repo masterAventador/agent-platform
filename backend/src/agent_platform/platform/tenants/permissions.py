@@ -42,3 +42,16 @@ def permissions_for_role(role: TenantRole) -> frozenset[TenantPermission]:
 
 def role_has_permission(*, role: TenantRole, permission: TenantPermission) -> bool:
     return permission in permissions_for_role(role)
+
+
+_ROLE_ORDER: dict[TenantRole, int] = {
+    TenantRole.MEMBER: 0,
+    TenantRole.ADMIN: 1,
+    TenantRole.OWNER: 2,
+}
+
+
+def role_at_least(*, role: TenantRole, minimum: TenantRole) -> bool:
+    """角色是否满足最低角色要求（owner > admin > member）。"""
+
+    return _ROLE_ORDER[role] >= _ROLE_ORDER[minimum]

@@ -24,3 +24,4 @@ class RunCounts:
 class WorkbenchSummary:
     employees: EmployeeCounts
     runs: RunCounts
+    pending_approvals: int = 0

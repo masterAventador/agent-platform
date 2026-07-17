@@ -24,6 +24,13 @@ from agent_platform.infrastructure.database.repositories.artifacts import (
 from agent_platform.infrastructure.database.repositories.knowledge import (
     SqlAlchemyKnowledgeBaseRepository,
 )
+from agent_platform.infrastructure.database.repositories.memories import (
+    SqlAlchemyMemoryRepository,
+)
+from agent_platform.infrastructure.database.repositories.memory_extraction import (
+    memory_capability_enabled,
+    record_controlled_memory,
+)
 from agent_platform.infrastructure.database.repositories.runs import (
     EventSequenceConflict,
     SqlAlchemyRunCommandRepository,
@@ -58,6 +65,7 @@ from agent_platform.platform.knowledge.retrieval import (
     KnowledgeRetrievalConfig,
     validate_knowledge_retrieval_config,
 )
+from agent_platform.platform.memory.entities import Memory, MemoryScope, MemorySource
 from agent_platform.platform.models import (
     DEFAULT_MODEL_ALIASES,
     GatewayModelReference,
@@ -204,6 +212,30 @@ class RuntimeKnowledgeContext:
         return TypeAdapter(dict[str, JsonValue]).validate_python(payload)
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryRuntimeContext:
+    """按权限召回的长期记忆快照。
+
+    只作为数据经 ``input_data["memory_context"]`` 注入员工上下文，
+    绝不拼接为系统指令级文本（记忆是数据不是指令，防提示注入放大）。
+    """
+
+    memories: tuple[Memory, ...]
+
+    def as_input_payload(self) -> dict[str, JsonValue]:
+        payload = {
+            "memories": [
+                {
+                    "scope": memory.scope.value,
+                    "content": memory.content,
+                    "updated_at": memory.updated_at.isoformat(),
+                }
+                for memory in self.memories
+            ]
+        }
+        return TypeAdapter(dict[str, JsonValue]).validate_python(payload)
+
+
 def _parse_knowledge_retrieval(value: object) -> KnowledgeRetrievalConfig:
     if value is None:
         return KnowledgeRetrievalConfig()
@@ -257,6 +289,7 @@ class PublishedRuntimeCapabilities:
     knowledge_retrieval: KnowledgeRetrievalConfig
     workflow_id: UUID | None
     workflow_version: int | None
+    memory_enabled: bool = False
 
     @classmethod
     def from_definition(
@@ -304,6 +337,7 @@ class PublishedRuntimeCapabilities:
                 ),
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
+                memory_enabled=memory_capability_enabled(definition),
             )
         except UntrustedRuntimeDefinition:
             raise
@@ -437,6 +471,7 @@ class PreparedRuntimeResult:
     sandbox_manager: SandboxManager
     sandbox_ttl: timedelta
     knowledge_context: RuntimeKnowledgeContext | None = None
+    memory_context: MemoryRuntimeContext | None = None
     _closed: bool = field(default=False, init=False)
 
     async def close(self) -> None:
@@ -517,6 +552,10 @@ class ComposedRuntimeResolver:
             run=run,
             capabilities=capabilities,
         )
+        memory_context = await self._prepare_memory_context(
+            run=run,
+            capabilities=capabilities,
+        )
         scope = SandboxScope(
             run_id=run.id,
             tenant_id=run.tenant_id,
@@ -533,6 +572,7 @@ class ComposedRuntimeResolver:
             capabilities=capabilities,
             model=model,
             knowledge_context=knowledge_context,
+            memory_context=memory_context,
             scope=scope,
             environment=environment,
             delete_on_error=True,
@@ -548,6 +588,10 @@ class ComposedRuntimeResolver:
         capabilities = PublishedRuntimeCapabilities.from_definition(definition)
         model = self._model_resolver.resolve(capabilities.model)
         knowledge_context = await self._prepare_knowledge_context(
+            run=run,
+            capabilities=capabilities,
+        )
+        memory_context = await self._prepare_memory_context(
             run=run,
             capabilities=capabilities,
         )
@@ -567,6 +611,7 @@ class ComposedRuntimeResolver:
             capabilities=capabilities,
             model=model,
             knowledge_context=knowledge_context,
+            memory_context=memory_context,
             scope=scope,
             environment=environment,
             delete_on_error=False,
@@ -630,6 +675,77 @@ class ComposedRuntimeResolver:
 
         return RuntimeKnowledgeContext(citations=tuple(citations))
 
+    async def _prepare_memory_context(
+        self,
+        *,
+        run: Run,
+        capabilities: PublishedRuntimeCapabilities,
+    ) -> MemoryRuntimeContext | None:
+        """员工开启记忆能力时按权限召回长期记忆（禁用后不读）。
+
+        可召回命名空间 = 企业级 + 当前员工 + 发起用户 + 当前会话（如有），
+        active、未过期（读取时判定）、按最近性截断。
+        """
+
+        if not capabilities.memory_enabled:
+            return None
+        async with self._session_factory() as session:
+            memories = await SqlAlchemyMemoryRepository(session).search_for_runtime(
+                tenant_id=run.tenant_id,
+                user_id=run.created_by,
+                employee_id=run.employee_id,
+                conversation_id=run.conversation_id,
+            )
+        return MemoryRuntimeContext(memories=tuple(memories))
+
+    def _create_save_memory_tool(self, run: Run) -> BaseTool:
+        """运行中写入新记忆的受控工具（公开 Tool 扩展点，零侵入）。
+
+        模型输出不可信：工具只允许写入发起用户与当前会话命名空间，
+        企业/员工级命名空间必须经带 RBAC 的平台 API 手工维护。
+        """
+
+        async def save_memory(content: str, scope: str = "user") -> str:
+            """Persist a long-term memory for the requesting user.
+
+            scope: "user" (default) or "conversation" (only inside a conversation run).
+            """
+
+            if scope == "conversation":
+                if run.conversation_id is None:
+                    return "memory rejected: this run does not belong to a conversation"
+                memory_scope = MemoryScope.CONVERSATION
+                scope_ref = run.conversation_id
+            elif scope == "user":
+                memory_scope = MemoryScope.USER
+                scope_ref = run.created_by
+            else:
+                return "memory rejected: scope must be 'user' or 'conversation'"
+            async with self._session_factory() as session:
+                stored = await record_controlled_memory(
+                    session,
+                    tenant_id=run.tenant_id,
+                    scope=memory_scope,
+                    scope_ref=scope_ref,
+                    content=content,
+                    source=MemorySource.RUN,
+                    source_ref=str(run.id),
+                    created_by=run.created_by,
+                )
+                if stored is None:
+                    return "memory rejected: content is sensitive data"
+                await session.commit()
+            return "memory saved"
+
+        return StructuredTool.from_function(
+            coroutine=save_memory,
+            name="save_memory",
+            description=(
+                "Persist a concise long-term memory (user preference or confirmed "
+                "fact) so future tasks can recall it."
+            ),
+        )
+
     async def _compose(
         self,
         *,
@@ -638,6 +754,7 @@ class ComposedRuntimeResolver:
         capabilities: PublishedRuntimeCapabilities,
         model: ResolvedModel,
         knowledge_context: RuntimeKnowledgeContext | None,
+        memory_context: MemoryRuntimeContext | None,
         scope: SandboxScope,
         environment: RunExecutionEnvironment,
         delete_on_error: bool,
@@ -713,6 +830,8 @@ class ComposedRuntimeResolver:
                 ),
             )
             tools = [gateway_adapter.adapt(metadata) for metadata in tool_metadata]
+            if capabilities.memory_enabled:
+                tools.append(self._create_save_memory_tool(run))
             artifact_storage = self._artifact_storage
             if artifact_storage is not None:
 
@@ -908,6 +1027,7 @@ class ComposedRuntimeResolver:
             sandbox_manager=self._sandbox_manager,
             sandbox_ttl=self._sandbox_ttl,
             knowledge_context=knowledge_context,
+            memory_context=memory_context,
         )
 
     async def aclose(self) -> None:

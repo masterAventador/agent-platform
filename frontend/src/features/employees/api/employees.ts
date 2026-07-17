@@ -10,12 +10,14 @@ export interface EmployeeCapabilities {
   conversation: boolean
   scheduled_tasks: boolean
   file_upload: boolean
+  memory?: boolean
 }
 
 export interface EmployeeWriteCapabilities {
   conversation: boolean
   scheduled_tasks: false
   file_upload: boolean
+  memory: boolean
 }
 
 export interface GatewayModelReference {

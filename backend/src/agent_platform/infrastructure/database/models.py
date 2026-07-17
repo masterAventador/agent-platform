@@ -1,4 +1,5 @@
 from agent_platform.infrastructure.database.base import Base
+from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
     ArtifactStorageOperationRecord,
@@ -27,6 +28,7 @@ from agent_platform.infrastructure.database.repositories.entitlements import (
     CapabilityEntitlementRecord,
 )
 from agent_platform.infrastructure.database.repositories.knowledge import KnowledgeBaseRecord
+from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.model_gateway import (
     ModelGatewayProvisioningCommandRecord,
     TenantModelGatewayPolicyRecord,
@@ -65,6 +67,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     RuntimeOwnershipRecord,
     RunDeadLetterRecord,
     KnowledgeBaseRecord,
+    MemoryRecord,
     SkillRecord,
     SkillVersionRecord,
     McpServerRecord,
@@ -80,6 +83,7 @@ ALL_DATABASE_MODELS: tuple[type[Base], ...] = (
     ArtifactRecord,
     ArtifactStorageOperationRecord,
     CapabilityEntitlementRecord,
+    ApprovalRecord,
 )
 
 

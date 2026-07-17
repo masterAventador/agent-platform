@@ -5,8 +5,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "20260716_0029"
-down_revision: str | None = "20260716_0028"
+revision: str = "20260716_0031"
+down_revision: str | None = "20260716_0030"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

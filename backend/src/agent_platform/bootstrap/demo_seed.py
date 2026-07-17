@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from agent_platform.config import AppSettings
 from agent_platform.infrastructure.database.bootstrap import initialize_database_metadata
+from agent_platform.infrastructure.database.repositories.approvals import ApprovalRecord
 from agent_platform.infrastructure.database.repositories.artifacts import (
     ArtifactRecord,
     FileRecord,
@@ -30,6 +31,7 @@ from agent_platform.infrastructure.database.repositories.employees import (
 from agent_platform.infrastructure.database.repositories.entitlements import (
     CapabilityEntitlementRecord,
 )
+from agent_platform.infrastructure.database.repositories.memories import MemoryRecord
 from agent_platform.infrastructure.database.repositories.runs import RunEventRecord, RunRecord
 from agent_platform.infrastructure.database.repositories.tenants import (
     TenantMembershipRecord,
@@ -83,6 +85,12 @@ DEMO_ATTACHMENT_ID = uuid5(_DEMO_NAMESPACE, "task-attachment")
 DEMO_ARTIFACT_ID = uuid5(_DEMO_NAMESPACE, "artifact")
 DEMO_SOCIAL_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "social-operations-entitlement")
 DEMO_VIDEO_ENTITLEMENT_ID = uuid5(_DEMO_NAMESPACE, "video-studio-entitlement")
+DEMO_PENDING_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "pending-approval")
+DEMO_APPROVED_APPROVAL_ID = uuid5(_DEMO_NAMESPACE, "approved-approval")
+DEMO_APPROVED_APPROVAL_INVOCATION_ID = uuid5(_DEMO_NAMESPACE, "approved-approval-invocation")
+DEMO_TENANT_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "tenant-memory")
+DEMO_USER_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "user-memory")
+DEMO_EMPLOYEE_MEMORY_ID = uuid5(_DEMO_NAMESPACE, "employee-memory")
 
 DEMO_FILE_CONTENT = "Seed 输入：请整理企业级 AI Agent 平台演示。\n".encode()
 DEMO_ARTIFACT_CONTENT = "Seed 产物：历史任务已完成，未调用真实模型。\n".encode()
@@ -119,7 +127,8 @@ class DemoSeedSummary:
 
 
 type DemoRecord = (
-    UserRecord
+    ApprovalRecord
+    | UserRecord
     | CapabilityEntitlementRecord
     | TenantRecord
     | TenantMembershipRecord
@@ -134,6 +143,7 @@ type DemoRecord = (
     | FileRecord
     | TaskAttachmentRecord
     | ArtifactRecord
+    | MemoryRecord
 )
 
 
@@ -282,6 +292,7 @@ def _demo_records(
             "conversation": True,
             "scheduled_tasks": False,
             "file_upload": True,
+            "memory": True,
         },
         "skill_ids": [],
         "tool_ids": [],
@@ -409,6 +420,7 @@ def _demo_records(
                     "conversation": True,
                     "scheduled_tasks": False,
                     "file_upload": True,
+                    "memory": True,
                 },
                 skill_ids=[],
                 tool_ids=[],
@@ -506,7 +518,9 @@ def _demo_records(
             ),
         ),
         *_demo_run_records(),
+        *_demo_approval_records(),
         *_demo_artifact_records(),
+        *_demo_memory_records(),
         (
             McpServerRecord(
                 id=DEMO_MCP_SERVER_ID,
@@ -629,6 +643,80 @@ def _demo_records(
     return records
 
 
+def _demo_memory_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    """代表性长期记忆演示数据：企业/用户/员工三级命名空间各一条，幂等收编。"""
+
+    memory_fields = (
+        "tenant_id",
+        "scope",
+        "scope_ref",
+        "key",
+        "content",
+        "source",
+        "source_ref",
+        "confidence",
+        "status",
+        "expires_at",
+        "created_by",
+    )
+
+    def record(
+        memory_id: UUID,
+        *,
+        scope: str,
+        scope_ref: UUID,
+        content: str,
+        source: str,
+        source_ref: str | None,
+    ) -> tuple[DemoRecord, tuple[str, ...]]:
+        return (
+            MemoryRecord(
+                id=memory_id,
+                tenant_id=DEMO_TENANT_ID,
+                scope=scope,
+                scope_ref=scope_ref,
+                key=sha256(content.encode("utf-8")).hexdigest(),
+                content=content,
+                source=source,
+                source_ref=source_ref,
+                confidence=1.0,
+                status="active",
+                expires_at=None,
+                created_by=DEMO_USER_ID,
+                created_at=_DEMO_CREATED_AT,
+                updated_at=_DEMO_CREATED_AT,
+            ),
+            memory_fields,
+        )
+
+    return [
+        record(
+            DEMO_TENANT_MEMORY_ID,
+            scope="tenant",
+            scope_ref=DEMO_TENANT_ID,
+            content="演示工作区统一使用北京时间（UTC+8）安排任务与汇报。",
+            source="manual",
+            source_ref=None,
+        ),
+        record(
+            DEMO_USER_MEMORY_ID,
+            scope="user",
+            scope_ref=DEMO_USER_ID,
+            content="演示账号偏好：邮件与报告使用中文，署名「演示用户」。",
+            source="run",
+            source_ref=str(DEMO_COMPLETED_RUN_ID),
+        ),
+        record(
+            DEMO_EMPLOYEE_MEMORY_ID,
+            scope="employee",
+            scope_ref=DEMO_EMPLOYEE_ID,
+            content="演示研究助理沉淀：行业周报固定包含竞品动态与政策变化两节。",
+            source="manual",
+            source_ref=None,
+        ),
+    ]
+
+
 def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
     run_fields = (
         "tenant_id",
@@ -738,6 +826,103 @@ def _demo_run_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
                     event_fields,
                 )
             )
+    return records
+
+
+def _demo_approval_records() -> list[tuple[DemoRecord, tuple[str, ...]]]:
+    """C13 审批中心验收数据：一条待办 pending 审批 + 一条已批准历史。
+
+    幂等：全部使用稳定 uuid5 标识；重复执行只补齐/更新，不制造重复记录。
+    说明：pending 演示记录不绑定运行中的 run——Seed 的非终态 run 会被 Worker
+    恢复扫描判定为孤儿并置失败，从而毁掉演示数据；绑定终态 run 的历史记录
+    则安全保留（恢复扫描只看非终态 run）。
+    """
+
+    approval_fields = (
+        "tenant_id",
+        "source",
+        "approval_type",
+        "risk_level",
+        "requested_by",
+        "request_key",
+        "context",
+        "required_role",
+        "status",
+        "revision",
+        "run_id",
+        "invocation_id",
+        "employee_id",
+        "assignee_id",
+        "expires_at",
+        "decided_by",
+        "decision_reason",
+        "decided_at",
+    )
+    demo_expires_at = datetime(2027, 1, 1, 8, 0, tzinfo=UTC)
+    records: list[tuple[DemoRecord, tuple[str, ...]]] = [
+        (
+            ApprovalRecord(
+                id=DEMO_PENDING_APPROVAL_ID,
+                tenant_id=DEMO_TENANT_ID,
+                source="tool_risk",
+                approval_type="tool.invocation",
+                risk_level=ToolRiskLevel.EXTERNAL.value,
+                requested_by=DEMO_MEMBER_USER_ID,
+                request_key="demo:pending-approval",
+                context={
+                    "tool_name": "search_demo_documents",
+                    "arguments": {"query": "企业演示资料"},
+                    "reason": "外部检索工具需要人工批准（演示数据，可直接批准或拒绝）",
+                },
+                required_role=TenantRole.ADMIN.value,
+                status="pending",
+                revision=1,
+                created_at=_DEMO_STARTED_AT,
+                updated_at=_DEMO_STARTED_AT,
+                run_id=None,
+                invocation_id=None,
+                employee_id=DEMO_EMPLOYEE_ID,
+                assignee_id=None,
+                expires_at=demo_expires_at,
+                decided_by=None,
+                decision_reason=None,
+                decided_at=None,
+            ),
+            approval_fields,
+        ),
+        (
+            ApprovalRecord(
+                id=DEMO_APPROVED_APPROVAL_ID,
+                tenant_id=DEMO_TENANT_ID,
+                source="tool_risk",
+                approval_type="tool.invocation",
+                risk_level=ToolRiskLevel.EXTERNAL.value,
+                requested_by=DEMO_MEMBER_USER_ID,
+                request_key=(
+                    f"tool:{DEMO_COMPLETED_RUN_ID}:"
+                    f"{DEMO_APPROVED_APPROVAL_INVOCATION_ID}"
+                ),
+                context={
+                    "tool_name": "search_demo_documents",
+                    "arguments": {"query": "历史任务资料"},
+                },
+                required_role=TenantRole.ADMIN.value,
+                status="approved",
+                revision=2,
+                created_at=_DEMO_STARTED_AT,
+                updated_at=_DEMO_FINISHED_AT,
+                run_id=DEMO_COMPLETED_RUN_ID,
+                invocation_id=DEMO_APPROVED_APPROVAL_INVOCATION_ID,
+                employee_id=DEMO_EMPLOYEE_ID,
+                assignee_id=None,
+                expires_at=demo_expires_at,
+                decided_by=DEMO_ADMIN_USER_ID,
+                decision_reason="演示：允许调用外部检索工具",
+                decided_at=_DEMO_FINISHED_AT,
+            ),
+            approval_fields,
+        ),
+    ]
     return records
 
 

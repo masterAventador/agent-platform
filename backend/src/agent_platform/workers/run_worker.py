@@ -12,6 +12,10 @@ from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agent_platform.infrastructure.database.repositories.approvals import (
+    settle_run_approvals,
+    sync_run_approvals,
+)
 from agent_platform.infrastructure.database.repositories.artifacts import (
     SqlAlchemyFileRepository,
 )
@@ -29,6 +33,9 @@ from agent_platform.infrastructure.database.repositories.conversations import (
 from agent_platform.infrastructure.database.repositories.employees import (
     SqlAlchemyEmployeeRepository,
     SqlAlchemyEmployeeVersionRepository,
+)
+from agent_platform.infrastructure.database.repositories.memory_extraction import (
+    extract_run_memories,
 )
 from agent_platform.infrastructure.database.repositories.runs import (
     SqlAlchemyRunCommandRepository,
@@ -146,6 +153,7 @@ class RunWorker:
         cancellation_poll_initial_seconds: float = 0.25,
         cancellation_poll_max_seconds: float = 2.0,
         dead_letter_service: RunDeadLetterService | None = None,
+        approval_pending_timeout_seconds: float = 86_400.0,
     ) -> None:
         if runtime_lease_duration <= timedelta(0):
             raise ValueError("runtime_lease_duration must be positive")
@@ -162,6 +170,9 @@ class RunWorker:
         self._runtime_lease_duration = runtime_lease_duration
         self._cancellation_poll_initial_seconds = cancellation_poll_initial_seconds
         self._cancellation_poll_max_seconds = cancellation_poll_max_seconds
+        if approval_pending_timeout_seconds <= 0:
+            raise ValueError("approval_pending_timeout_seconds must be positive")
+        self._approval_pending_timeout = timedelta(seconds=approval_pending_timeout_seconds)
         self._dead_letters = dead_letter_service or RunDeadLetterService(
             session_factory=session_factory
         )
@@ -606,6 +617,19 @@ class RunWorker:
             )
             events = SqlAlchemyRunEventRepository(session)
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await sync_run_approvals(
+                session,
+                run=current,
+                history=history,
+                pending_timeout=self._approval_pending_timeout,
+            )
+            if self._is_terminal(state.status):
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason=f"run_{state.status.value}",
+                )
             conversation_projection = (current, history)
             if current.status != state.status:
                 if current.status in {
@@ -629,6 +653,10 @@ class RunWorker:
             await session.commit()
         if conversation_projection is not None:
             await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
+            await self._extract_run_memories_safely(
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
@@ -855,6 +883,12 @@ class RunWorker:
             )
             await events.append(failed_event)
             conversation_projection = (run, [failed_event])
+            await settle_run_approvals(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                reason="run_failed",
+            )
             await SqlAlchemyRunCommandRepository(session).mark_processed(message_command_id)
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
                 run_id=run.id,
@@ -1073,6 +1107,12 @@ class RunWorker:
                     run_id=run.id,
                     approval_ids={settle_approval_id},
                 )
+            await settle_run_approvals(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                reason="run_failed",
+            )
             ownership = self._ownerships[run.id]
             await SqlAlchemyRuntimeOwnershipRepository(session).release(
                 run_id=run.id,
@@ -1121,6 +1161,12 @@ class RunWorker:
                 history=history,
             )
             await self._append_new_history(events=events, run_id=run.id, history=history)
+            await sync_run_approvals(
+                session,
+                run=current,
+                history=history,
+                pending_timeout=self._approval_pending_timeout,
+            )
             conversation_projection = (current, history)
             stale_approval_ids = {
                 UUID(value) for value in existing_approvals if value != str(current_approval_id)
@@ -1130,6 +1176,20 @@ class RunWorker:
                     session=session,
                     run_id=run.id,
                     approval_ids=stale_approval_ids,
+                )
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason="superseded",
+                    invocation_ids=stale_approval_ids,
+                )
+            if self._is_terminal(state.status):
+                await settle_run_approvals(
+                    session,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    reason=f"run_{state.status.value}",
                 )
             if current.status != state.status:
                 if current.status in {
@@ -1146,6 +1206,10 @@ class RunWorker:
             await session.commit()
         if conversation_projection is not None:
             await self._append_conversation_messages_for_history_safely(
+                run=conversation_projection[0],
+                history=conversation_projection[1],
+            )
+            await self._extract_run_memories_safely(
                 run=conversation_projection[0],
                 history=conversation_projection[1],
             )
@@ -1260,6 +1324,30 @@ class RunWorker:
                 continue
             await events.append(event.model_copy(update={"sequence": sequence}))
             sequence += 1
+
+    async def _extract_run_memories_safely(
+        self,
+        *,
+        run: Run,
+        history: list[PlatformEvent],
+    ) -> None:
+        """任务完成后的长期记忆受控提取：独立安全事务，失败只记录日志，
+        不阻断已完成的 Run 结算（与会话投影相同的隔离模式）。"""
+
+        try:
+            await extract_run_memories(
+                session_factory=self._session_factory,
+                run=run,
+                history=history,
+            )
+        except Exception as error:
+            logger.error(
+                "memory_extraction_failed",
+                extra={
+                    "run_id": str(run.id),
+                    "error_type": type(error).__name__,
+                },
+            )
 
     async def _append_conversation_messages_for_history_safely(
         self,
@@ -1698,6 +1786,11 @@ class RunWorker:
         knowledge_context = getattr(prepared, "knowledge_context", None)
         if knowledge_context is not None:
             input_data["knowledge_context"] = knowledge_context.as_input_payload()
+        # 记忆是数据不是指令：只进入 input_data，不改写员工定义或系统指令，
+        # 避免记忆内容中的提示注入文本被放大为系统指令级文本。
+        memory_context = getattr(prepared, "memory_context", None)
+        if memory_context is not None:
+            input_data["memory_context"] = memory_context.as_input_payload()
         return RuntimeStartRequest(
             run_id=run.id,
             tenant_id=run.tenant_id,
