@@ -743,7 +743,11 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 >
 > - **3 条红线已收口**（T8，零生产改动，双复审 PASS，见下）。
 > - **余 5 failed + 13 errors 全部归属 [T9] 夹具隔离缺陷，非产品缺陷**。根因已实锤到行：`test_postgres_scheduler_concurrency.py` 的 teardown 清理清单删 `UserRecord`/`TenantRecord`，却**不含 C16 新增的 `tenant_model_gateway_policies`** → 跨文件残留触发 `ForeignKeyViolationError: ... tenant_model_gateway_policies_updated_by_fkey`。两个复审各自用**全新库单跑**验证：scheduling `8 passed`、model_gateway `5 passed`，归因成立。
-> - ⚠️ **「1850 passed」仍不是真全量**：22 skipped 全是外部依赖门禁（Redis 3 / COS 5 / MinIO 2 / Docker sandbox 1 等），**无一条与 PG 相关**——即本轮 PG 门禁确已全部执行，但 Redis / COS / MinIO / RAGFlow 门禁仍未覆盖。**别让 1850 变成下一个盲区。**
+> - ⚠️ **「1850 passed」仍不是真全量**：22 skipped 全是外部依赖门禁（COS / MinIO / Redis / Docker sandbox / RAGFlow），本轮未覆盖。
+>
+> **⛔ 订正（2026-07-17，由 T9 规格复审实测抓出，原文由主代理写于 T8 合并提交）**：此处原写「22 skipped **无一条与 PG 相关**——即本轮 PG 门禁确已全部执行」，**实测不成立**。22 条里有 **4 条是 PG + Redis 双门禁**（`test_real_runs`、`test_dispatcher_process_integration`、`test_real_employee_definitions`、`test_real_auth_dependencies`，skip 原因均为「需要 `TEST_DATABASE_URL` **和** `TEST_REDIS_URL`」）——它们**碰真实 PG，却因缺 Redis 被跳过**。加真实 Redis 后 22 → 9、13 条补跑，恰好解释 1858 → 1871。
+>
+> **这是本节自己警告的「别让数字变成下一个盲区」的同型错误，且是在同一段里犯的**：我一边要求「写全量必须注明采集条件」，一边把「无 PG 相关 skip」当成了「PG 门禁已全跑」。**教训：skip 原因是复合条件时，不能只看其中一个依赖就宣称该依赖的门禁已全部执行。**
 
 **已登记跟踪（非阻断，T8 双复审发现）**：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** docstring 都写着「没有审批记录时返回 False/None，调用方走原有流程」，但调用方自 `b319bc2` 起就是 409 fail-closed，「原有流程」在代码中已死。规格复审用三重论证确认**无 fail-open 旁路**（调用链唯一收敛到 409；approve/reject 的 `approval_id` 恒非 None 故 raw 命令路径不可达；变异实测反证该 raise 是唯一出口），属注释腐烂，单开 docs-only 提交订正。
 
