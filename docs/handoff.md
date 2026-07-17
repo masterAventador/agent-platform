@@ -11,7 +11,7 @@
 
 ## 快照时间：2026-07-17
 
-**main** = `926ea6b`（已推送）｜**迁移单头** `20260716_0037`，下一个可用号 `20260716_0038`
+**main** = `37ac8b5`（已推送，T8 已合入）｜**迁移单头** `20260716_0037`，下一个可用号 `20260716_0038`
 **常驻栈** `agent-platform-dev` 13 服务健康，Demo Seed 已重放｜账号 `demo@example.com` / `agent-platform-demo`｜API 18000、前端 18080、PG 15432、MinIO 19000
 
 ## 🔴 在途：两个后台代理正在跑
@@ -28,33 +28,19 @@ docker ps -a --format "{{.Names}}\t{{.Status}}"
 
 ⚠️ 看到随机名容器（如 `*-mvp-test-<pid>-*`、`t8-pg*`）**先查 `Status` 再动手**——曾差点把某代理刚起 3 秒的验收栈当残留清掉。
 
-### [T8] `task/t8-main-redlines` @ `322ebc1` —— 收 main 上的三条既有红线｜**实现已完、双复审在跑**
-
-三条红线全部收完，**零生产改动**（`backend/src/` 空 diff）——根因同一个：真实 PG / 真实构建门禁被跳过后，旧契约测试没随生产加固更新。完整证据与根因 → **roadmap 第 6 节**，不在这里复述。
-
-**两个复审代理在跑**（各自独立工作树，防串扰）：
-- 规格复审 → `wt/t8`（general-purpose）
-- 质量复审 → `wt/t8-review`（`pr-review-toolkit:code-reviewer`，detached）
-
-给两者的共同要求：审 `git diff cc25cd3..322ebc1` **全分支**；不得采信开发代理汇报；**自己重做变异验证**（删掉 `runs.py` 的 fail-closed → 新门禁必须转红）。核心风险点是**"改测试去迎合生产"把真缺陷洗白**，以及 `.get(k, [])` 类写法造成的空断言。
-
-**规格复审已 PASS**（2026-07-17）：三条红线经二分实测**独立证实均为真回归**（`ee2b624`/`30e64ac`/`b319bc2` 三次有意加固均漏改对应测试）；被删旧断言逐条有严格不弱的替代；两次变异自行重做通过。等质量复审。
-
-**合并后写第 6 节，照这个来（复审的强制建议，别再写错）**：
-- ❌ **绝不能写「当前已知失败：0/无」**——真实 PG 全量仍有 **5 failed + 13 errors**，全部归属 [T9] 夹具缺陷。第 6 节自己刚痛斥过「长期声明『无』与红线共存属台账失真」，清零 = 同一个错误犯第二次。
-- ✅ 诚实写法：`3 条红线已收口；余 5 failed / 13 errors 全部归属 [T9] 夹具隔离缺陷（非产品缺陷，根因：users 清理未覆盖 tenant_model_gateway_policies）`。
-- ✅ **必须注明采集条件**：`TEST_DATABASE_URL=真实 PG → 1850 passed / 22 skipped / 5 failed / 13 errors`。
-- ⚠️ 「全量」措辞要收紧：22 skipped 全是外部依赖门禁（Redis 3 / COS 5 / MinIO 2 / Docker sandbox 1…），**无一条与 PG 相关**（即 PG 门禁本轮确已全跑），但 1850 仍不含 Redis/COS/MinIO——别让它变成下一个盲区。
-
-**其余待办**（合并后单开 docs-only 提交，不夹带）：`runs.py:677-681` 与 `approvals/service.py:199-201` **两处** stale docstring（都写「调用方走原有流程」，但调用方现在是 409 fail-closed；复审三重论证确认**无 fail-open 旁路**，仅注释腐烂）。
-
-**跑完我要做**：质量复审 PASS → 合并（**同一提交带 roadmap 状态改动**）→ 删掉 `wt/t8-review` 工作树。任一 FAIL → 退回实现，**汇总同类根因后集中修**，不许逐条打补丁。
-
 ### [T3] `wt/c12-fe` / `task/c12-frontend` —— C12 阶段二：定时任务前端 + Playwright E2E
 
 后端 8 个端点阶段一已合入 main、无需动后端。范围是完成定义第 5 条 + 第 6 条的用户视角那一半（时区回显自洽含跨 DST、重启后列表与历史连续无重复、同一触发点只有一条执行记录、无 `runs.execute` 看不到入口且他人任务 404）。
 
 **跑完我要做**：双复审 → 合并。注意 **C12 标 ✅ 还差 C16 阶段三的配额接入**（完成定义第 4 条后半句），阶段二合了也不能标完成。
+
+### [T9] `wt/t9` / `task/t9-pg-fixture-isolation` —— PG 集成套件夹具隔离缺陷
+
+根因已定位到行：`test_postgres_scheduler_concurrency.py:100-113` 是**手工维护的删表清单**，漏了 C16 新增的 `tenant_model_gateway_policies` → 删 users 被 FK 挡住 → 残留泄漏到后续文件。`model_gateway` 还有第二份同样的清单。
+
+**要点**：不接受「把表加进清单」的补丁修法——手工清单结构性不可维护。要求做**从 SQLAlchemy metadata 自动推导**的通用清理（注意别误伤 `alembic_version`），让所有 PG 集成测试复用。验收 = 真实 PG 下 `tests/integration` 从 `5 failed / 13 errors` → `0 / 0`，且残留失败必须逐条查明、不许继续归到「隔离问题」。
+
+**跑完我要做**：双复审 → 合并 → **回头订正 roadmap 第 6 节**（那 5 failed / 13 errors 的记录随之更新；仍不许写「0」除非每条都有归零证据）。
 
 ## 接下来的排队
 
@@ -62,7 +48,7 @@ docker ps -a --format "{{.Names}}\t{{.Status}}"
 >
 > 自主不等于降标准——完成定义、双复审、真实边界验收、台账同步一条都不减。真受阻或需要产品取舍时才找用户。
 
-1. **[T9] PG 集成套件隔离缺陷** —— 夹具 teardown `DELETE FROM users` 非 FK 安全，每文件单跑全绿、连跑 FK 连锁失败。**不修它，带真实 PG 的全量就永远淹在噪音里**——而那正是三条红线的藏身处。建议优先于 C16 阶段二。
-2. **[T4] C16 阶段二**（用量/成本，纯观测面）—— **等 T8 合并后再开**：它落点在 `infrastructure/llm/`、`runtime_composition.py`，与 T8 改的 `runtimes/langgraph.py` 紧邻。
+1. **[T4] C16 阶段二**（用量/成本，纯观测面）—— T8 已合入，阻塞解除。**等 T9 或 T3 腾出槽位再开**：它会动 `tests/integration/model_gateway/`，与 T9 正在改的夹具重叠。
+2. **[T5] C16 阶段三**（预算/配额/限流/告警 + fallback + **C12 配额门禁接入**）—— C12 标 ✅ 卡在这里。
 
 再往后的顺序见 roadmap。**Core 并行槽位上限 2 个 🚧 条目**（C12、C16 已占满）；红线修复/复审这类不占槽位，但**实测同时跑 2 个写入代理是舒适上限，3 个开始漏审**。
