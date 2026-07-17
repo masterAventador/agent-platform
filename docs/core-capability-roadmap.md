@@ -79,7 +79,7 @@
 | 审计与可观测性 | 已完成 | 审计协议、HMAC 密钥签名哈希链、脱敏、保留清扫、Trace/Metrics/Logs、告警规则和运维入口已合入主线并通过隔离验收栈完整回归；剩余威胁面（持钥攻击者、整库回滚到历史合法快照需外部锚定）如实声明归 C18 | C14 |
 | 企业与账号管理 | 已完成 | 成员邀请/角色/移除/Owner 转移、改密/邮箱验证/找回密码（限流防枚举）/会话设备管理已合入并通过三轮双复审与真实 PG + Playwright 完成门；OIDC/MFA 保留扩展边界 | C15 |
 | 模型治理、评测、成本与配额 | 部分完成 | 只有共享 Worker Key，无租户模型、预算、质量评测和用量中心 | C16 |
-| Capability/Entitlement | 🧪 待集成（已合入主线，待 B04 集成） | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social 组合矩阵已合入主线；Core+视频组合与 Worker 侧接线待 B04 | C17 |
+| Capability/Entitlement | 已完成 | 能力注册表、企业 Entitlement、三层启用校验与 Core-only/Core+social/Core+视频/Core+both 四组合矩阵均已合入主线（B04 合入后 video-studio 走生产装配、无夹具旁路）；「调度 Worker」与「下载 Sidecar」两条子句在 Core 中无对象，门禁已点名前移至 B08 与 B02/C20 | C17 |
 | 生产凭据与沙箱 | 部分完成 | 本地凭据和 ARM64 开发沙箱不能作为生产多租户方案 | C18 |
 | 协议契约自动化 | 部分完成 | 缺 OpenAPI 快照、TS 生成、事件全量导出和漂移检查 | C19 |
 | 发布、升级与灾备 | 未实现 | 缺签名、公证、自动更新、灰度、备份、恢复、HA 和容灾 | C20 |
@@ -368,7 +368,11 @@
 
 ### C12 定时与预约任务
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-17**
+
+开工说明：前置 C03 已完成。与 C16 并行（互不构成直接依赖，修改边界可隔离）。实现分支 `task/c12-scheduled-tasks`（worktree `wt/c12`）；迁移编号占用 `20260716_0035`（down_revision=`20260716_0034`），与 C16 的 `20260716_0036` 按「先合入者保留编号、后合入者重链到当时单头」处理。C16 引入配额后由 C16 阶段二把配额校验接入本条目的调度入口。
 
 完成定义：
 
@@ -459,7 +463,20 @@
 
 ### C16 模型治理、质量评测、成本与配额
 
-**状态：`⬜ 未开始`**
+**状态：`🚧 进行中`**
+
+**开始日期：2026-07-17**
+
+开工说明：前置 C14 已完成合入。与 C12 并行（互不构成直接依赖，修改边界可隔离）。实现分支 `task/c16-model-governance`（worktree `wt/c16`）；迁移编号占用 `20260716_0036`（down_revision=`20260716_0034`），与 C12 的 `20260716_0035` 按「先合入者保留编号、后合入者重链到当时单头」处理。
+
+**已有基线盘点（2026-07-17 主代理核查，提交 `9074a67`，早于本条目开工）**：租户模型网关的第一纵切已在主线——`tenant_model_gateway_policies` 与 `model_gateway_provisioning_commands`（outbox）两表（迁移 `20260714_0017`）、`platform/model_gateway/` 领域实体与服务（revision 乐观并发）、`infrastructure/database/repositories/model_gateway.py` 仓储（策略与 outbox 命令同事务写入）、`GET/PUT /api/v1/model-gateway/policy`（`models.usage.read` 读、`models.manage` 写）、`infrastructure/llm/admin.py` 的 `LiteLLMAdminClient`（租户聚合、受阻虚拟 Key 签发、Key 查询/阻断/解除/删除、租户 spend 分页，含 826 项单元测试）。**关键缺口：该 Admin 客户端目前只被单元测试引用，无任何生产接线**——没有 Controller 消费 outbox、没有真实 LiteLLM 对账、没有租户 Key 下发到 Worker、没有用量/成本记录、没有预算/配额执行、没有评测、没有前端页面、未接 C14 审计。
+
+按可运行纵切分四个阶段实施，每阶段完成后做一次全分支差异与失败矩阵审查（阶段检查点不得提前标记条目完成）：
+
+1. **阶段一**：Controller 消费 outbox 对账 LiteLLM，推进 `pending → active/disabled/error`；租户虚拟 Key 签发/轮换/撤销；Worker 从应用级共享 Key 升级为可归因、可撤销的租户凭据；
+2. **阶段二**：模型/Token/延迟/错误/费用/任务归属记录；企业预算、用户/员工配额、限流与用量告警；配额校验接入 C12 调度入口；
+3. **阶段三**：固定数据集、回归评测、人工反馈与版本对比；
+4. **阶段四**：模型/用量/成本/预算/评测前端页面；模型配置、凭据、预算和配额变更接入 C14 审计；供应商故障、配额耗尽、fallback 与账单归因验收。
 
 完成定义：
 
@@ -474,9 +491,23 @@
 
 ### C17 Capability Registry、Entitlement 与交付 Profile
 
-**状态：`🧪 待集成`**
+**状态：`✅ 已完成`**
 
 **开始日期：2026-07-16**
+
+**完成日期：2026-07-17**
+
+2026-07-17 收口记录（本任务提交，无新增代码，仅台账与代码事实对齐）：B04 于 2026-07-17 合入 `✅ 已完成`后，本条目原三条待集成项经独立规格复审 + 主代理证据复核后定性如下，八条完成定义已满足或属「无对象」，收口为 `✅ 已完成`。
+
+- **待集成项① video-studio 宿主接线与 Core+视频组合矩阵 —— 已闭合，且确认无夹具旁路**：`bootstrap/capabilities.py` 的 `_BACKEND_ROUTER_FACTORIES` 含 video-studio，`resolve_installed_backend_registrations` 对未知能力/无宿主集成能力装配期 fail-closed；契约夹具 `tests/contract/capabilities/capability_harness.py` 与 Playwright 夹具 `tests/fixtures/video_studio_e2e.py` **均走生产 `create_app`**，全仓 `extra_routers` 临时注入口已彻底删除（主代理 grep 复核零命中），E2E 夹具只覆盖 `app.state` 上的云 Provider（替换外部 COS，非替换门禁）。Core+视频组合矩阵已存在：装配层 `tests/unit/bootstrap/test_capabilities_bootstrap.py` 覆盖 core-only/social/video/both 四组合，HTTP 层 `tests/contract/capabilities/conftest.py` 三个 harness，越权契约 `test_video_studio_route_gating.py` 10 用例（401/未授权 403/无权限 403/撤销后即 403/未安装 404 + 授予 409/Core-only 404）。
+- **待集成项② Worker 侧能力任务处理器 —— 判定为「无对象（vacuous）」，非 fail-open**：主代理独立复核 `grep -rn "worker_handlers" src/ tests/` 全部命中仅为 manifest 字段定义、命名空间校验、两个 manifest 声明（`social.jobs.v1` / `video.jobs.v1`）及其自身单测，**无任何 dispatcher 消费该字段**；`src/agent_platform/workers/` 下 `capabilit|entitlement` 命中全部为数字员工的 `PublishedRuntimeCapabilities` / `memory_capability_enabled`（与 Capability Package 同名不同物）。因此未授权租户无法调度能力 Worker，不是因为有门禁拦截，而是**该执行面在 Core 中根本不存在**，不存在可越权路径、无开口可 fail-open。`evaluate_capability_availability` 已作为 API/Worker 共用判定源导出于 `platform/entitlements/services.py`（位于 `platform/` 而非 `api/`，依赖方向正确、Worker 可导入），但 Worker 侧零调用、零测试——**该门禁要求已点名转写为 B08 的完成门禁**（见 `industry-capability-roadmap.md` B08 条目），不因本条目收口而消失。
+  - **B04 引入的能力后台 Worker 不构成本条违规**：`bootstrap/capabilities.py` 的 `_BACKEND_WORKER_FACTORIES` 注册 `video-media-library-maintenance` 常驻清扫循环（由 API lifespan 启动），**仅经部署层门禁**（能力未安装即不注册、不启动，`test_capabilities_bootstrap.py` 背书）。这是有意取舍且正确：该循环回收的是跨租户存量对象、不由租户触发，撤销授权后仍必须继续清理已产生的对象，否则形成无界存储成本；对其套用 `tenant_entitled` 反而错误。
+  - **主代理裁定不在本条目补「能力 worker 注册必须过 gate」的结构性守卫**：当前不存在任何 job handler 注册机制，补该守卫需先建出零消费方的 dispatcher 协议，属 CLAUDE.md 明令禁止的「为假设性未来需求过早抽象」。该守卫应在 B08 实现 `social.jobs.v1` 时与其一并建立，已写入 B08 完成门禁。
+- **待集成项③ Sidecar 下载与云凭据签发 —— 云凭据已闭合；Sidecar 属「server 侧无对象」，不阻断本条目**：云凭据签发（B04 真实腾讯 CAM/STS）与其余 video 端点同在 router 级 gate 之下，无逐端点逃逸口（`capabilities/video_studio/api.py` 的 `POST /materials/upload-credentials`，未授权连 GET 都 403）；凭据不全时端点 503 fail-closed。Sidecar 侧经主代理复核确认：**平台后端不存在 Sidecar 分发端点**——`SocialOperationsPage.tsx` 的下载地址是用户手填输入框（`<Input aria-label="安全下载地址">`），manifest/signature 亦为粘贴录入，客户端直连任意 URL，安全控制是 Ed25519 验签（`src-tauri/src/sidecar_package.rs`），Rust 侧 `entitlement|capabilities/registry` 零命中。当前该入口仅受前端 registry 门禁保护，按 CLAUDE.md「前端隐藏菜单不能替代后端授权」这不算后端授权，但**没有后端资源可授权**。真实分发链建立时（B02 集成 / C20 发布）该端点必须挂同一 gate，**已点名转写为 B02 与 C20 的完成门禁**。
+- **为何不继续挂 `🧪 待集成`（依赖方向论证）**：B02 与 B08 条目均明确把「Core C17 生产宿主 / Entitlement」列为**自身**解除条件。若 C17 反过来等 B02 的 Sidecar 分发链、等 B08 的 `social.jobs.v1`，即构成循环依赖死锁，并无限期堵死 C18（前置 C14+C17）与 C19（前置 C17）。第 5 节规定的依赖方向是单向的——「业务包依赖的 …Capability/Entitlement… 由 C17 提供；对应 Core 条目未完成时业务条目只能标记待集成」，**无反向条款**。C17 的职责是提供机制并在 Core 自有执行面上强制它，不是等业务包把执行面建出来。
+- **完成定义第 6 条逐子句判定**：调用 API `✅ 满足`；签发云凭据 `✅ 满足`；调度 Worker `⊘ 无对象`（Core 无能力 job handler，门禁前移至 B08）；下载 Sidecar `⊘ 无对象`（平台无分发端点，门禁前移至 B02/C20）。
+- **登记的已知局限（如实声明，非阻断）**：① I2 审计桥接不一致语义——能力服务业务副作用已持久化时审计 flush 失败返回显式 500，客户端重试同一 device_id 得 409，运维依据 500 与 `capability_audit_flush_failed` 日志人工补偿；**与 B04 同类问题（M-1 审计 flush 失败重试重复签发 STS）被列为必须闭合门禁存在标准不对称**，主代理裁定不阻断——B04 的重复副作用带真实外部云调用与成本，本条目仅为幂等性缺失、有显式失败信号、非 fail-open；设备注册幂等化保持 follow-up。② L1 registry 对未授权租户返回裸条目（capability_id + 安装布尔）暴露部署拓扑——前端需据此区分「未授权」与「未安装」语义，MVP 接受。③ L2 单条目畸形导致整表解析失败——fail-closed 优先于可用性，方向正确。④ L4 登录 / `/auth/me` 的能力权限附加为每工作区×每能力逐条查询（N+1，`dependencies/capabilities.py` 双重循环逐条 `repository.get`），当前 2 个能力包可接受；**这是随能力包数量线性劣化的登录热路径，触发阈值定为「安装能力包 ≥4 或 P95 登录延迟劣化」，达阈即改批量查询**，不再以无期限 follow-up 挂账。
+- **验证命令（主代理在 main @ `f5fb483` 实跑复核）**：`cd backend && uv run pytest tests/unit/capabilities tests/unit/platform/entitlements tests/contract/capabilities -q`（423 passed）；`uv run pytest tests/contract/video_studio tests/integration/database/test_migrations.py -q`（29 passed, 1 skipped——真实 PG 条件门禁）；`cd frontend && pnpm exec vitest run src/app --reporter=dot`（6 文件 46 项通过）。迁移 `20260716_0026` 在当前 main 单链上（`down_revision=20260716_0025`，链至单头 `20260716_0034`）；`capabilities` 路由根在能力包路由装配之前注册，属 Core 保留根。组合矩阵 Playwright 未为本次收口重跑——Core+both 已由 `playwright.video-studio.config.ts` 的安装清单 + video E2E 3 项 + capability/social 5 项在 B04 第三轮双复审中实跑覆盖，主代理判定不必为状态对齐重复付出隔离栈成本。
 
 开工说明：前置 C14 已合入主线；经用户批准与 C14 收尾（HMAC 加固）并行。实现分支 `task/c17-entitlements`。迁移编号协调：C14 HMAC 加固占用 `20260716_0025`，本条目使用 `20260716_0026`（暂 down_revision=0024，后合入者负责重链）。video-studio 相关三层校验接线在 B04 分支合入后补齐，本条目先覆盖 Core + social-operations 与 Core-only 组合矩阵。
 
@@ -550,7 +581,8 @@
 - 建立 API、Worker 和基础设施正式部署清单与容量基线；
 - PostgreSQL、MinIO、RAGFlow、LiteLLM 配置具备备份和恢复演练；
 - 建立高可用、健康检查、故障切换、灾备目标和操作手册；
-- Core-only 全量自动化、安装升级、回滚和恢复演练全部通过。
+- Core-only 全量自动化、安装升级、回滚和恢复演练全部通过；
+- **（2026-07-17 由 C17 收口转写而来的强制门禁）平台侧一旦提供 Sidecar / 安装包 / 更新产物的分发端点，该端点必须挂 Core 统一的 `create_capability_gate` 三层校验，未安装/未授权租户不得下载可选能力的 Sidecar。** 门禁来源：C17 完成定义第 6 条「未安装/未授权能力无法…下载 Sidecar」在 C17 收口时属「无对象」（平台无分发端点，下载地址为用户手填、客户端直连），门禁前移由本条目与 B02 共同承接，C17 已不再承接，删除即造成该子句永久失守。
 
 ## 5. Core 与能力包的并行边界
 
@@ -616,7 +648,8 @@ C01 完成并建立质量基线后，以下能力包可以在独立分支/工作
 | C13 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；双复审（首轮质量复审 FAIL→集中修复 fail-closed/真实 PG 并发门禁/守卫→复跑 PASS）；修复 worker 审计 HMAC 生产缺口；验证见第 4 节 C13 完成记录（后端全量 1399、前端 242、真实 PG 并发 3/3、审批 runtime E2E 3 + 合并交叉 5） |
 | C11 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；零侵入硬门禁通过；双复审两轮（首轮质量 FAIL 四项 + 二轮质量抓修复自引入占位注入→均修复复跑 PASS）；验证见第 4 节 C11 完成记录（后端全量 1536、前端 262、真实栈 workflow E2E 2/2 含人工审批经审批中心闭环） |
 | C15 | ✅ 已完成 | 2026-07-17 | 2026-07-17 | 本任务提交（merge 合入） | 完成定义逐条满足；三轮双复审（M1 时序枚举来回两轮修至端点限流+诚实降级、L2 真实 PG 无半状态门禁）均 PASS；验证见第 4 节 C15 完成记录（后端全量 1596、前端 273、真实 PG 门禁、members/account Playwright 7/7） |
-| C09、C12、C16-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
+| C17 | ✅ 已完成 | 2026-07-16 | 2026-07-17 | 本任务提交（收口，无新增代码） | B04 合入后经独立规格复审 + 主代理证据复核收口：待集成项①已闭合（生产装配、无夹具旁路、四组合矩阵）、②③定性为「无对象」且门禁已点名前移至 B08/B02/C20，非 fail-open。完成定义第 6 条逐子句判定与已知局限（I2 标准不对称、L1/L2、L4 触发阈值）见第 4 节 C17 收口记录。验证：capabilities/entitlements 423 passed、video_studio+迁移 29 passed/1 skipped、前端 src/app 46 passed |
+| C09、C12、C16、C18-C20 | 见第 4 节 | — | — | — | 按第 4 节逐项更新 |
 
 C05 补充质量验证：代码复审发现会话失败投影除准备失败外，还需要显式覆盖续租失败和孤儿运行恢复失败；进一步复审发现会话投影与 Run 状态、事件、command、ownership/approval 收尾共处同一事务，若 `conversation_messages` 序号并发冲突或投影异常会拖垮核心运行收尾。已补充 RED 用例 `test_worker_completion_survives_conversation_projection_failure` 与 `test_recovered_snapshot_survives_conversation_projection_failure`，修复后投影改为核心事务提交后的独立安全事务，唯一约束冲突最多重试 3 次，最终失败只记录受控日志，不影响 Run 结果。已通过 `cd backend && uv run pytest tests/integration/queue/test_run_worker.py::test_permanent_preparation_failure_is_persisted_and_acknowledged tests/integration/queue/test_run_worker.py::test_renewal_failure_marks_running_run_failed_and_releases_environment tests/integration/queue/test_run_worker.py::test_started_tool_without_advanced_checkpoint_fails_uncertain_without_replay -q`（3 passed）、投影异常降级组（5 passed），并通过包含会话契约、迁移、正常输出、超长输出、三条失败投影和五条投影异常降级的综合后端目标回归（21 passed），确保三条直接失败路径都会写入 `conversation_messages` 的 error 消息，且投影失败不泄露底层异常细节、不阻断核心收尾。
 
